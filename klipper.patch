@@ -1,0 +1,25 @@
+diff --git klippy/extras/bed_mesh.py klippy/extras/bed_mesh.py
+index bd8f697e3..758f8be04 100644
+--- a/klippy/extras/bed_mesh.py
++++ b/klippy/extras/bed_mesh.py
+@@ -866,7 +866,7 @@ class ProbeManager:
+         pprobe = self.printer.lookup_object("probe", None)
+         if pprobe is not None:
+             probe_name = pprobe.get_status(None).get("name", "")
+-            can_scan = probe_name.startswith("probe_eddy_current")
++            can_scan = "eddy" in probe_name # eddy-ng patched
+         if method == "rapid_scan" and can_scan:
+             self.rapid_scan_helper.perform_rapid_scan(gcmd)
+         else:
+diff --git src/Makefile src/Makefile
+index cfedc56f7..422e0179e 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -20,6 +20,6 @@ src-$(CONFIG_WANT_LIS2DW) += sensor_lis2dw.c
+ src-$(CONFIG_WANT_MPU9250) += sensor_mpu9250.c
+ src-$(CONFIG_WANT_HX71X) += sensor_hx71x.c
+ src-$(CONFIG_WANT_ADS1220) += sensor_ads1220.c
+-src-$(CONFIG_WANT_LDC1612) += sensor_ldc1612.c
++src-$(CONFIG_WANT_LDC1612) += sensor_ldc1612.c sensor_ldc1612_ng.c
+ src-$(CONFIG_WANT_SENSOR_ANGLE) += sensor_angle.c
+ src-$(CONFIG_NEED_SENSOR_BULK) += sensor_bulk.c
