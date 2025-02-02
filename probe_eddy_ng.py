@@ -228,6 +228,8 @@ class ProbeEddyParams:
     y_offset: float = 0.0
     # remove some safety checks, largely for testing/development
     allow_unsafe: bool = False
+    # whether to write the tap plot after each tap
+    write_tap_plot: bool = True
 
     tap_trigger_safe_start_height: float = 1.5
 
@@ -330,6 +332,9 @@ class ProbeEddyParams:
         self.allow_unsafe = config.getchoice(
             "allow_unsafe", bool_choices, default="False"
         )
+        self.write_tap_plot = config.getchoice(
+            "write_tap_plot", bool_choices, default="True"
+        )
         self.x_offset = config.getfloat("x_offset", self.x_offset)
         self.y_offset = config.getfloat("y_offset", self.y_offset)
 
@@ -391,9 +396,14 @@ class ProbeEddyProbeResult:
     def __format__(self, spec):
         if spec == "v":
             return f"{self.value:.3f}"
-        mean_star = "*" if self.USE_MEAN_FOR_VALUE else ""
-        median_star = "*" if not self.USE_MEAN_FOR_VALUE else ""
-        return f"mean{mean_star}={self.mean:.3f}, median{median_star}={self.median:.3f}, range={self.min_value:.3f} to {self.max_value:.3f}, stddev={self.stddev:.3f}"
+        if self.USE_MEAN_FOR_VALUE:
+            value = f"{self.mean:.3f}"
+            extra = f"med={self.median:.3f}"
+        else:
+            value = f"{self.median:.3f}"
+            extra = f"avg={self.mean:.3f}"
+
+        return f"{value} ({extra}, {self.min_value:.3f} to {self.max_value:.3f}, [{self.stddev:.3f}])"
 
 
 @final
@@ -417,6 +427,8 @@ class ProbeEddy:
         self._mcu = self._sensor.get_mcu()
 
         self.params = ProbeEddyParams()
+        # init this to the default from the sensor before loading config
+        self.params.reg_drive_current = self._sensor._drive_current
         self.params.load_from_config(config)
 
         # at what minimum physical height to start homing. It must be above the safe start position,
@@ -671,7 +683,7 @@ class ProbeEddy:
 
     def start_sampler(self, *args, **kwargs) -> ProbeEddySampler:
         if self._sampler:
-            raise self._printer.command_error("EDDYng Already sampling")
+            raise self._printer.command_error("EDDYng: Already sampling! (This shouldn't happen; FIRMWARE_RESTART to fix)")
         self._sampler = ProbeEddySampler(self, *args, **kwargs)
         self._sampler.start()
         return self._sampler
@@ -822,11 +834,17 @@ class ProbeEddy:
                 avg_from_z = np.mean(from_zs)
                 stddev = (np.sum(stddev_sums) / stddev_count) ** 0.5
                 gcmd.respond_info(
-                    "Probe overall avg range: {avg_range:.3f}, avg z deviation: {avg_from_z:.3f}, stddev: {stddev:.3f}"
+                    f"Probe spread: {avg_range:.3f}, "
+                    f"z deviation: {avg_from_z:.3f}, "
+                    f"stddev: {stddev:.3f}"
                 )
 
         finally:
             self._sensor.set_drive_current(old_drive_current)
+            th.manual_move(
+                [None, None, start_z],
+                lift_speed,
+            )
 
     cmd_CLEAR_CALIBRATION_help = "Clear calibration for all drive currents"
 
@@ -985,38 +1003,32 @@ class ProbeEddy:
                 "X and Y must be homed before calibrating"
             )
 
-        was_homed = self._z_homed()
-        if was_homed:
+        if self._z_homed():
             # z-hop so that manual probe helper doesn't complain if we're already
             # at the right place
             self._z_hop()
-        else:
-            logging.info("Z not homed, forcing position before calibration")
-            # Z is probably not homed. So we'll set up a useful position so that
-            # ManualProbeHelper can work
-            th = self._printer.lookup_object("toolhead")
-            th_pos = th.get_position()
-            # This is proably not correct for some printers
-            zrange = th.get_kinematics().rails[2].get_range()
-            th_pos[2] = zrange[1] - 20.0
-            th.set_position(th_pos, [2])
+
+        # Now reset the axis so that we have a full range to calibrate with
+        th = self._printer.lookup_object("toolhead")
+        th_pos = th.get_position()
+        # XXX This is proably not correct for some printers?
+        zrange = th.get_kinematics().rails[2].get_range()
+        th_pos[2] = zrange[1] - 20.0
+        th.set_position(th_pos, [2])
 
         manual_probe.ManualProbeHelper(
             self._printer,
             gcmd,
-            lambda kin_pos: self.cmd_CALIBRATE_next(gcmd, kin_pos, was_homed),
+            lambda kin_pos: self.cmd_CALIBRATE_next(gcmd, kin_pos),
         )
 
     def cmd_CALIBRATE_next(
-        self, gcmd: GCodeCommand, kin_pos: List[float], was_homed: bool
+        self, gcmd: GCodeCommand, kin_pos: List[float]
     ):
         th = self._printer.lookup_object("toolhead")
         if kin_pos is None:
-            if not was_homed and hasattr(
-                th.get_kinematics(), "note_z_not_homed"
-            ):
-                th.get_kinematics().note_z_not_homed()
             # User cancelled ManualProbeHelper
+            self._z_not_homed()
             return
 
         old_drive_current = self.current_drive_current()
@@ -1061,8 +1073,18 @@ class ProbeEddy:
         self._dc_to_fmap[drive_current] = mapping
         self.save_config()
 
-        if not was_homed and hasattr(th.get_kinematics(), "note_z_not_homed"):
-            th.get_kinematics().note_z_not_homed()
+        # reset the Z homing state after alibration
+        self._z_not_homed()
+
+    def _z_not_homed(self):
+        th = self._printer.lookup_object("toolhead")
+        kin = th.get_kinematics()
+        if hasattr(kin, "note_z_not_homed"):
+            kin.note_z_not_homed()
+        else:
+            # note: there was a brief period where the args to this were not
+            # strings but were axis numbers
+            kin.clear_homing_state("z")
 
     def _create_mapping(
         self,
@@ -1271,8 +1293,7 @@ class ProbeEddy:
         # was moved up to 2.5, then the probe should read 2.0.
         probe_z = z + (z - r.value)
 
-        # is this supposed to return xyze or xyz?
-        return [th_pos[0], th_pos[1], probe_z, th_pos[3]]
+        return [th_pos[0], th_pos[1], probe_z]
 
     #
     # Moving the sensor to the correct position
@@ -1477,10 +1498,12 @@ class ProbeEddy:
                 probe_position = hmove.homing_move(
                     target_position, tap_speed, probe_pos=True
                 )
+
                 if hmove.check_no_movement() is not None:
                     raise self._printer.command_error(
                         "Probe triggered prior to movement"
                     )
+
                 th_pos_z = th.get_position()[2]
             except self._printer.command_error as err:
                 if self._printer.is_shutdown():
@@ -1506,7 +1529,6 @@ class ProbeEddy:
                 else:
                     self._log_error(f"Tap failed at {th_pos_z:.3f}")
                     raise
-
         finally:
             self._endstop_wrapper.tap_config = None
 
@@ -1738,7 +1760,8 @@ class ProbeEddy:
         finally:
             self._sensor.set_drive_current(self.params.reg_drive_current)
             # This only writes the plot for the very last tap
-            self._write_tap_plot(tap)
+            if self.params.write_tap_plot:
+                self._write_tap_plot(tap)
 
         # If we didn't compute a tap_z report the error
         if tap_z is None:
@@ -1985,7 +2008,7 @@ class ProbeEddy:
                 x=s_t,
                 y=s_true_f,
                 mode="lines",
-                name="Frea",
+                name="Freq",
                 yaxis="y2",
                 visible="legendonly",
             )
@@ -2225,7 +2248,7 @@ class ProbeEddyScanningProbe:
             th_pos[2] = float(self._scan_z + z_deviation)
             # toolhead_pos[2] = height
 
-            results.append(th_pos)
+            results.append([th_pos[0], th_pos[1], th_pos[2]])
 
         # reset notes so that this session can continue to be used
         self._notes = []
@@ -2701,7 +2724,6 @@ class ProbeEddySampler:
     ) -> bool:
         def report_no_samples():
             if raise_error:
-                log_traceback(5)
                 raise self._printer.command_error(
                     f"No samples received for time {sample_print_time:.3f} (waited for {max_wait_time:.3f})"
                 )
@@ -2727,12 +2749,9 @@ class ProbeEddySampler:
         # this is just a sanity check, there's no reason to ever wait this long
         if max_wait_time > 5.0:
             traceback.print_stack()
-            logging.info(
-                f"ProbeEddyFrequencySampler: max_wait_time {max_wait_time:.3f} is too far into the future"
-            )
-            raise self._printer.command_error(
-                f"ProbeEddyFrequencySampler: max_wait_time {max_wait_time:.3f} is too far into the future"
-            )
+            msg = f"ProbeEddyFrequencySampler: max_wait_time {max_wait_time:.3f} is too far into the future"
+            logging.info(msg)
+            raise self._printer.command_error(msg)
 
         if self._trace:
             logging.info(
@@ -2831,6 +2850,10 @@ class ProbeEddySampler:
 
         # average the heights of the samples in the range
         heights = [h for _, _, h in self._samples[start_idx:end_idx]]
+        if len(heights) == 0:
+            raise self._printer.command_error(
+                f"no samples between time {start_time:.1f} and {end_time:.1f}!"
+            )
         hmin, hmax = np.min(heights), np.max(heights)
         mean = np.mean(heights)
         median = np.median(heights)
@@ -3155,26 +3178,9 @@ def np_rolling_mean(data, window, center=True):
     return result
 
 
-def np_wma(series, window_size):
-    weights = np.arange(1, window_size + 1)
-    weight_sum = weights.sum()
-    wma = []
-    for i in range(len(series)):
-        if i < window_size:
-            wma.append(np.nan)  # Not enough data for WMA
-        else:
-            window = series[i - window_size : i]
-            wma.append(np.dot(window, weights) / weight_sum)
-    return wma
-
-
 def np_rmse(p, x, y):
     y_hat = p(x)
     return np.sqrt(np.mean((y - y_hat) ** 2))
-
-
-def log_traceback(limit=100):
-    pass
 
 
 def load_config_prefix(config: ConfigWrapper):
