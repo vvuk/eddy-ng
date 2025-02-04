@@ -1690,13 +1690,13 @@ class ProbeEddy:
 
                 th_pos_z = th.get_position()[2]
 
-                if probe_position - target_z < 0.050:
+                if probe_position[2] - target_z < 0.050:
                     # we detected a tap but it was too close to our target z
                     # to be trusted
                     return ProbeEddy.TapResult(
                         error=Exception("Tap detected too close to target z"),
                         toolhead_z=th_pos_z,
-                        probe_z=probe_position,
+                        probe_z=probe_position[2],
                         overshoot=0.0,
                         tap_start_time=0.0,
                         tap_end_time=0.0,
