@@ -425,6 +425,7 @@ class ProbeEddy:
 
         self._sensor = sensors[sensor_type](config)
         self._mcu = self._sensor.get_mcu()
+        self._toolhead: ToolHead = None # filled in _handle_connect
 
         self.params = ProbeEddyParams()
         # init this to the default from the sensor before loading config
@@ -507,6 +508,9 @@ class ProbeEddy:
 
         self._printer.register_event_handler(
             "gcode:command_error", self._handle_command_error
+        )
+        self._printer.register_event_handler(
+            'klippy:connect', self._handle_connect
         )
 
     def _log_error(self, msg):
@@ -602,6 +606,9 @@ class ProbeEddy:
                 "EDDYng handle_command_error: sampler.finish() failed"
             )
 
+    def _handle_connect(self):
+        self._toolhead = self._printer.lookup_object("toolhead")
+
     def current_drive_current(self) -> int:
         return self._sensor.get_drive_current()
 
@@ -660,6 +667,28 @@ class ProbeEddy:
         curpos = toolhead.get_position()
         curpos[2] = curpos[2] + by
         toolhead.manual_move(curpos, self.params.probe_speed)
+
+    def _set_toolhead_position(self, pos, homing_axes):
+        # klipper changed homing_axes to be a "xyz" string instead
+        # of a tuple randomly on jan10 without support for the old
+        # syntax
+        func = self._toolhead.set_position
+        kind = type(func.__defaults__[0])
+        if kind is str:
+            # new
+            homing_axes_str = "".join(["xyz"[axis] for axis in homing_axes])
+            return self._toolhead.set_position(pos, homing_axes=homing_axes_str)
+        else:
+            # old
+            return self._toolhead.set_position(pos, homing_axes=homing_axes)
+
+    def _z_not_homed(self):
+        kin = self._toolhead.get_kinematics()
+        # klipper got rid of this
+        if hasattr(kin, "note_z_not_homed"):
+            kin.note_z_not_homed()
+        else:
+            kin.clear_homing_state("z")
 
     def save_config(self):
         for _, fmap in self._dc_to_fmap.items():
@@ -984,7 +1013,7 @@ class ProbeEddy:
                 th = self._printer.lookup_object("toolhead")
                 th_pos = th.get_position()
                 th_pos[2] = r.value
-                th.set_position(th_pos, [2])
+                self._set_toolhead_position(th_pos, [2])
                 self._log_info(f"Homed Z to {r}")
             else:
                 self._log_info(f"Probed {r}")
@@ -1014,7 +1043,7 @@ class ProbeEddy:
         # XXX This is proably not correct for some printers?
         zrange = th.get_kinematics().rails[2].get_range()
         th_pos[2] = zrange[1] - 20.0
-        th.set_position(th_pos, [2])
+        self._set_toolhead_position(th_pos, [2])
 
         manual_probe.ManualProbeHelper(
             self._printer,
@@ -1052,7 +1081,7 @@ class ProbeEddy:
         # The Eddy sensor calibration is done to nozzle height (not sensor or trigger height).
         th_pos = th.get_position()
         th_pos[2] = 0.0
-        th.set_position(th_pos, homing_axes=[2])
+        self._set_toolhead_position(th_pos, [2])
 
         th.wait_moves()
 
@@ -1075,16 +1104,6 @@ class ProbeEddy:
 
         # reset the Z homing state after alibration
         self._z_not_homed()
-
-    def _z_not_homed(self):
-        th = self._printer.lookup_object("toolhead")
-        kin = th.get_kinematics()
-        if hasattr(kin, "note_z_not_homed"):
-            kin.note_z_not_homed()
-        else:
-            # note: there was a brief period where the args to this were not
-            # strings but were axis numbers
-            kin.clear_homing_state("z")
 
     def _create_mapping(
         self,
@@ -1377,7 +1396,7 @@ class ProbeEddy:
             logging.info(
                 f"EDDYng probe_to_start_position_unhomed: resetting toolhead to z {th_pos[2]:.3f}"
             )
-            th.set_position(th_pos, [2])
+            self._set_toolhead_position(th_pos, [2])
 
             n_pos = th.get_position()
 
