@@ -270,7 +270,7 @@ class ProbeEddyParams:
             "move_speed", self.move_speed, above=0.0
         )
         self.home_trigger_height = config.getfloat(
-            "home_trigger_height", self.home_trigger_height, above=0.0
+            "home_trigger_height", self.home_trigger_height, minval=1.0
         )
         self.home_trigger_safe_start_offset = config.getfloat(
             "home_trigger_safe_start_offset",
@@ -328,6 +328,13 @@ class ProbeEddyParams:
         self.tap_samples_stddev = config.getfloat(
             "tap_samples_stddev", self.tap_samples_stddev, above=0.0
         )
+        self.tap_trigger_safe_start_height = config.getfloat(
+            "tap_trigger_safe_start_height",
+            -1.0,
+            above=0.0,
+        )
+        if self.tap_trigger_safe_start_height == -1.0: # sentinel
+            self.tap_trigger_safe_start_height = self.home_trigger_height - 0.3
 
         self.allow_unsafe = config.getchoice(
             "allow_unsafe", bool_choices, default="False"
@@ -355,6 +362,11 @@ class ProbeEddyParams:
         ):
             raise config.get_printer().config_error(
                 "ProbeEddy: x_offset and y_offset are both 0.0; is the sensor really mounted at the nozzle?"
+            )
+
+        if self.home_trigger_height <= self.tap_trigger_safe_start_height:
+            raise config.get_printer().config_error(
+                "ProbeEddy: home_trigger_height must be greater than tap_trigger_safe_start_height"
             )
 
         need_scipy = False
@@ -1349,7 +1361,6 @@ class ProbeEddy:
         times = []
 
         for s_t, s_freq, _ in samples:
-            # TODO use get_past_toolhead_goal_z
             s_pos, _ = get_toolhead_kin_pos(self._printer, at=s_t)
             s_z = s_pos[2]
             if first_sample_time < s_t < last_sample_time and s_z >= z_target:
@@ -3207,7 +3218,7 @@ class ProbeEddyFrequencyMap:
         if report_errors:
             if max_height < 2.5:  # we really can't do anything with this
                 self._eddy._log_error(
-                    f"Error: max height for valid samples is too low: {max_height:.3f} < 2.5. Refer to the documentation for troubleshooting."
+                    f"Error: max height for valid samples is too low: {max_height:.3f} < 2.5. Possible causes: bad drive current, bad sensor mount height."
                 )
                 if not self._eddy.params.allow_unsafe:
                     return None, None
@@ -3216,14 +3227,14 @@ class ProbeEddyFrequencyMap:
                 min_height > 0.65
             ):  # this is a bit arbitrary; but if it's this far off we shouldn't trust it
                 self._eddy._log_error(
-                    f"Error: min height for valid samples is too high: {min_height:.3f} > 0.65. Refer to the documentation for troubleshooting."
+                    f"Error: min height for valid samples is too high: {min_height:.3f} > 0.65. Possible causes: bad drive current, bad sensor mount height."
                 )
                 if not self._eddy.params.allow_unsafe:
                     return None, None
 
             if min_height > 0.025:
                 self._eddy._log_info(
-                    f"Warning: min height is {min_height:.3f} (> 0.025), which is too high for tap. This drive current will likely not work for tap, but should be fine for homing."
+                    f"Warning: min height is {min_height:.3f} (> 0.025) is too high for tap. This calibration will work fine for homing, but may not for tap."
                 )
 
             # somewhat arbitrary spread
@@ -3357,18 +3368,6 @@ def get_toolhead_kin_pos(printer, at=None):
     return toolhead_kin.calc_position(kin_spos), 0
 
 
-def get_past_toolhead_goal(printer, at):
-    motion_report = printer.lookup_object("motion_report")
-    dump_trapq = motion_report.trapqs.get("toolhead")
-    if dump_trapq is None:
-        raise printer.command_error("No dump trapq for toolhead")
-
-    position, velocity = dump_trapq.get_trapq_position(at)
-    if position is None:
-        return None, None
-    return list(position), velocity
-
-
 def np_rolling_mean(data, window, center=True):
     half_window = (window - 1) // 2 if center else 0
     result = np.empty(len(data), dtype=float)
@@ -3388,7 +3387,3 @@ def np_rmse(p, x, y):
 
 def load_config_prefix(config: ConfigWrapper):
     return ProbeEddy(config)
-
-
-def format_th_pos_list(l):
-    return str.join(", ", [f"({v[0]:.2f}, {v[1]:.2f}, {v[2]:.3f})" for v in l])
