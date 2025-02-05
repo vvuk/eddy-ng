@@ -1264,7 +1264,7 @@ class ProbeEddy:
             probe_speed,
             lift_speed,
             drive_current,
-            for_calibration=True,
+            report_errors=True,
             write_debug_files=True,
         )
         if mapping is None or fth_fit is None or htf_fit is None:
@@ -1377,7 +1377,7 @@ class ProbeEddy:
             self.params.probe_speed,
             self.params.lift_speed,
             drive_current,
-            for_calibration=False,
+            report_errors=False,
         )
         if mapping is None or fth is None or htf is None:
             self._log_error(
@@ -3161,7 +3161,6 @@ class ProbeEddyFrequencyMap:
             self._eddy._full_name, f"calibration_{self.drive_current}", calibstr
         )
 
-    # Compute calibration polynomials from a set of raw data points.
     def calibrate_from_values(
         self,
         drive_current: int,
