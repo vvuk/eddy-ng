@@ -290,6 +290,11 @@ class ProbeEddyParams:
         reg_drive_current = self._config_reg_drive_current = config.getint("reg_drive_current", 0, minval=0, maxval=31)
         tap_drive_current = self._config_tap_drive_current = config.getint("tap_drive_current", 0, minval=0, maxval=31)
 
+        if reg_drive_current == 0:
+            reg_drive_current = saved_reg_drive_current
+        if tap_drive_current == 0:
+            tap_drive_current = saved_tap_drive_current
+
         if saved_reg_drive_current != 0 and reg_drive_current != 0 and reg_drive_current != saved_reg_drive_current:
             printer = config.get_printer()
             printer.lookup_object('gcode').respond_raw(f"!! probe_eddy_ng has reg_drive_current specified in config and in saved variables. Config value ({reg_drive_current}) is taking precedence. Remove one of these to remote this warning.\n")
@@ -298,19 +303,8 @@ class ProbeEddyParams:
             printer = config.get_printer()
             printer.lookup_object('gcode').respond_raw(f"!! probe_eddy_ng has tap_drive_current specified in config and in saved variables. Config value ({tap_drive_current}) is taking precedence. Remove one of these to remote this warning.\n")
 
-        if reg_drive_current != 0:
-            self.reg_drive_current = reg_drive_current
-        elif saved_reg_drive_current != 0:
-            self.reg_drive_current = saved_reg_drive_current
-        else:
-            self.reg_drive_current = 0
-
-        if tap_drive_current != 0:
-            self.tap_drive_current = tap_drive_current
-        elif saved_tap_drive_current != 0:
-            self.tap_drive_current = saved_tap_drive_current
-        else:
-            self.tap_drive_current = 0
+        self.reg_drive_current = reg_drive_current
+        self.tap_drive_current = tap_drive_current
 
         self.tap_start_z = config.getfloat(
             "tap_start_z", self.tap_start_z, above=0.0
