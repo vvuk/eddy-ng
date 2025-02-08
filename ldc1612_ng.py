@@ -89,31 +89,43 @@ class LDC1612_ng:
             self._ldc_fin_divider = 1
             self._ldc_fref_divider = 1
             self._ldc_settle_time = 0.0001706
-            self._drive_current = 26
+            self._default_drive_current = 26
         elif self._device_product == PRODUCT_MELLOW_FLY:
             self._ldc_freq_clk = 40_000_000
             self._ldc_fin_divider = 1
             self._ldc_fref_divider = 1
             self._ldc_settle_time = 0.00125
-            self._drive_current = 15
+            self._default_drive_current = 15
         else:  # Generic/BTT Eddy using external 12MHz clock source
             # TODO add a generic setup that usees internal ldc1612 clock
             self._ldc_freq_clk = 12_000_000
             self._ldc_settle_time = 0.005
             self._ldc_fin_divider = 1
             self._ldc_fref_divider = 1
-            self._drive_current = 15
+            self._default_drive_current = 15
 
         self._ldc_freq_ref = round(self._ldc_freq_clk / self._ldc_fref_divider)
 
-        self._drive_current: int = config.getint(
-            "reg_drive_current", self._drive_current, minval=0, maxval=31
+        drive_current: int = config.getint(
+            "reg_drive_current", 0, minval=0, maxval=31
         )
+        saved_drive_current: int = config.getint(
+            "saved_reg_drive_current", 0, minval=0, maxval=31
+        )
+        if drive_current == 0:
+            drive_current = saved_drive_current
+        if drive_current == 0:
+            drive_current = self._default_drive_current
+        self._drive_current = drive_current
+        logging.info(f"ldc dc {self._drive_current}")
+
         self._deglitch: str = config.get("ldc_deglitch", "default").lower()
         self._data_rate: int = config.getint(
             "samples_per_second", 250, minval=50
         )
-        self._ldc_settle_time = min(self._ldc_settle_time, 1.0 / self._data_rate)
+        self._ldc_settle_time = min(
+            self._ldc_settle_time, 1.0 / self._data_rate
+        )
 
         # Setup mcu sensor_ldc1612 bulk query code
         self._i2c = bus.MCU_I2C_from_config(
@@ -549,7 +561,7 @@ class LDC1612_ng:
         self._last_error_count = 0
         rest_ticks = self._mcu.seconds_to_clock(0.5 / self._data_rate)
         self._ldc1612_ng_start_stop_cmd.send([self._oid, rest_ticks])
-        #logging.info("LDC1612 starting '%s' measurements", self._name)
+        # logging.info("LDC1612 starting '%s' measurements", self._name)
         # Initialize clock tracking
         self._ffreader.note_start()
 
@@ -563,7 +575,7 @@ class LDC1612_ng:
         # Halt bulk reading
         self._ldc1612_ng_start_stop_cmd.send_wait_ack([self._oid, 0])
         self._ffreader.note_end()
-        #logging.info("LDC1612 finished '%s' measurements", self._name)
+        # logging.info("LDC1612 finished '%s' measurements", self._name)
 
     def _process_batch(self, eventtime):
         samples = self._ffreader.pull_samples()
