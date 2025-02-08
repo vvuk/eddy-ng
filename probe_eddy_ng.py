@@ -15,7 +15,7 @@ from itertools import combinations
 import mcu
 import pins
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import (
     Dict,
     List,
@@ -26,14 +26,14 @@ from typing import (
 )
 
 try:
-    import plotly
+    import plotly  # noqa
 
     HAS_PLOTLY = True
 except:
     HAS_PLOTLY = False
 
 try:
-    import scipy
+    import scipy  # noqa
 
     HAS_SCIPY = True
 except:
@@ -236,6 +236,8 @@ class ProbeEddyParams:
     _config_reg_drive_current: int = 0
     _config_tap_drive_current: int = 0
 
+    _warning_msgs: List[str] = field(default_factory=list)
+
     @staticmethod
     def str_to_floatlist(s):
         if s is None:
@@ -290,19 +292,26 @@ class ProbeEddyParams:
         reg_drive_current = self._config_reg_drive_current = config.getint("reg_drive_current", 0, minval=0, maxval=31)
         tap_drive_current = self._config_tap_drive_current = config.getint("tap_drive_current", 0, minval=0, maxval=31)
 
+        logging.info(f"saved {saved_reg_drive_current} reg {reg_drive_current}")
+        if saved_reg_drive_current != 0 and reg_drive_current != 0 and reg_drive_current != saved_reg_drive_current:
+            printer = config.get_printer()
+            msg = f"probe_eddy_ng has reg_drive_current specified in config and in saved variables. Config value ({reg_drive_current}) is taking precedence. Remove one of these to remove this warning."
+            logging.warning(msg)
+            self._warning_msgs.append(msg)
+
+        if saved_tap_drive_current != 0 and tap_drive_current != 0 and tap_drive_current != saved_tap_drive_current:
+            printer = config.get_printer()
+            msg = f"probe_eddy_ng has tap_drive_current specified in config and in saved variables. Config value ({tap_drive_current}) is taking precedence. Remove one of these to remove this warning."
+            logging.warning(msg)
+            self._warning_msgs.append(msg)
+
+        # the config value overrides a saved value, if any
         if reg_drive_current == 0:
             reg_drive_current = saved_reg_drive_current
         if tap_drive_current == 0:
             tap_drive_current = saved_tap_drive_current
 
-        if saved_reg_drive_current != 0 and reg_drive_current != 0 and reg_drive_current != saved_reg_drive_current:
-            printer = config.get_printer()
-            printer.lookup_object('gcode').respond_raw(f"!! probe_eddy_ng has reg_drive_current specified in config and in saved variables. Config value ({reg_drive_current}) is taking precedence. Remove one of these to remote this warning.\n")
-
-        if saved_tap_drive_current != 0 and tap_drive_current != 0 and tap_drive_current != saved_tap_drive_current:
-            printer = config.get_printer()
-            printer.lookup_object('gcode').respond_raw(f"!! probe_eddy_ng has tap_drive_current specified in config and in saved variables. Config value ({tap_drive_current}) is taking precedence. Remove one of these to remote this warning.\n")
-
+        logging.info(f"saved reg {reg_drive_current} set")
         self.reg_drive_current = reg_drive_current
         self.tap_drive_current = tap_drive_current
 
@@ -464,9 +473,11 @@ class ProbeEddy:
         self._toolhead: ToolHead = None # filled in _handle_connect
 
         self.params = ProbeEddyParams()
-        # init this to the default from the sensor before loading config
-        self.params.reg_drive_current = self._sensor._drive_current
         self.params.load_from_config(config)
+        if self.params.reg_drive_current == 0:
+            logging.info(f" is zero, overriding {self._sensor._drive_current}")
+            # set as default
+            self.params.reg_drive_current = self._sensor._drive_current
 
         # at what minimum physical height to start homing. It must be above the safe start position,
         # because we need to move from the start through the safe start position
@@ -648,6 +659,8 @@ class ProbeEddy:
 
     def _handle_connect(self):
         self._toolhead = self._printer.lookup_object("toolhead")
+        for msg in self.params._warning_msgs:
+            self._log_warning(msg)
 
     def current_drive_current(self) -> int:
         return self._sensor.get_drive_current()
@@ -748,19 +761,21 @@ class ProbeEddy:
         if self.params._config_reg_drive_current == 0 or self.params.reg_drive_current != self.params._config_reg_drive_current:
             if self.params._config_reg_drive_current != 0:
                 self._log_warning(f"Warning: reg_drive_current set in config ({self.params._config_reg_drive_current}) is different the value that is being saved. Please remove the config value, as it will override this one.")
-            configfile.set(
-                self._full_name,
-                "saved_reg_drive_current",
-                str(self.params.reg_drive_current),
-            )
+            if self.params.reg_drive_current != 0:
+                configfile.set(
+                    self._full_name,
+                    "saved_reg_drive_current",
+                    str(self.params.reg_drive_current),
+                )
         if self.params._config_tap_drive_current == 0 or self.params.tap_drive_current != self.params._config_tap_drive_current:
             if self.params._config_tap_drive_current != 0:
                 self._log_warning(f"Warning: tap_drive_current set in config ({self.params._config_tap_drive_current}) is different the value that is being saved. Please remove the config value, as it will override this one.")
-            configfile.set(
-                self._full_name,
-                "saved_tap_drive_current",
-                str(self.params.tap_drive_current),
-            )
+            if self.params.tap_drive_current != 0:
+                configfile.set(
+                    self._full_name,
+                    "saved_tap_drive_current",
+                    str(self.params.tap_drive_current),
+                )
 
         self._log_info(
             "Calibration saved. Issue a SAVE_CONFIG to write the values to your config file and restart Klipper."
@@ -1120,8 +1135,9 @@ class ProbeEddy:
         self._set_toolhead_position(th_pos, [2])
 
         old_drive_current = self.current_drive_current()
+        # Note that the default is the default drive current
         drive_current: int = gcmd.get_int(
-            "DRIVE_CURRENT", old_drive_current, minval=0, maxval=31
+            "DRIVE_CURRENT", self._sensor._default_drive_current, minval=0, maxval=31
         )
 
         max_drive_current_increase = 0
@@ -1214,7 +1230,7 @@ class ProbeEddy:
                 self._log_info(f"EDDYng using {drive_current} for tap.")
                 state = DONE
 
-            result_msg = "Eddy-ng setup success. Please check homing then check tap."
+            result_msg = "EDDYng setup success. Please check whether homing works with G28 Z, then check if tap works with PROBE_EDDY_NG_TAP."
 
         if state == DONE:
             self._log_info(result_msg)
