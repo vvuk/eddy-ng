@@ -9,6 +9,10 @@ eddy-ng improves the Eddy current probe support in Klipper to add accurate Z-off
 
 This is a standalone `eddy-ng` repository, intended to be integrated into your own Klipper installation.
 
+## Support
+
+Questions? Come ask on the [Sovol Printers Discord](https://discord.gg/djhnkDR2JN) in the [eddy-ng forum](https://discord.com/channels/788873913953157131/1336451592752464023) (You must join the server first before that link will work -- there's nothing Sovol specific in eddy-ng, but that's where this started out at!)
+
 ## Installation
 
 1. Clone this repository:
