@@ -1111,6 +1111,8 @@ class ProbeEddy:
             if self._cmd_helper is not None:
                 self._cmd_helper.last_z_result = float(r.value)
 
+            self._last_probe_result = r.value
+
             if home_z:
                 th = self._printer.lookup_object("toolhead")
                 th_pos = th.get_position()
