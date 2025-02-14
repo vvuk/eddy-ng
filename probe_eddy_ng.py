@@ -3030,8 +3030,8 @@ class ProbeEddySampler:
                 sample_print_time - wait_start_time
             )
 
-        # this is just a sanity check, there's no reason to ever wait this long
-        if max_wait_time > 5.0:
+        # this is just a sanity check, there shouldn't be any reason to ever wait this long
+        if max_wait_time > 30.0:
             traceback.print_stack()
             msg = f"ProbeEddyFrequencySampler: max_wait_time {max_wait_time:.3f} is too far into the future"
             logging.info(msg)
