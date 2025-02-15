@@ -12,9 +12,6 @@ import traceback
 import pickle, base64
 from itertools import combinations
 
-import mcu
-import pins
-
 from dataclasses import dataclass, field
 from typing import (
     Dict,
@@ -24,6 +21,26 @@ from typing import (
     final,
     ClassVar,
 )
+
+try:
+    from klippy import mcu, pins
+    from klippy.printer import Printer
+    from klippy.configfile import ConfigWrapper
+    from klippy.configfile import error as configerror
+    from klippy.gcode import GCodeCommand
+    from klippy.toolhead import ToolHead
+except:
+    import mcu
+    import pins
+    from klippy import Printer
+    from configfile import ConfigWrapper
+    from configfile import error as configerror
+    from gcode import GCodeCommand
+    from toolhead import ToolHead
+
+from .homing import HomingMove
+
+from . import ldc1612_ng, probe, manual_probe
 
 try:
     import plotly  # noqa
@@ -38,17 +55,6 @@ try:
     HAS_SCIPY = True
 except:
     HAS_SCIPY = False
-
-from configfile import ConfigWrapper
-from configfile import error as configerror
-from gcode import GCodeCommand
-from klippy import Printer
-from stepper import MCU_stepper
-from toolhead import ToolHead
-
-from .homing import HomingMove
-
-from . import ldc1612_ng, probe, manual_probe
 
 # In this file, a couple of conventions are used (for sanity).
 # Variables are named according to:
@@ -228,8 +234,10 @@ class ProbeEddyParams:
     y_offset: float = 0.0
     # remove some safety checks, largely for testing/development
     allow_unsafe: bool = False
-    # whether to write the tap plot after each tap
+    # whether to write the tap plot for the last tap
     write_tap_plot: bool = True
+    # whether to write the tap plot for every tap
+    write_every_tap_plot: bool = False
 
     tap_trigger_safe_start_height: float = 1.5
 
@@ -255,14 +263,6 @@ class ProbeEddyParams:
         )
 
     def load_from_config(self, config: ConfigWrapper):
-        bool_choices = {
-            "true": True,
-            "True": True,
-            "false": False,
-            "False": False,
-            "1": True,
-            "0": False,
-        }
         mode_choices = ["wma", "butter"]
 
         self.probe_speed = config.getfloat(
@@ -378,12 +378,12 @@ class ProbeEddyParams:
         if self.tap_trigger_safe_start_height == -1.0:  # sentinel
             self.tap_trigger_safe_start_height = self.home_trigger_height / 2.0
 
-        self.allow_unsafe = config.getchoice(
-            "allow_unsafe", bool_choices, default="False"
+        self.allow_unsafe = config.getboolean("allow_unsafe", False)
+        self.write_tap_plot = config.getboolean("write_tap_plot", True)
+        self.write_every_tap_plot = config.getboolean(
+            "write_every_tap_plot", True
         )
-        self.write_tap_plot = config.getchoice(
-            "write_tap_plot", bool_choices, default="True"
-        )
+
         self.x_offset = config.getfloat("x_offset", self.x_offset)
         self.y_offset = config.getfloat("y_offset", self.y_offset)
 
@@ -2049,6 +2049,9 @@ class ProbeEddy:
                 )
                 sample_i += 1
 
+                if self.params.write_every_tap_plot:
+                    self._write_tap_plot(tap, sample_i)
+
                 if tap.error:
                     if "too close to target z" in str(tap.error):
                         self._log_info(
@@ -2082,8 +2085,10 @@ class ProbeEddy:
                         break
         finally:
             self._sensor.set_drive_current(self.params.reg_drive_current)
-            # This only writes the plot for the very last tap
-            if self.params.write_tap_plot:
+            if (
+                self.params.write_tap_plot
+                and not self.params.write_every_tap_plot
+            ):
                 self._write_tap_plot(tap)
 
         # If we didn't compute a tap_z report the error
@@ -2175,7 +2180,10 @@ class ProbeEddy:
         else:
             return None, float(std_min)
 
-    def _write_tap_plot(self, tap: ProbeEddy.TapResult):
+    # Write a tap plot. This also has logic to compute the averages
+    # and the filter mostly-exactly how it's done on the probe MCU itself
+    # (vs using numpy or similar) to make these graphs more reprensetative
+    def _write_tap_plot(self, tap: ProbeEddy.TapResult, tapnum: int = -1):
         if not HAS_PLOTLY:
             return
 
@@ -2184,8 +2192,6 @@ class ProbeEddy:
         memos = self._last_sampler_memos
         if samples is None or raw_samples is None:
             return
-
-        th = self._printer.lookup_object("toolhead")
 
         s_t = np.asarray([s[0] for s in samples])
         s_rf = s_f = np.asarray([s[1] for s in raw_samples])
@@ -2202,6 +2208,8 @@ class ProbeEddy:
         trigger_time = memos.get("trigger_time", time_start) - time_start
         tap_end_time = memos.get("tap_end_time", time_start) - time_start
         tap_threshold = memos.get("tap_threshold", 0)
+
+        time_len = s_t.max()
 
         # compute the butterworth filter, if we have scipy
         if tap is not None and HAS_SCIPY:
@@ -2413,6 +2421,9 @@ class ProbeEddy:
                 line=dict(color="gray", width=1, dash="dash"),
             )
 
+        fig.update_xaxes(
+            {"range": (time_len - 2.0, time_len), "autorange": False}
+        )
         fig.update_layout(
             hovermode="x unified",
             yaxis=dict(title="Z", side="right"),  # Z axis
@@ -2427,15 +2438,18 @@ class ProbeEddy:
             ),  # alt
             height=800,
         )
-        fig.write_html("/tmp/tap.html")
+        if tapnum == -1:
+            filename = "tap.html"
+        else:
+            filename = f"tap-{tapnum}.html"
+        fig.write_html(f"/tmp/{filename}", include_plotlyjs="cdn")
         logging.info("Wrote tap plot")
 
 
-#
 # Probe interface that does only scanning, no up/down movement.
-# It assumes the probe is at an appropriate scan height,
-# which is the same as the home trigger height.
-#
+# It scans at whatever height the probe is, but returns values
+# as if the probing happened (i.e. relative to
+# z_offset/home_trigger_height).
 @final
 class ProbeEddyScanningProbe:
     def __init__(self, eddy: ProbeEddy, gcmd: GCodeCommand):
@@ -2707,7 +2721,7 @@ class ProbeEddyEndstopWrapper:
     def get_mcu(self):
         return self._mcu
 
-    def add_stepper(self, stepper: MCU_stepper):
+    def add_stepper(self, stepper):
         self._dispatch.add_stepper(stepper)
 
     def get_steppers(self):
