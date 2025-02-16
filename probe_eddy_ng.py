@@ -1240,12 +1240,13 @@ class ProbeEddy:
                 ok_for_tap = False
 
             if ok_for_homing or ok_for_tap:
+                self._log_trace(f"EDDYng dc {drive_current} homing {ok_for_homing} tap {ok_for_tap}, {fth_rms} {htf_rms}")
                 if mapping.freq_spread() < 0.30:
                     self._log_warning(
                         f"EDDYng warning: frequency spread {mapping.freq_spread()} is very low at drive current {drive_current}. If setup fails completely, the sensor is probably mounted too high."
                     )
                     ok_for_homing = ok_for_tap = False
-                if fth_rms > 0.050:
+                if fth_rms is None or fth_rms > 0.050:
                     self._log_info(
                         f"EDDYng: calibration error rate is too high ({fth_rms}) at drive current {drive_current}. Ignoring."
                     )
@@ -3282,6 +3283,7 @@ class ProbeEddyFrequencyMap:
             raise ValueError("freqs and heights must be the same length")
 
         if len(raw_freqs_list) == 0:
+            self._eddy._log_trace("EDDYng calibrate_from_values: empty list")
             return None, None
 
         # everything must be a np.array or things get confused below
