@@ -1243,12 +1243,12 @@ class ProbeEddy:
                 self._log_trace(f"EDDYng dc {drive_current} homing {ok_for_homing} tap {ok_for_tap}, {fth_rms} {htf_rms}")
                 if mapping.freq_spread() < 0.30:
                     self._log_warning(
-                        f"EDDYng warning: frequency spread {mapping.freq_spread()} is very low at drive current {drive_current}. If setup fails completely, the sensor is probably mounted too high."
+                        f"EDDYng: frequency spread {mapping.freq_spread()} is very low at drive current {drive_current}. (If setup fails completely, the sensor is probably mounted too high.)"
                     )
                     ok_for_homing = ok_for_tap = False
-                if fth_rms is None or fth_rms > 0.050:
+                if fth_rms is None or fth_rms > 0.025:
                     self._log_info(
-                        f"EDDYng: calibration error rate is too high ({fth_rms}) at drive current {drive_current}. Ignoring."
+                        f"EDDYng: calibration error rate is too high ({fth_rms}) at drive current {drive_current}."
                     )
                     ok_for_homing = ok_for_tap = False
 
