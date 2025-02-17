@@ -1240,7 +1240,9 @@ class ProbeEddy:
                 ok_for_tap = False
 
             if ok_for_homing or ok_for_tap:
-                self._log_trace(f"EDDYng dc {drive_current} homing {ok_for_homing} tap {ok_for_tap}, {fth_rms} {htf_rms}")
+                self._log_trace(
+                    f"EDDYng dc {drive_current} homing {ok_for_homing} tap {ok_for_tap}, {fth_rms} {htf_rms}"
+                )
                 if mapping.freq_spread() < 0.30:
                     self._log_warning(
                         f"EDDYng: frequency spread {mapping.freq_spread()} is very low at drive current {drive_current}. (If setup fails completely, the sensor is probably mounted too high.)"
