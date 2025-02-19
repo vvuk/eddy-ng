@@ -159,6 +159,9 @@ struct ldc1612_ng_homing {
     // the time we actually decided to fire the tap trigger)
     uint32_t tap_end_time;
 
+    // Number of errors we've seen in a row
+    uint8_t error_count;
+
     union {
         struct ldc1612_ng_homing_wma_tap wma_tap;
         struct ldc1612_ng_homing_sos_tap sos_tap;
@@ -669,8 +672,13 @@ sosfilter(float value, struct sosfilter_sos* filter, float* state)
 bool
 check_error(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
 {
-    if (!SAMPLE_ERR(data))
+    struct ldc1612_ng_homing *lh = &ld->homing;
+    if (!SAMPLE_ERR(data)) {
+        lh->error_count = 0;
         return true;
+    }
+
+    lh->error_count++;
 
     struct ldc1612_ng_homing *lh = &ld->homing;
     uint8_t is_tap = lh->mode > 0;
@@ -683,6 +691,9 @@ check_error(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
         return false;
 
     dprint("ZZZ err=%u t=%u s=%u", data, time, ld->last_status);
+
+    if (lh->error_count < 5)
+        return false;
 
     // Sensor reports an issue - cancel homing
     notify_trigger(ld, 0, ld->other_reason_base + REASON_ERROR_SENSOR);
