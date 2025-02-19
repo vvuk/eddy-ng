@@ -1299,7 +1299,7 @@ class ProbeEddy:
 
     cmd_CALIBRATE_help = (
         "Calibrate the eddy current sensor. Specify DRIVE_CURRENT to calibrate for a different drive current "
-        + "than the default. Specify Z_MAX to set a different calibration start point."
+        + "than the default. Specify START_Z to set a different calibration start point."
     )
 
     def cmd_CALIBRATE(self, gcmd: GCodeCommand):
@@ -1339,9 +1339,9 @@ class ProbeEddy:
             "DRIVE_CURRENT", old_drive_current, minval=0, maxval=31
         )
         cal_z_max: float = gcmd.get_float(
-            "Z_MAX", self.params.calibration_z_max, above=2.0
+            "START_Z", self.params.calibration_z_max, above=2.0
         )
-        z_target: float = gcmd.get_float("Z_TARGET", 0.0)
+        z_target: float = gcmd.get_float("TARGET_Z", 0.0)
 
         probe_speed: float = gcmd.get_float(
             "SPEED", self.params.probe_speed, above=0.0
@@ -1483,9 +1483,9 @@ class ProbeEddy:
             "DRIVE_CURRENT", self.params.reg_drive_current, minval=1, maxval=31
         )
         z_start: float = gcmd.get_float(
-            "Z_MAX", self.params.calibration_z_max, above=2.0
+            "START_Z", self.params.calibration_z_max, above=2.0
         )
-        z_end: float = gcmd.get_float("Z_TARGET", 0.0)
+        z_end: float = gcmd.get_float("TARGET_Z", 0.0)
         self._log_info(f"Testing Z={z_start:.3f} to Z={z_end:.3f}")
 
         mapping, fth, htf = self._create_mapping(
