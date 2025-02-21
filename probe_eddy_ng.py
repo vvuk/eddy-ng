@@ -238,6 +238,8 @@ class ProbeEddyParams:
     write_tap_plot: bool = True
     # whether to write the tap plot for every tap
     write_every_tap_plot: bool = False
+    # maximum number of errors to allow in a row on the sensor
+    max_errors: int = 0
 
     tap_trigger_safe_start_height: float = 1.5
 
@@ -383,6 +385,8 @@ class ProbeEddyParams:
         self.write_every_tap_plot = config.getboolean(
             "write_every_tap_plot", True
         )
+
+        self.max_errors = config.getint("max_errors", self.max_errors)
 
         self.x_offset = config.getfloat("x_offset", self.x_offset)
         self.y_offset = config.getfloat("y_offset", self.y_offset)
@@ -2813,6 +2817,7 @@ class ProbeEddyEndstopWrapper:
             safe_time,
             mode=mode,
             tap_threshold=tap_threshold,
+            max_errors=self.eddy.params.max_errors,
         )
 
         return trigger_completion
