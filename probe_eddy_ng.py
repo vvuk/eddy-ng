@@ -544,6 +544,8 @@ class ProbeEddy:
         self._last_sampler_raw_samples = None
         self._last_sampler_memos = None
 
+        self._last_tap_z = 0.0
+
         # This class emulates "PrinterProbe". We use some existing helpers to implement
         # functionality like start_session
         self._printer.add_object("probe", self)
@@ -639,6 +641,12 @@ class ProbeEddy:
             "PROBE_EDDY_NG_TEST_DRIVE_CURRENT",
             self.cmd_TEST_DRIVE_CURRENT,
             "Test a drive current.",
+        )
+        gcode.register_command("Z_OFFSET_APPLY_PROBE", None)
+        gcode.register_command(
+            "Z_OFFSET_APPLY_PROBE",
+            self.cmd_Z_OFFSET_APPLY_PROBE,
+            "Apply the current G-Code Z offset to tap_adjust_z",
         )
 
         # some handy aliases while I'm debugging things to save my fingers
@@ -1029,6 +1037,18 @@ class ProbeEddy:
         gcmd.respond_info(
             f"Set tap_adjust_z: {tap_adjust_z:.3f} (SAVE_CONFIG to make it permanent)"
         )
+
+    def cmd_Z_OFFSET_APPLY_PROBE(self, gcmd: GCodeCommand):
+        gcode_move = self._printer.lookup_object("gcode_move")
+        offset = gcode_move.get_status()["homing_origin"].z
+        offset += self.params.tap_adjust_z
+        offset -= self._last_tap_z
+        configfile = self._printer.lookup_object("configfile")
+        configfile.set(self._name, "tap_adjust_z", f"{offset:.3f}")
+        self._log_info(
+                f"{self._name}: new tap_adjust_z: {offset:.3f}\n"
+                "The SAVE_CONFIG command will update the printer config file\n"
+                "with the above and restart the printer.")
 
     def probe_static_height(
         self, duration: float = 0.100
@@ -1951,6 +1971,7 @@ class ProbeEddy:
         samples_stddev = gcmd.get_float(
             "SAMPLES_STDDEV", self.params.tap_samples_stddev, above=0.0
         )
+        home_z: bool = gcmd.get_int("HOME_Z", 0) == 1
 
         mode = gcmd.get("MODE", self.params.tap_mode).lower()
         if mode not in ("wma", "butter"):
@@ -2036,6 +2057,7 @@ class ProbeEddy:
         results = []
         tap_z = None
         tap_stddev = None
+        tap_oveshoot = None
         sample_err_count = 0
         tap = None
 
@@ -2085,7 +2107,7 @@ class ProbeEddy:
                     break
 
                 if len(results) >= samples:
-                    tap_z, tap_stddev = self._compute_tap_z(
+                    tap_z, tap_stddev, tap_overshoot = self._compute_tap_z(
                         results, samples, samples_stddev
                     )
                     if tap_z is not None:
@@ -2113,10 +2135,20 @@ class ProbeEddy:
         # it to account for flex in the system (otherwise the Z would be too low)
         adjusted_tap_z = tap_z + tap_adjust_z
 
-        gcode_move = self._printer.lookup_object("gcode_move")
-        gcode_delta = adjusted_tap_z - gcode_move.homing_position[2]
-        gcode_move.base_position[2] += gcode_delta
-        gcode_move.homing_position[2] = adjusted_tap_z
+        th = self._toolhead
+
+        if home_z:
+            th_pos = th.get_position()
+            th_pos[2] = -tap_overshoot
+            self._log_info(f"setting toolhead z {th_pos[2]:.3f} (adj {adjusted_tap_z:.3f}, ovs {tap_overshoot:.3f})")
+            self._set_toolhead_position(th_pos, [2])
+            self._last_tap_z = 0.0
+        else:
+            gcode_move = self._printer.lookup_object("gcode_move")
+            gcode_delta = adjusted_tap_z - gcode_move.homing_position[2]
+            gcode_move.base_position[2] += gcode_delta
+            gcode_move.homing_position[2] = adjusted_tap_z
+            self._last_tap_z = adjusted_tap_z
 
         #
         # Figure out the offset to apply to sensor readings at the home trigger height
@@ -2136,7 +2168,6 @@ class ProbeEddy:
         # tap_z computed above. This does mean that the actual physical height probing happens at
         # is not likely to be exactly the same as the Z position, but all we care about is
         # variance from that position so this should be fine.
-        th = self._printer.lookup_object("toolhead")
         th.manual_move(
             [None, None, self.params.home_trigger_height + 1.0], lift_speed
         )
@@ -2148,7 +2179,7 @@ class ProbeEddy:
         self._tap_offset = self.params.home_trigger_height - result.value
 
         self._log_info(
-            f"Probe computed z offset {adjusted_tap_z:.3f} (tap at z={tap_z:.3f}, stddev {tap_stddev:.3f}),"
+            f"Probe computed tap Z at {adjusted_tap_z:.3f} (tap at z={tap_z:.3f}, stddev {tap_stddev:.3f}),"
             f" sensor offset {self._tap_offset:.3f} at z={self.params.home_trigger_height:.3f}"
         )
 
@@ -2174,18 +2205,21 @@ class ProbeEddy:
 
         tap_z = math.inf
         std_min = math.inf
+        overshoot = math.inf
         for cluster in combinations(taps, samples):
             tap_zs = np.array([t.probe_z for t in cluster])
+            overshoots = np.array([t.overshoot for t in cluster])
             mean = np.mean(tap_zs)
             std = np.std(tap_zs)
             if std < std_min:
                 std_min = std
                 tap_z = mean
+                overshoot = np.mean(overshoots)
 
         if std_min <= req_stddev:
-            return float(tap_z), float(std_min)
+            return float(tap_z), float(std_min), float(overshoot)
         else:
-            return None, float(std_min)
+            return None, float(std_min), None
 
     # Write a tap plot. This also has logic to compute the averages
     # and the filter mostly-exactly how it's done on the probe MCU itself
