@@ -1048,7 +1048,7 @@ class ProbeEddy:
         offset += self.params.tap_adjust_z
         offset -= self._last_tap_gcode_adjustment
         configfile = self._printer.lookup_object("configfile")
-        configfile.set(self._name, "tap_adjust_z", f"{offset:.3f}")
+        configfile.set(self._full_name, "tap_adjust_z", f"{offset:.3f}")
         self._log_info(
             f"{self._name}: new tap_adjust_z: {offset:.3f}\n"
             "The SAVE_CONFIG command will update the printer config file\n"
