@@ -544,7 +544,11 @@ class ProbeEddy:
         self._last_sampler_raw_samples = None
         self._last_sampler_memos = None
 
+        # The last tap Z value, in absolute axis terms. Used for status.
         self._last_tap_z = 0.0
+        # The last gcode offset applied after tap, either the tap
+        # value, or 0.0 if HOME_Z=1
+        self._last_tap_gcode_adjustment = 0.0
 
         # This class emulates "PrinterProbe". We use some existing helpers to implement
         # functionality like start_session
@@ -1042,13 +1046,14 @@ class ProbeEddy:
         gcode_move = self._printer.lookup_object("gcode_move")
         offset = gcode_move.get_status()["homing_origin"].z
         offset += self.params.tap_adjust_z
-        offset -= self._last_tap_z
+        offset -= self._last_tap_gcode_adjustment
         configfile = self._printer.lookup_object("configfile")
         configfile.set(self._name, "tap_adjust_z", f"{offset:.3f}")
         self._log_info(
-                f"{self._name}: new tap_adjust_z: {offset:.3f}\n"
-                "The SAVE_CONFIG command will update the printer config file\n"
-                "with the above and restart the printer.")
+            f"{self._name}: new tap_adjust_z: {offset:.3f}\n"
+            "The SAVE_CONFIG command will update the printer config file\n"
+            "with the above and restart the printer."
+        )
 
     def probe_static_height(
         self, duration: float = 0.100
@@ -1569,7 +1574,9 @@ class ProbeEddy:
                 "name": self._full_name,
                 "home_trigger_height": self.params.home_trigger_height,
                 "tap_offset": self._tap_offset,
+                "tap_adjust_z": self._tap_adjust_z,
                 "last_probe_result": self._last_probe_result,
+                "last_tap_z": self._last_tap_z,
             }
         )
         return status
@@ -2134,21 +2141,24 @@ class ProbeEddy:
         # Adjust the computed tap_z by the user's tap_adjust_z, typically to raise
         # it to account for flex in the system (otherwise the Z would be too low)
         adjusted_tap_z = tap_z + tap_adjust_z
+        self._last_tap_z = tap_z
 
         th = self._toolhead
 
         if home_z:
             th_pos = th.get_position()
             th_pos[2] = -tap_overshoot
-            self._log_info(f"setting toolhead z {th_pos[2]:.3f} (adj {adjusted_tap_z:.3f}, ovs {tap_overshoot:.3f})")
+            self._log_info(
+                f"setting toolhead z {th_pos[2]:.3f} (adj {adjusted_tap_z:.3f}, ovs {tap_overshoot:.3f})"
+            )
             self._set_toolhead_position(th_pos, [2])
-            self._last_tap_z = 0.0
+            self._last_tap_gcode_adjustment = 0.0
         else:
             gcode_move = self._printer.lookup_object("gcode_move")
             gcode_delta = adjusted_tap_z - gcode_move.homing_position[2]
             gcode_move.base_position[2] += gcode_delta
             gcode_move.homing_position[2] = adjusted_tap_z
-            self._last_tap_z = adjusted_tap_z
+            self._last_tap_gcode_adjustment = adjusted_tap_z
 
         #
         # Figure out the offset to apply to sensor readings at the home trigger height
@@ -2477,8 +2487,9 @@ class ProbeEddy:
             )
 
         fig.update_xaxes(
-            {"range": (time_len - 2.0, time_len), "autorange": False}
+            range=[max(0.0, time_len - 0.60), time_len], autorange=False
         )
+
         fig.update_layout(
             hovermode="x unified",
             yaxis=dict(title="Z", side="right"),  # Z axis
