@@ -2585,7 +2585,7 @@ class ProbeEddyScanningProbe:
 
         # not sure I need this wait_moves, need to understand what position
         # get_position returns
-        th.dwell(self._sample_time_delay)
+        th.dwell(self._sample_time_delay + self._sample_time)
         th.wait_moves()
 
         th_pos = th.get_position()
