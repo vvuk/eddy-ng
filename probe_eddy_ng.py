@@ -3224,8 +3224,8 @@ class ProbeEddyFrequencyMap:
         self._sensor = eddy._sensor
 
         self.drive_current = 0
-        self.height_range = (-math.inf, math.inf)
-        self.freq_range = (-math.inf, math.inf)
+        self.height_range = (math.inf, -math.inf)
+        self.freq_range = (math.inf, -math.inf)
         self._ftoh: Optional[npp.Polynomial] = None
         self._ftoh_high: Optional[npp.Polynomial] = None
         self._htof: Optional[npp.Polynomial] = None
@@ -3248,8 +3248,8 @@ class ProbeEddyFrequencyMap:
             self.drive_current = 0
             self._ftoh = None
             self._htof = None
-            self.height_range = (-math.inf, math.inf)
-            self.freq_range = (-math.inf, math.inf)
+            self.height_range = (math.inf, -math.inf)
+            self.freq_range = (math.inf, -math.inf)
             return
 
         data = pickle.loads(base64.b64decode(calibstr))
@@ -3257,8 +3257,8 @@ class ProbeEddyFrequencyMap:
         ftoh_high = data["ftoh_high"]
         htof = data["htof"]
         dc = data["dc"]
-        h_range = data.get("h_range", (-math.inf, math.inf))
-        f_range = data.get("f_range", (-math.inf, math.inf))
+        h_range = data.get("h_range", (math.inf, -math.inf))
+        f_range = data.get("f_range", (math.inf, -math.inf))
 
         if dc != drive_current:
             raise configerror(
@@ -3417,6 +3417,8 @@ class ProbeEddyFrequencyMap:
         self._htof = htof_low_fn
         self._ftoh_high = ftoh_high_fn
         self.drive_current = drive_current
+        self.height_range = [min_height, max_height]
+        self.freq_range = [min_freq, max_freq]
 
         self._eddy._log_msg(
             f"Drive current {drive_current}: valid height: {min_height:.3f} to {max_height:.3f}, "
