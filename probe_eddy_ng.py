@@ -1183,7 +1183,7 @@ class ProbeEddy:
                 self._log_msg(f"Probed {r}")
 
         finally:
-            self._sensor.set_drive_current(drive_current)
+            self._sensor.set_drive_current(old_drive_current)
 
     cmd_SETUP_help = "Setup"
 
