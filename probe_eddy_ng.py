@@ -24,7 +24,7 @@ from typing import (
 )
 
 try:
-    from klippy import mcu, pins
+    from klippy import mcu, pins, chelper
     from klippy.printer import Printer
     from klippy.configfile import ConfigWrapper
     from klippy.configfile import error as configerror
@@ -3390,9 +3390,15 @@ class ProbeEddyFrequencyMap:
 
         low_samples = avg_heights <= ProbeEddyFrequencyMap.low_z_threshold
         high_samples = avg_heights >= ProbeEddyFrequencyMap.low_z_threshold - 0.5
+
         ftoh_low_fn = npp.Polynomial.fit(1.0 / avg_freqs[low_samples], avg_heights[low_samples], deg=9)
         htof_low_fn = npp.Polynomial.fit(avg_heights[low_samples], 1.0 / avg_freqs[low_samples], deg=9)
-        ftoh_high_fn = npp.Polynomial.fit(1.0 / avg_freqs[high_samples], avg_heights[high_samples], deg=9)
+
+        if np.count_nonzero(high_samples) > 50:
+            ftoh_high_fn = npp.Polynomial.fit(1.0 / avg_freqs[high_samples], avg_heights[high_samples], deg=9)
+        else:
+            self._eddy._log_debug(f"not computing ftoh_high, not enough high samples")
+            ftoh_high_fn = None
 
         # Calculate rms, only for the low values (where error is most relevant)
         rmse_fth = np_rmse(
@@ -3438,7 +3444,7 @@ class ProbeEddyFrequencyMap:
         if not HAS_PLOTLY:
             return
 
-        if self._ftoh is None or self._ftoh_high is None or self._htof is None:
+        if self._ftoh is None or self._htof is None:
             logging.warning(f"write_calibration_plot: null calibration?")
             return
 
@@ -3447,8 +3453,12 @@ class ProbeEddyFrequencyMap:
         low_samples = heights <= ProbeEddyFrequencyMap.low_z_threshold
         high_samples = heights >= ProbeEddyFrequencyMap.low_z_threshold - 0.5
 
-        f_to_z_high_err = heights[high_samples] - self._ftoh_high(1.0 / freqs[high_samples])
         f_to_z_low_err = heights[low_samples] - self._ftoh(1.0 / freqs[low_samples])
+
+        if self._ftoh_high is not None:
+            f_to_z_high_err = heights[high_samples] - self._ftoh_high(1.0 / freqs[high_samples])
+        else:
+            f_to_z_high_err = None
 
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=times, y=heights, mode="lines", name="Z"))
@@ -3485,7 +3495,8 @@ class ProbeEddyFrequencyMap:
         )
 
         fig.add_trace(go.Scatter(x=times[low_samples], y=f_to_z_low_err, mode="lines", name="Err", yaxis="y3"))
-        fig.add_trace(go.Scatter(x=times[high_samples], y=f_to_z_high_err, mode="lines", name="Err (high)", yaxis="y3"))
+        if f_to_z_high_err:
+            fig.add_trace(go.Scatter(x=times[high_samples], y=f_to_z_high_err, mode="lines", name="Err (high)", yaxis="y3"))
 
         if vels is not None:
             fig.add_trace(go.Scatter(x=times, y=vels, mode="lines", name="V", yaxis="y4"))
@@ -3500,9 +3511,9 @@ class ProbeEddyFrequencyMap:
         fig.write_html("/tmp/eddy-calibration.html")
 
     def freq_to_height(self, freq: float) -> float:
-        if self._ftoh is None or self._ftoh_high is None:
+        if self._ftoh is None:
             raise self._eddy._printer.command_error("Calling freq_to_height on uncalibrated map")
-        if freq < self._ftoh.domain[0]:
+        if self._ftoh_high is not None and freq < self._ftoh.domain[0]:
             return self._ftoh_high(1.0 / freq)
         return self._ftoh(1.0 / freq)
 
@@ -3512,7 +3523,7 @@ class ProbeEddyFrequencyMap:
         return 1.0 / self._htof(height)
 
     def calibrated(self) -> bool:
-        return (self._ftoh is not None and self._htof is not None and self._ftoh_high is not None)
+        return (self._ftoh is not None and self._htof is not None)
 
 
 def np_rolling_mean(data, window, center=True):
