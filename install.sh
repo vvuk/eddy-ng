@@ -57,11 +57,8 @@ if [ "$UNINSTALL" == "true" ]; then
         fi
     done
     
-    # Reverse the patch
-    if [ -f "$TARGET_DIR/klippy/extras/bed_mesh.py" ]; then
-        echo "Reversing patch..."
-        (cd "$TARGET_DIR" && patch -p1 -R < "$SCRIPT_DIR/$PATCH_FILE")
-    fi
+    # Restore changes to files we patched
+    git -C "$TARGET_DIR" restore klippy/extras/bed_mesh.py src/Makefile
 else
     echo "Installing files..."
     for file in "${FILES_TO_COPY[@]}"; do
@@ -79,13 +76,16 @@ else
         echo "Copying $SRC_FILE to $DEST_DIR"
         cp "$SRC_FILE" "$DEST_DIR/"
     done
-    
+
+    if ! grep -q "sensor_ldc1612_ng.c" "$TARGET_DIR/src/Makefile" ; then
+        echo "Adding sensor_ldc1612_ng.c to Makefile..."
+        sed -i 's,sensor_ldc1612.c,sensor_ldc1612.c sensor_ldc1612_ng.c,g' "$TARGET_DIR/src/Makefile"
+    fi
+
     BED_MESH_FILE="$TARGET_DIR/klippy/extras/bed_mesh.py"
-    if [ -f "$BED_MESH_FILE" ] && ! grep -q "eddy-ng patched" "$BED_MESH_FILE"; then
-        echo "Applying patch..."
+    if grep -q "rapid_scan" "$BED_MESH_FILE" && ! grep -q "eddy-ng patched" "$BED_MESH_FILE"; then
+        echo "Fixing bed_mesh.py..."
         (cd "$TARGET_DIR" && patch -p1 < "$SCRIPT_DIR/$PATCH_FILE")
-    else
-        echo "(Patch already applied, skipping.)"
     fi
 fi
 
