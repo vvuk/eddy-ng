@@ -701,7 +701,7 @@ class ProbeEddy:
         for msg in self.params._warning_msgs:
             self._log_warning(msg)
 
-    def _get_trapq_position(self, print_time):
+    def _get_trapq_position(self, print_time: float) -> Tuple[Tuple[float, float, float], float]:
         ffi_main, ffi_lib = chelper.get_ffi()
         data = ffi_main.new("struct pull_move[1]")
         count = ffi_lib.trapq_extract_old(self._trapq, data, 1, 0.0, print_time)
@@ -721,7 +721,7 @@ class ProbeEddy:
     def current_drive_current(self) -> int:
         return self._sensor.get_drive_current()
 
-    def map_for_drive_current(self, dc: int = None) -> ProbeEddyFrequencyMap:
+    def map_for_drive_current(self, dc: Optional[int] = None) -> ProbeEddyFrequencyMap:
         if dc is None:
             dc = self.current_drive_current()
         if dc not in self._dc_to_fmap:
@@ -731,17 +731,17 @@ class ProbeEddy:
         return self._dc_to_fmap[dc]
 
     # helpers to forward to the map
-    def height_to_freq(self, height: float, drive_current: int = None) -> float:
+    def height_to_freq(self, height: float, drive_current: Optional[int] = None) -> float:
         if drive_current is None:
             drive_current = self.current_drive_current()
         return self.map_for_drive_current(drive_current).height_to_freq(height)
 
-    def freq_to_height(self, freq: float, drive_current: int = None) -> float:
+    def freq_to_height(self, freq: float, drive_current: Optional[int] = None) -> float:
         if drive_current is None:
             drive_current = self.current_drive_current()
         return self.map_for_drive_current(drive_current).freq_to_height(freq)
 
-    def calibrated(self, drive_current: int = None) -> bool:
+    def calibrated(self, drive_current: Optional[int] = None) -> bool:
         if drive_current is None:
             drive_current = self.current_drive_current()
         return (
@@ -887,11 +887,9 @@ class ProbeEddy:
                     tap_end_time = kwargs.get("tap_end_time", "")
                     s_t, s_freq, s_z = samples[i]
                     _, raw_f, _ = raw_samples[i]
-                    past_pos, past_v = get_toolhead_kin_pos(self._printer, s_t)
-                    past_k_z = past_pos[2] if past_pos is not None else None
-                    if past_k_z is None or past_v is None:
-                        past_k_z = ""
-                        past_v = ""
+                    past_pos, past_v = self._get_trapq_position(s_t)
+                    past_k_z = past_pos[2] if past_pos is not None else ""
+                    past_v = past_v if past_v is not None else ""
                     data_file.write(
                         f"{s_t},{s_freq},{s_z},{past_k_z},{past_v},{raw_f},{tap_end_time},{trigger_time}\n"
                     )
@@ -912,14 +910,16 @@ class ProbeEddy:
         status = result.status
         freqval = result.freqval
         freq = result.freq
-        height = self.freq_to_height(freq) if self.calibrated() else -math.inf
+        height = -math.inf
 
         err = ""
         if freqval > 0x0FFFFFFF:
             height = -math.inf
             freq = 0.0
             err = f"ERROR: {bin(freqval >> 28)} "
-        if not self.calibrated():
+        elif self.calibrated():
+            height = self.freq_to_height(freq)
+        else:
             err += "(Not calibrated) "
 
         gcmd.respond_info(
@@ -968,9 +968,9 @@ class ProbeEddy:
                 f"Drive current {drive_current} not calibrated"
             )
 
+        th = self._toolhead
         try:
             self._sensor.set_drive_current(drive_current)
-            th = self._printer.lookup_object("toolhead")
 
             th.manual_move(
                 [None, None, probe_zs[0] + 1.0],
@@ -1126,17 +1126,16 @@ class ProbeEddy:
     cmd_PROBE_help = "Probe the height using the eddy current sensor, moving the toolhead to the home trigger height, or Z if specified."
 
     def cmd_PROBE(self, gcmd: GCodeCommand):
-        z: float = gcmd.get_float("Z", self.params.home_trigger_height)
-        duration: float = gcmd.get_float("DURATION", 0.100, above=0.0)
-
         if not self._z_homed():
             raise self._printer.command_error("Must home Z before PROBE")
+
+        z: float = gcmd.get_float("Z", self.params.home_trigger_height)
 
         th = self._printer.lookup_object("toolhead")
         th_pos = th.get_position()
         if th_pos[2] < z:
             th.manual_move([None, None, z + 3.0], self.params.lift_speed)
-        th.manual_move([None, None, z], self.params.lift_speed)
+        th.manual_move([None, None, z], self.params.probe_speed)
         th.dwell(0.100)
         th.wait_moves()
 
@@ -1209,7 +1208,7 @@ class ProbeEddy:
             lambda kin_pos: self.cmd_SETUP_next(gcmd, kin_pos),
         )
 
-    def cmd_SETUP_next(self, gcmd: GCodeCommand, kin_pos: List[float]):
+    def cmd_SETUP_next(self, gcmd: GCodeCommand, kin_pos: Optional[List[float]]):
         if kin_pos is None:
             # User cancelled ManualProbeHelper
             self._z_not_homed()
@@ -1222,7 +1221,6 @@ class ProbeEddy:
         th_pos[2] = 0.0
         self._set_toolhead_position(th_pos, [2])
 
-        old_drive_current = self.current_drive_current()
         # Note that the default is the default drive current
         drive_current: int = gcmd.get_int(
             "DRIVE_CURRENT",
@@ -1384,7 +1382,7 @@ class ProbeEddy:
             lambda kin_pos: self.cmd_CALIBRATE_next(gcmd, kin_pos),
         )
 
-    def cmd_CALIBRATE_next(self, gcmd: GCodeCommand, kin_pos: List[float]):
+    def cmd_CALIBRATE_next(self, gcmd: GCodeCommand, kin_pos: Optional[List[float]]):
         th = self._printer.lookup_object("toolhead")
         if kin_pos is None:
             # User cancelled ManualProbeHelper
@@ -1491,16 +1489,16 @@ class ProbeEddy:
             times,
             freqs,
             heights,
+            vels,
             report_errors,
             write_debug_files,
-            vels,
         )
 
         return mapping, fth_fit, htf_fit
 
     def _capture_samples_down_to(
         self, z_target: float, probe_speed: float
-    ) -> tuple[List[float], List[float], List[float]]:
+    ) -> tuple[List[float], List[float], List[float], List[float]]:
         th = self._printer.lookup_object("toolhead")
         th.dwell(0.500)  # give the sensor a bit to settle
         th.wait_moves()
@@ -1521,7 +1519,7 @@ class ProbeEddy:
         # the samples are a list of [print_time, freq, dummy_height] tuples
         samples = sampler.get_samples()
         if len(samples) == 0:
-            return None, None, None
+            return None, None, None, None
 
         freqs = []
         heights = []
@@ -1529,7 +1527,7 @@ class ProbeEddy:
         vels = []
 
         for s_t, s_freq, _ in samples:
-            s_pos, s_v = self._get_trapq_position(s_t) #get_toolhead_kin_pos(self._printer, at=s_t)
+            s_pos, s_v = self._get_trapq_position(s_t)
             s_z = s_pos[2]
             if first_sample_time < s_t < last_sample_time and s_z >= z_target:
                 times.append(s_t)
@@ -2295,7 +2293,7 @@ class ProbeEddy:
         s_true_f = np.asarray([s[1] for s in samples])
         s_z = np.asarray([s[2] for s in samples])
         s_kinz = np.asarray(
-            [get_toolhead_kin_pos(self._printer, s[0])[0][2] for s in samples]
+            [self._get_trapq_position(s[0])[0][2] for s in samples]
         )
 
         time_start = s_t.min()
@@ -2603,7 +2601,8 @@ class ProbeEddyScanningProbe:
         # return self._toolhead_kin.calc_position(kin_spos)
 
     def _rapid_lookahead_cb(self, time):
-        start_time = time - self._sample_time / 2
+        # the time passed here is the time when the move finishes;
+        start_time = time - self._sample_time / 2.0
         self._notes.append([start_time, time, None])
 
     def run_probe(self, gcmd):
@@ -2615,25 +2614,12 @@ class ProbeEddyScanningProbe:
 
         th = self._toolhead
 
-        # not sure I need this wait_moves, need to understand what position
-        # get_position returns
         th.dwell(self._sample_time_delay)
-        th.wait_moves()
 
         th_pos = th.get_position()
-        if not math.isclose(th_pos[2], self._scan_z, rel_tol=1e-3):
-            logging.info(
-                f"ProbeEddyScanningProbe: toolhead at {th_pos[2]:.3f}!"
-            )  # , fixing")
-            # th.manual_move([None, None, self._scan_z + 2.0], self.eddy.params.lift_speed)
-            # th.manual_move([None, None, self._scan_z], self.eddy.params.probe_speed)
-            # th.wait_moves()
-
         start_time = th.get_last_move_time()
         self._toolhead.dwell(self._sample_time + self._sample_time_delay)
-
-        th_pos = self._lookup_toolhead_pos(start_time)
-        self._notes.append((start_time, start_time, th_pos))
+        self._notes.append((start_time, start_time + self._sample_time / 2.0, th_pos))
 
     def pull_probed_results(self):
         if self._is_rapid:
@@ -3269,8 +3255,9 @@ class ProbeEddyFrequencyMap:
         self.drive_current = 0
         self.height_range = (-math.inf, math.inf)
         self.freq_range = (-math.inf, math.inf)
-        self._ftoh: npp.Polynomial = None
-        self._htof: npp.Polynomial = None
+        self._ftoh: Optional[npp.Polynomial] = None
+        self._ftoh_high: Optional[npp.Polynomial] = None
+        self._htof: Optional[npp.Polynomial] = None
 
     def _str_to_exact_floatlist(self, str):
         return [float.fromhex(v) for v in str.split(",")]
@@ -3296,7 +3283,7 @@ class ProbeEddyFrequencyMap:
 
         data = pickle.loads(base64.b64decode(calibstr))
         ftoh = data["ftoh"]
-        ftoh_high = None #data["ftoh_high"]
+        ftoh_high = data["ftoh_high"]
         htof = data["htof"]
         dc = data["dc"]
         h_range = data.get("h_range", (-math.inf, math.inf))
@@ -3308,7 +3295,7 @@ class ProbeEddyFrequencyMap:
             )
 
         self._ftoh = ftoh
-        self._ftoh_high = None
+        self._ftoh_high = ftoh_high
         self._htof = htof
         self.height_range = h_range
         self.freq_range = f_range
@@ -3342,9 +3329,9 @@ class ProbeEddyFrequencyMap:
         times: List[float],
         raw_freqs_list: List[float],
         raw_heights_list: List[float],
+        raw_vels_list: List[float],
         report_errors: bool,
         write_debug_files: bool,
-        raw_vels_list: List[float] = None,
     ):
         if len(raw_freqs_list) != len(raw_heights_list):
             raise ValueError("freqs and heights must be the same length")
@@ -3357,7 +3344,7 @@ class ProbeEddyFrequencyMap:
         times = np.asarray(times)
         raw_freqs = np.asarray(raw_freqs_list)
         raw_heights = np.asarray(raw_heights_list)
-        raw_vels = np.asarray(raw_vels_list) if raw_vels_list is not None else None
+        raw_vels = np.asarray(raw_vels_list)
 
         # smooth out the data; a simple rolling average does the job,
         # but centered to give more accurate data (since we have the full
@@ -3475,6 +3462,10 @@ class ProbeEddyFrequencyMap:
         if not HAS_PLOTLY:
             return
 
+        if self._ftoh is None or self._ftoh_high is None or self._htof is None:
+            logging.warning(f"write_calibration_plot: null calibration?")
+            return
+
         import plotly.graph_objects as go
 
         low_samples = heights <= 5.0
@@ -3532,10 +3523,10 @@ class ProbeEddyFrequencyMap:
         )
         fig.write_html("/tmp/eddy-calibration.html")
 
-    def freq_to_height(self, freq: float, assumed_height=None) -> float:
-        if self._ftoh is None:
+    def freq_to_height(self, freq: float) -> float:
+        if self._ftoh is None or self._ftoh_high is None:
             return math.inf
-        if self._ftoh_high is not None and assumed_height is not None and assumed_height > 5.0:
+        if freq < self._ftoh.domain[0]:
             return self._ftoh_high(1.0 / freq)
         return self._ftoh(1.0 / freq)
 
@@ -3545,26 +3536,7 @@ class ProbeEddyFrequencyMap:
         return 1.0 / self._htof(height)
 
     def calibrated(self) -> bool:
-        return (self._ftoh is not None and self._htof is not None)
-
-
-def get_toolhead_kin_pos(printer, at=None):
-    toolhead = printer.lookup_object("toolhead")
-    toolhead_kin = toolhead.get_kinematics()
-    toolhead.flush_step_generation()
-    if at is None:
-        kin_spos = {
-            s.get_name(): s.get_commanded_position()
-            for s in toolhead_kin.get_steppers()
-        }
-    else:
-        kin_spos = {
-            s.get_name(): s.mcu_to_commanded_position(
-                s.get_past_mcu_position(at)
-            )
-            for s in toolhead_kin.get_steppers()
-        }
-    return toolhead_kin.calc_position(kin_spos), 0
+        return (self._ftoh is not None and self._htof is not None and self._ftoh_high is not None)
 
 
 def np_rolling_mean(data, window, center=True):
