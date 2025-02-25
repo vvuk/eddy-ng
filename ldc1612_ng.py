@@ -61,6 +61,7 @@ class LDC1612_ng_value:
 @dataclass
 class LDC1612_ng_homing_result:
     trigger_time: float
+    tap_start_time: float
     tap_end_time: float
 
 
@@ -269,7 +270,7 @@ class LDC1612_ng:
 
         self._ldc1612_ng_finish_home_cmd = self._mcu.lookup_query_command(
             "ldc1612_ng_finish_home oid=%c",
-            "ldc1612_ng_finish_home_reply oid=%c trigger_clock=%u tap_end_clock=%u",
+            "ldc1612_ng_finish_home_reply oid=%c trigger_clock=%u tap_start_clock=%u tap_end_clock=%u",
             oid=self._oid,
             cq=cmdqueue,
         )
@@ -417,23 +418,22 @@ class LDC1612_ng:
             ]
         )
 
+    def _convert_clock(self, c):
+        if c == 0:
+            return 0
+        return self._clock32_to_print_time(c)
+
     def finish_home(self):
-        # "ldc1612_finish_home2_reply oid=%c homing=%c trigger_clock=%u tap_end_clock=%u",
+        # "ldc1612_finish_home2_reply oid=%c homing=%c trigger_clock=%u tap_start_clock=%u tap_end_clock=%u",
         reply = self._ldc1612_ng_finish_home_cmd.send([self._oid])
         trigger_clock = reply["trigger_clock"]
+        tap_start_clock = reply["tap_start_clock"]
         tap_end_clock = reply["tap_end_clock"]
-        trigger_time = (
-            self._clock32_to_print_time(trigger_clock)
-            if trigger_clock > 0
-            else 0
-        )
-        tap_end_time = (
-            self._clock32_to_print_time(tap_end_clock)
-            if tap_end_clock > 0
-            else 0
-        )
+        trigger_time = self._convert_clock(trigger_clock)
+        tap_start_time = self._convert_clock(tap_start_clock)
+        tap_end_time = self._convert_clock(tap_end_clock)
 
-        return LDC1612_ng_homing_result(trigger_time, tap_end_time)
+        return LDC1612_ng_homing_result(trigger_time, tap_start_time, tap_end_time)
 
     def set_sos_section(self, sect_num: int, sect_vals: List[float]):
         print(sect_vals)

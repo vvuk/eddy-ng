@@ -884,18 +884,19 @@ class ProbeEddy:
                 samples = sampler.get_samples()
                 raw_samples = sampler.get_raw_samples()
                 data_file.write(
-                    "time,frequency,z,kin_z,kin_v,raw_f,trigger_time,tap_end_time\n"
+                    "time,frequency,z,kin_z,kin_v,raw_f,trigger_time,tap_start_time,tap_end_time\n"
                 )
+                trigger_time = kwargs.get("trigger_time", "")
+                tap_start_time = kwargs.get("tap_start_time", "")
+                tap_end_time = kwargs.get("tap_end_time", "")
                 for i in range(len(samples)):
-                    trigger_time = kwargs.get("trigger_time", "")
-                    tap_end_time = kwargs.get("tap_end_time", "")
                     s_t, s_freq, s_z = samples[i]
                     _, raw_f, _ = raw_samples[i]
                     past_pos, past_v = self._get_trapq_position(s_t)
                     past_k_z = past_pos[2] if past_pos is not None else ""
                     past_v = past_v if past_v is not None else ""
                     data_file.write(
-                        f"{s_t},{s_freq},{s_z},{past_k_z},{past_v},{raw_f},{tap_end_time},{trigger_time}\n"
+                        f"{s_t},{s_freq},{s_z},{past_k_z},{past_v},{raw_f},{trigger_time},{tap_start_time},{tap_end_time}\n"
                     )
             logging.info(
                 f"Wrote {len(samples)} samples to {self.save_samples_path}"
@@ -1798,6 +1799,7 @@ class ProbeEddy:
         probe_z: float
         toolhead_z: float
         overshoot: float
+        tap_time: float
         tap_start_time: float
         tap_end_time: float
 
@@ -1826,6 +1828,9 @@ class ProbeEddy:
 
         error = None
 
+        now_z = None
+        probe_z = None
+
         try:
             # configure the endstop for tap (gets reset at the end of a tap sequence,
             # also in finally just in case
@@ -1844,16 +1849,19 @@ class ProbeEddy:
                         "Probe triggered prior to movement"
                     )
 
-                th_pos_z = th.get_position()[2]
+                now_z = th.get_position()[2]
+                probe_z = probe_position[2]
 
-                if probe_position[2] - target_z < 0.050:
+                if probe_z - target_z < 0.050:
                     # we detected a tap but it was too close to our target z
                     # to be trusted
+                    # TODO: use velocity to determine this
                     return ProbeEddy.TapResult(
                         error=Exception("Tap detected too close to target z"),
-                        toolhead_z=th_pos_z,
-                        probe_z=probe_position[2],
+                        toolhead_z=now_z,
+                        probe_z=probe_z,
                         overshoot=0.0,
+                        tap_time=0.0,
                         tap_start_time=0.0,
                         tap_end_time=0.0,
                     )
@@ -1865,31 +1873,26 @@ class ProbeEddy:
                     )
 
                 # in case of failure don't leave the toolhead in a bad spot (i.e. in bed)
-                th_pos_z = th.get_position()[2]
-                if th_pos_z < 1.0:
+                now_z = th.get_position()[2]
+                if now_z < 1.0:
                     th.manual_move([None, None, start_z], lift_speed)
 
                 # If just sensor errors, let the caller handle it
                 if "Sensor error" or "Probe completed movement" in str(err):
                     return ProbeEddy.TapResult(
                         error=err,
-                        toolhead_z=th_pos_z,
+                        toolhead_z=now_z,
                         probe_z=0.0,
                         overshoot=0.0,
+                        tap_time=0.0,
                         tap_start_time=0.0,
                         tap_end_time=0.0,
                     )
                 else:
-                    self._log_error(f"Tap failed at {th_pos_z:.3f}")
+                    self._log_error(f"Tap failed at {now_z:.3f}")
                     raise
         finally:
             self._endstop_wrapper.tap_config = None
-
-        # this Z value is what this tap detected as "true height=0"
-        probe_z = probe_position[2]
-        # where the toolhead is now (note: this is set in both the success and failure cases;
-        # on failure, before we retract)
-        now_z = th_pos_z
 
         # we're at now_z, but probe_z is the actual zero. We expect now_z
         # to be below or equal to probe_z because there will always be
@@ -1905,7 +1908,8 @@ class ProbeEddy:
         # the toolhead is pushing into the build plate.
         overshoot = probe_z - now_z
 
-        tap_start_time = self._endstop_wrapper.last_trigger_time
+        tap_time = self._endstop_wrapper.last_trigger_time
+        tap_start_time = self._endstop_wrapper.last_tap_start_time
         tap_end_time = self._endstop_wrapper.last_tap_end_time
 
         return ProbeEddy.TapResult(
@@ -1913,6 +1917,7 @@ class ProbeEddy:
             probe_z=probe_z,
             toolhead_z=now_z,
             overshoot=overshoot,
+            tap_time=tap_time,
             tap_start_time=tap_start_time,
             tap_end_time=tap_end_time,
         )
@@ -2111,7 +2116,7 @@ class ProbeEddy:
                 self._log_msg(f"Tap {sample_i}: z={tap.probe_z:.3f}")
                 self._log_debug(
                     f"tap[{sample_i}]: {tap.probe_z:.3f} toolhead at: {tap.toolhead_z:.3f} "
-                    f"overshoot: {tap.overshoot:.3f} at {tap.tap_start_time:.4f}s"
+                    f"overshoot: {tap.overshoot:.3f} at {tap.tap_time:.4f}s"
                 )
 
                 if samples == 1:
@@ -2147,25 +2152,23 @@ class ProbeEddy:
 
         # Adjust the computed tap_z by the user's tap_adjust_z, typically to raise
         # it to account for flex in the system (otherwise the Z would be too low)
-        adjusted_tap_z = tap_z + tap_adjust_z
+        computed_tap_z = adjusted_tap_z = tap_z + tap_adjust_z
         self._last_tap_z = tap_z
 
         th = self._toolhead
 
         if home_z:
             th_pos = th.get_position()
-            th_pos[2] = -tap_overshoot
-            self._log_msg(
-                f"setting toolhead z {th_pos[2]:.3f} (adj {adjusted_tap_z:.3f}, ovs {tap_overshoot:.3f})"
-            )
+            th_pos[2] = -(tap_adjust_z + tap_overshoot)
             self._set_toolhead_position(th_pos, [2])
             self._last_tap_gcode_adjustment = 0.0
-        else:
-            gcode_move = self._printer.lookup_object("gcode_move")
-            gcode_delta = adjusted_tap_z - gcode_move.homing_position[2]
-            gcode_move.base_position[2] += gcode_delta
-            gcode_move.homing_position[2] = adjusted_tap_z
-            self._last_tap_gcode_adjustment = adjusted_tap_z
+            adjusted_tap_z = 0.0
+
+        gcode_move = self._printer.lookup_object("gcode_move")
+        gcode_delta = adjusted_tap_z - gcode_move.homing_position[2]
+        gcode_move.base_position[2] += gcode_delta
+        gcode_move.homing_position[2] = adjusted_tap_z
+        self._last_tap_gcode_adjustment = adjusted_tap_z
 
         #
         # Figure out the offset to apply to sensor readings at the home trigger height
@@ -2196,7 +2199,7 @@ class ProbeEddy:
         self._tap_offset = self.params.home_trigger_height - result.value
 
         self._log_msg(
-            f"Probe computed tap Z at {adjusted_tap_z:.3f} (tap at z={tap_z:.3f}, stddev {tap_stddev:.3f}),"
+            f"Probe computed tap Z at {computed_tap_z:.3f} (tap at z={tap_z:.3f}, stddev {tap_stddev:.3f}),"
             f" sensor offset {self._tap_offset:.3f} at z={self.params.home_trigger_height:.3f}"
         )
 
@@ -2278,6 +2281,7 @@ class ProbeEddy:
         # normalize times to start at 0
         s_t = s_t - time_start
         trigger_time = memos.get("trigger_time", time_start) - time_start
+        tap_start_time = memos.get("tap_start_time", time_start) - time_start
         tap_end_time = memos.get("tap_end_time", time_start) - time_start
         tap_threshold = memos.get("tap_threshold", 0)
 
@@ -2379,6 +2383,53 @@ class ProbeEddy:
 
         fig = go.Figure()
 
+        if tap_start_time > 0:
+            fig.add_shape(
+                type="line",
+                x0=tap_start_time,
+                x1=tap_start_time,
+                y0=0,
+                y1=1,
+                xref="x",
+                yref="paper",
+                line=dict(color="green", width=1),
+            )
+        if trigger_time > 0:
+            fig.add_shape(
+                type="line",
+                x0=trigger_time,
+                x1=trigger_time,
+                y0=0,
+                y1=1,
+                xref="x",
+                yref="paper",
+                line=dict(color="orange", width=1),
+            )
+        if tap_end_time > 0:
+            fig.add_shape(
+                type="line",
+                x0=tap_end_time,
+                x1=tap_end_time,
+                y0=0,
+                y1=1,
+                xref="x",
+                yref="paper",
+                line=dict(color="green", width=1),
+            )
+        if tap_threshold > 0:
+            fig.add_shape(
+                type="line",
+                x0=0,
+                x1=1,
+                y0=tap_threshold,
+                y1=tap_threshold,
+                xref="paper",
+                yref="y3",
+                line=dict(color="gray", width=1, dash="dash"),
+            )
+
+        fig.add_shape(type="line", x0=0, x1=1, y0=tap.probe_z, y1=tap.probe_z, xref="paper", yref="y", line=dict(color="orange", width=1))
+
         # toolhead and sensor Z
         fig.add_trace(go.Scatter(x=s_t, y=s_z, mode="lines", name="Z"))
         fig.add_trace(go.Scatter(x=s_t, y=s_kinz, mode="lines", name="KinZ"))
@@ -2458,40 +2509,6 @@ class ProbeEddy:
                 visible="legendonly",
             )
         )
-
-        if trigger_time > 0:
-            fig.add_shape(
-                type="line",
-                x0=trigger_time,
-                x1=trigger_time,
-                y0=0,
-                y1=1,
-                xref="x",
-                yref="paper",
-                line=dict(color="orange", width=1),
-            )
-        if tap_end_time > 0:
-            fig.add_shape(
-                type="line",
-                x0=tap_end_time,
-                x1=tap_end_time,
-                y0=0,
-                y1=1,
-                xref="x",
-                yref="paper",
-                line=dict(color="green", width=1),
-            )
-        if tap_threshold > 0:
-            fig.add_shape(
-                type="line",
-                x0=0,
-                x1=1,
-                y0=tap_threshold,
-                y1=tap_threshold,
-                xref="paper",
-                yref="y3",
-                line=dict(color="gray", width=1, dash="dash"),
-            )
 
         fig.update_xaxes(
             range=[max(0.0, time_len - 0.60), time_len], autorange=False
@@ -2682,6 +2699,7 @@ class ProbeEddyEndstopWrapper:
 
         # the times of the last successful endstop home_wait
         self.last_trigger_time = 0.0
+        self.last_tap_start_time = 0.0
         self.last_tap_end_time = 0.0
 
         self._homing_in_progress = False
@@ -2799,6 +2817,7 @@ class ProbeEddyEndstopWrapper:
             )
 
         self.last_trigger_time = 0.0
+        self.last_tap_start_time = 0.0
         self.last_tap_end_time = 0.0
 
         trigger_height = self._home_trigger_height
@@ -2869,15 +2888,17 @@ class ProbeEddyEndstopWrapper:
         # make sure homing is stopped, and grab the trigger_time from the mcu
         home_result = self._sensor.finish_home()
         trigger_time = home_result.trigger_time
+        tap_start_time = home_result.tap_start_time
         tap_end_time = home_result.tap_end_time
 
         self._sampler.memo("trigger_time", trigger_time)
         if self.tap_config is not None:
+            self._sampler.memo("tap_start_time", tap_start_time)
             self._sampler.memo("tap_end_time", tap_end_time)
             self._sampler.memo("tap_threshold", self.tap_config.threshold)
 
         self.eddy._log_debug(
-            f"trigger_time {trigger_time} (mcu: {self._mcu.print_time_to_clock(trigger_time)}) tap_end_time: {tap_end_time}"
+            f"trigger_time {trigger_time} (mcu: {self._mcu.print_time_to_clock(trigger_time)}) tap time: {tap_start_time}-{tap_end_time}"
         )
 
         # nb: _dispatch.stop() will treat anything >= REASON_COMMS_TIMEOUT as an error,
@@ -2887,6 +2908,7 @@ class ProbeEddyEndstopWrapper:
 
         # clean these up, and only update them if successful
         self.last_trigger_time = 0.0
+        self.last_tap_start_tie = 0.0
         self.last_tap_end_time = 0.0
 
         # always reset this; taps are one-shot usages of the endstop wrapper
@@ -2899,6 +2921,7 @@ class ProbeEddyEndstopWrapper:
         # success?
         if res == mcu.MCU_trsync.REASON_ENDSTOP_HIT:
             self.last_trigger_time = trigger_time
+            self.last_tap_start_time = tap_start_time
             self.last_tap_end_time = tap_end_time
             return trigger_time
 

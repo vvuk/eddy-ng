@@ -122,8 +122,6 @@ struct ldc1612_ng_homing_wma_tap {
     uint32_t wma; // last computed weighted moving average
     int32_t wma_d_avg; // last computed wma derivative average
 
-    // the earliest start of this tap
-    uint32_t tap_start_time;
     // the wema_d_avg at the start
     int32_t tap_start_value;
 };
@@ -133,7 +131,6 @@ struct ldc1612_ng_homing_sos_tap {
     float tap_threshold;
 
     float frequency_offset;
-    uint32_t tap_start_time;
     float tap_start_value;
     float last_value;
 };
@@ -151,12 +148,12 @@ struct ldc1612_ng_homing {
     uint32_t homing_trigger_freq;
 
     // What time we fire with the trigger -- either the time homing
-    // triggered, or the time at the start of the tap (which will be
+    // triggered, or the computed time for the tap (which will be
     // earlier than when the tap was detected).
     uint32_t trigger_time;
 
-    // If it was a tap, the time at the end of tap detection (i.e.
-    // the time we actually decided to fire the tap trigger)
+    // If it was a tap, the start/end time of tap detection
+    uint32_t tap_start_time;
     uint32_t tap_end_time;
 
     // Number of errors we've seen in a row
@@ -562,15 +559,16 @@ command_ldc1612_ng_finish_home(uint32_t *args)
     struct ldc1612_ng_homing *lh = &ld->homing;
 
     uint32_t trigger_time = lh->trigger_time; // note: same as homing_clock in parent struct
+    uint32_t tap_start_time = lh->tap_start_time;
     uint32_t tap_end_time = lh->tap_end_time;
 
     ld->ts = NULL;
     lh->mode = 0;
 
-    sendf("ldc1612_ng_finish_home_reply oid=%c trigger_clock=%u tap_end_clock=%u"
-          , args[0], trigger_time, tap_end_time);
+    sendf("ldc1612_ng_finish_home_reply oid=%c trigger_clock=%u tap_start_clock=%u tap_end_clock=%u"
+          , args[0], trigger_time, tap_start_time, tap_end_time);
 
-    dprint("ZZZ finish trig_t=%u tap_t=%u", trigger_time, tap_end_time);
+    dprint("ZZZ finish trig_t=%u tap_s=%u tap_e=%u", trigger_time, tap_start_time, tap_end_time);
 }
 DECL_COMMAND(command_ldc1612_ng_finish_home,
              "ldc1612_ng_finish_home oid=%c");
@@ -841,17 +839,17 @@ check_wma_tap(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
     if (wma_d_avg > last_wma_d_avg) {
         // derivative is increasing; reset the accumulator,
         // and reset the tap time
-        wma_tap->tap_start_time = time;
+        lh->tap_start_time = time;
         wma_tap->tap_start_value = wma_d_avg;
         return;
     }
 
     if (wma_tap->tap_start_value - wma_d_avg >= wma_tap->tap_threshold) {
         // Note: we notify with the time the tap started, not the current time
-        notify_trigger(ld, wma_tap->tap_start_time, ld->success_reason);
-        lh->trigger_time = wma_tap->tap_start_time;
+        notify_trigger(ld, lh->tap_start_time, ld->success_reason);
+        lh->trigger_time = lh->tap_start_time;
         lh->tap_end_time = time;
-        dprint("ZZZ tap t=%u n=%u l=%u (f=%u)", wma_tap->tap_start_time, time, wma_tap->tap_start_value - wma_d_avg, data);
+        dprint("ZZZ tap t=%u n=%u l=%u (f=%u)", lh->tap_start_time, time, wma_tap->tap_start_value - wma_d_avg, data);
     }
 }
 
@@ -892,10 +890,15 @@ check_sos_tap(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
     if (val < sos_tap->last_value) {
         float diff = sos_tap->tap_start_value - val;
         if (diff >= sos_tap->tap_threshold) {
-            notify_trigger(ld, sos_tap->tap_start_time, ld->success_reason);
-            lh->trigger_time = sos_tap->tap_start_time;
+            // Note: we notify with the midpoint of the tap start time and the
+            // end (trigger) time. This seems to be the best balance that handles
+            // early (soft) detection.
+            uint32_t tap_t = (time - lh->tap_start_time) / 2;
+            tap_t += lh->tap_start_time;
+            notify_trigger(ld, tap_t, ld->success_reason);
+            lh->trigger_time = tap_t;
             lh->tap_end_time = time;
-            dprint("ZZZ tap t=%u n=%u l=%f (f=%f)", sos_tap->tap_start_time, time, sos_tap->tap_start_value - val, freq);
+            dprint("ZZZ tap t=%u n=%u l=%f (f=%f)", lh->tap_start_time, time, sos_tap->tap_start_value - val, freq);
             return;
         }
     } else if (val > sos_tap->last_value) {
@@ -903,7 +906,7 @@ check_sos_tap(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
         // the values are correct for the start of the tap (i.e. the peak)
         // once we realize the value is falling.
         sos_tap->tap_start_value = val;
-        sos_tap->tap_start_time = time;
+        lh->tap_start_time = time;
     }
 
     sos_tap->last_value = val;
