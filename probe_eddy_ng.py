@@ -2079,7 +2079,7 @@ class ProbeEddy:
         results = []
         tap_z = None
         tap_stddev = None
-        tap_oveshoot = None
+        tap_overshoot = None
         sample_err_count = 0
         tap = None
 
@@ -2206,11 +2206,6 @@ class ProbeEddy:
             f" sensor offset {self._tap_offset:.3f} at z={self.params.home_trigger_height:.3f}"
         )
 
-        if abs(self._tap_offset) > 0.300:  # arbitrary
-            self._log_error(
-                f"WARNING: Sensor offset is high ({self._tap_offset:.3f}); consider recalibrating sensor"
-            )
-
         if do_retract:
             th.manual_move([None, None, self._home_start_height], lift_speed)
             th.wait_moves()
@@ -2222,9 +2217,9 @@ class ProbeEddy:
     # from the result that has the lowest standard deviation
     def _compute_tap_z(
         self, taps: List[ProbeEddy.TapResult], samples: int, req_stddev: float
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, float, float]:
         if len(taps) < samples:
-            return None, None
+            return None, None, None
 
         tap_z = math.inf
         std_min = math.inf
