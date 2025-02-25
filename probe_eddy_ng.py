@@ -305,7 +305,6 @@ class ProbeEddyParams:
             "tap_drive_current", 0, minval=0, maxval=31
         )
 
-        logging.info(f"saved {saved_reg_drive_current} reg {reg_drive_current}")
         if (
             saved_reg_drive_current != 0
             and reg_drive_current != 0
@@ -332,7 +331,6 @@ class ProbeEddyParams:
         if tap_drive_current == 0:
             tap_drive_current = saved_tap_drive_current
 
-        logging.info(f"saved reg {reg_drive_current} set")
         self.reg_drive_current = reg_drive_current
         self.tap_drive_current = tap_drive_current
 
@@ -503,7 +501,6 @@ class ProbeEddy:
         self.params = ProbeEddyParams()
         self.params.load_from_config(config)
         if self.params.reg_drive_current == 0:
-            logging.info(f" is zero, overriding {self._sensor._drive_current}")
             # set as default
             self.params.reg_drive_current = self._sensor._drive_current
 
