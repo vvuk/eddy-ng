@@ -1985,7 +1985,7 @@ class ProbeEddy:
         samples_stddev = gcmd.get_float(
             "SAMPLES_STDDEV", self.params.tap_samples_stddev, above=0.0
         )
-        home_z: bool = gcmd.get_int("HOME_Z", 0) == 1
+        home_z: bool = gcmd.get_int("HOME_Z", 1) == 1
 
         mode = gcmd.get("MODE", self.params.tap_mode).lower()
         if mode not in ("wma", "butter"):
