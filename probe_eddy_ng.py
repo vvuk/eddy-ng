@@ -1233,11 +1233,11 @@ class ProbeEddy:
             maxval=31,
         )
 
-        max_drive_current_increase = 0
+        max_dc_increase = 0
         if self._sensor_type == "ldc1612" or self._sensor_type == "btt_eddy":
-            max_drive_current_increase = 5
-        max_drive_current_increase = gcmd.get_int(
-            "MAX_DC_INCREASE", max_drive_current_increase, minval=0, maxval=30
+            max_dc_increase = 5
+        max_dc_increase = gcmd.get_int(
+            "MAX_DC_INCREASE", max_dc_increase, minval=0, maxval=30
         )
 
         # lift up above cal_z_max, and then move over so the probe
@@ -1304,7 +1304,7 @@ class ProbeEddy:
                 )
                 if mapping.freq_spread() < 0.30:
                     self._log_warning(
-                        f"frequency spread {mapping.freq_spread()} is very low at drive current {drive_current}. (If setup fails completely, the sensor is probably mounted too high.)"
+                        f"frequency spread {mapping.freq_spread()} is very low at drive current {drive_current}. (The sensor is probably mounted too high.)"
                     )
                     ok_for_homing = ok_for_tap = False
                 if fth_rms is None or fth_rms > 0.025:
@@ -1313,38 +1313,34 @@ class ProbeEddy:
                     )
                     ok_for_homing = ok_for_tap = False
 
-            if (state == FINDING_HOMING and not ok_for_homing) or (
-                state == FINDING_TAP and not ok_for_tap
-            ):
-                # calibration failed, have we exceeded our max DC increase?
-                if (
-                    drive_current - start_drive_current
-                    < max_drive_current_increase
-                ):
-                    drive_current += 1
-                    continue
-
-                if state == FINDING_HOMING:
-                    result_msg = "Failed to find homing drive current."
-                elif state == FINDING_TAP:
-                    result_msg = "Failed to find tap drive current, but homing is set up."
-                else:
-                    result_msg = "Unknown state?"
-                self._log_error(state)
-                break
-
-            # success
-            self._dc_to_fmap[drive_current] = mapping
             if state == FINDING_HOMING and ok_for_homing:
+                self._dc_to_fmap[drive_current] = mapping
                 self.params.reg_drive_current = drive_current
                 self._log_msg(f"using {drive_current} for homing.")
                 state = FINDING_TAP
+
             if state == FINDING_TAP and ok_for_tap:
+                self._dc_to_fmap[drive_current] = mapping
                 self.params.tap_drive_current = drive_current
                 self._log_msg(f"using {drive_current} for tap.")
                 state = DONE
 
-            result_msg = "Setup success. Please check whether homing works with G28 Z, then check if tap works with PROBE_EDDY_NG_TAP."
+            if state == DONE:
+                result_msg = "Setup success. Please check whether homing works with G28 Z, then check if tap works with PROBE_EDDY_NG_TAP."
+                break
+
+            if drive_current - start_drive_current >= max_dc_increase:
+                # we've failed completely
+                if state == FINDING_HOMING:
+                    result_msg = "Failed to find homing drive current. (The sensor is probably mounted too low.)"
+                elif state == FINDING_TAP:
+                    result_msg = "Failed to find tap drive current, but homing is set up. (The sensor is probably mounted too low.)"
+                else:
+                    result_msg = "Unknown state?"
+                break
+
+            # increase DC and keep going
+            drive_current += 1
 
         if state == DONE:
             self._log_msg(result_msg)
