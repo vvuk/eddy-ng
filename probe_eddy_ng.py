@@ -3472,7 +3472,7 @@ class ProbeEddyFrequencyMap:
             )
         )
 
-        if self._ftoh_high:
+        if self._ftoh_high is not None:
             fig.add_trace(
                 go.Scatter(
                     x=times[high_samples],
@@ -3495,7 +3495,7 @@ class ProbeEddyFrequencyMap:
         )
 
         fig.add_trace(go.Scatter(x=times[low_samples], y=f_to_z_low_err, mode="lines", name="Err", yaxis="y3"))
-        if f_to_z_high_err:
+        if f_to_z_high_err is not None:
             fig.add_trace(go.Scatter(x=times[high_samples], y=f_to_z_high_err, mode="lines", name="Err (high)", yaxis="y3"))
 
         if vels is not None:
