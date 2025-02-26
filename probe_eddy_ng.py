@@ -12,6 +12,7 @@ import numpy.polynomial as npp
 import traceback
 import pickle, base64
 from itertools import combinations
+from functools import cmp_to_key
 
 from dataclasses import dataclass, field
 from typing import (
@@ -42,7 +43,7 @@ except:
 
 from .homing import HomingMove
 
-from . import ldc1612_ng, probe, manual_probe
+from . import ldc1612_ng, probe, manual_probe, bed_mesh
 
 try:
     import plotly  # noqa
@@ -558,6 +559,8 @@ class ProbeEddy:
         # functionality like start_session
         self._printer.add_object("probe", self)
 
+        self._bed_mesh_helper = BedMeshScanHelper(self, config)
+
         # TODO: get rid of this
         if hasattr(probe, "ProbeCommandHelper"):
             self._cmd_helper = probe.ProbeCommandHelper(
@@ -688,6 +691,7 @@ class ProbeEddy:
             self.cmd_TAP,
             self.cmd_TAP_help + " (alias for PROBE_EDDY_NG_TAP)",
         )
+        gcode.register_command("PEMESH", self.cmd_MESH, "")
 
     def _handle_command_error(self, gcmd=None):
         try:
@@ -905,6 +909,9 @@ class ProbeEddy:
         self._last_sampler_samples = sampler.get_samples()
         self._last_sampler_raw_samples = sampler.get_raw_samples()
         self._last_sampler_memos = sampler.memos
+
+    def cmd_MESH(self, gcmd: GCodeCommand):
+        self._bed_mesh_helper.scan()
 
     cmd_STATUS_help = "Query the last raw coil value and status"
 
@@ -3185,6 +3192,35 @@ class ProbeEddySampler:
         idx = np.argmin([abs(t - time) for t, _, _ in self._samples])
         return self._samples[idx][2]
 
+    def find_heights_at_times(self, intervals):
+        self._update_samples()
+        times = np.asarray([t for t, _, _ in self._samples])
+        heights = np.asarray([h for _, _, h in self._samples])
+        num_samples = len(times)
+
+        interval_heights = []
+        i = 0
+        for iv_start, iv_end in intervals:
+            # find start time of interval
+            while i < num_samples and times[i] < iv_start:
+                i += 1
+                continue
+            if i == num_samples:
+                raise self._printer.command_error(f"No samples in time range {iv_start}-{iv_end}")
+
+            istart = i
+
+            # find end
+            while i < num_samples and times[i] < iv_end:
+                i += 1
+                continue
+            iend = i-1
+
+            median = np.median(heights[istart:iend])
+            interval_heights.append(median)
+
+        return interval_heights
+
     def find_height_at_time(self, start_time, end_time):
         if end_time < start_time:
             raise self._printer.command_error(
@@ -3202,21 +3238,17 @@ class ProbeEddySampler:
             f"EDDYng find_height_at_time: {len(self._samples)} samples, time range {self._samples[0][0]:.3f} to {self._samples[-1][0]:.3f}"
         )
 
+        times = [t for t, _, _ in self._samples]
+
         # find the first sample that is >= start_time
-        start_idx = bisect.bisect_left(
-            [t for t, _, _ in self._samples], start_time
-        )
+        start_idx = bisect.bisect_left(times, start_time)
         if start_idx >= len(self._samples):
             raise self._printer.command_error("Nothing after start_time?")
 
-        # find the last sample that is <= end_time
-        end_idx = bisect.bisect_right(
-            [t for t, _, _ in self._samples], end_time
-        )
-        if end_idx == 0:
-            raise self._printer.command_error(
-                "found something at start_time, but not before end_time?"
-            )
+        # find the last sample that is < end_time
+        end_idx = start_idx
+        while end_idx < len(times) and times[end_idx] < end_time:
+            end_idx += 1
 
         # average the heights of the samples in the range
         heights = [h for _, _, h in self._samples[start_idx:end_idx]]
@@ -3540,6 +3572,132 @@ class ProbeEddyFrequencyMap:
     def calibrated(self) -> bool:
         return (self._ftoh is not None and self._htof is not None)
 
+
+@final
+class BedMeshScanHelper:
+    def __init__(self, eddy, config):
+        self._eddy = eddy
+        self._printer = eddy._printer
+
+        bmc = config.getsection("bed_mesh")
+        self._bed_mesh = eddy._printer.load_object(bmc, "bed_mesh")
+        self._x_points, self._y_points = bmc.getintlist("probe_count", count=2, note_valid=False)
+        self._x_min, self._y_min = bmc.getfloatlist("mesh_min", count=2, note_valid=False)
+        self._x_max, self._y_max = bmc.getfloatlist("mesh_max", count=2, note_valid=False)
+        self._speed = bmc.getfloat("speed", 100.0, above=0.0, note_valid=False)
+        self._scan_z = bmc.getfloat("horizontal_move_z", self._eddy.params.home_trigger_height, above=0.0, note_valid=False)
+
+        self._x_offset = self._eddy.params.x_offset
+        self._y_offset = self._eddy.params.y_offset
+
+        self._mesh_points, self._mesh_path = self._generate_path()
+
+
+    def _generate_path(self):
+        x_vals = np.linspace(self._x_min, self._x_max, self._x_points)
+        y_vals = np.linspace(self._y_min, self._y_max, self._y_points)
+        path = []
+        reverse = False
+
+        for y in y_vals:
+            row = [(x, y, True) for x in (reversed(x_vals) if reverse else x_vals)]
+            path.extend(row)
+            reverse = not reverse
+        return path, path
+
+    def _scan_path(self):
+        th = self._eddy._toolhead
+        times = []
+
+        for pt in self._mesh_path:
+            # TODO bounds
+            th.manual_move([pt[0] - self._x_offset, pt[1] - self._y_offset, None], self._speed)
+            th.register_lookahead_callback(lambda t: times.append(t))
+
+        th.wait_moves()
+
+        return times
+
+    def _set_bed_mesh(self, heights):
+        # heights is in the order of the _mesh_path points; convert to
+        # be ordered min_y..max_y, min_x..max_x, then pull out the heights
+        indexed_points = []
+        i = 0
+        for x, y, include in self._mesh_path:
+            if not include:
+                continue
+            indexed_points.append((x, y, i))
+
+        def sort_points(a, b):
+            if a[1] < b[1]: # y first
+                return -1
+            if a[1] > b[1]:
+                return 1
+            if a[0] < b[0]: # then x
+                return -1
+            if a[0] > b[0]:
+                return 1
+            return 0
+
+        indices = [ki for _, _, ki in sorted(indexed_points, key=cmp_to_key(sort_points))]
+
+        ki = 0
+        matrix = []
+        for _ in range(self._y_points):
+            row = []
+            for _ in range(self._x_points):
+                row.append(heights[indices[ki]])
+                ki += 1
+            matrix.append(row)
+
+        params = self._bed_mesh.bmc.mesh_config.copy()
+        params.update({
+            "min_x": self._x_min,
+            "max_x": self._x_max,
+            "min_y": self._y_min,
+            "max_y": self._y_max,
+            "x_count": self._x_points,
+            "y_count": self._y_points,
+        })
+        mesh = bed_mesh.ZMesh(params, None)
+        try:
+            mesh.build_mesh(matrix)
+        except bed_mesh.BedMeshError as e:
+            raise self._printer.command_error(str(e))
+        self._bed_mesh.set_mesh(mesh)
+        self._eddy._log_msg("Mesh scan complete")
+
+    def scan(self):
+        th = self._eddy._toolhead
+
+        # move to the start point
+        v = self._mesh_path[0]
+        th.manual_move([None, None, 10.0], self._eddy.params.lift_speed)
+        th.manual_move([v[0], v[1], None], self._speed)
+        th.manual_move([None, None, self._scan_z], self._eddy.params.probe_speed)
+        th.wait_moves()
+
+        heights = []
+
+        sample_time = self._eddy.params.scan_sample_time
+
+        with self._eddy.start_sampler() as sampler:
+            path_times = self._scan_path()
+            sampler.wait_for_sample_at_time(path_times[-1] + sample_time*2.)
+            sampler.finish()
+
+            heights = sampler.find_heights_at_times([(t - sample_time/2., t + sample_time/2.) for t in path_times])
+
+            with open("/tmp/mesh.csv", "w") as mfile:
+                mfile.write("time,x,y,z\n")
+                for i in range(len(self._mesh_points)):
+                    time = path_times[i]
+                    x = self._mesh_points[i][0]
+                    y = self._mesh_points[i][1]
+                    z = heights[i]
+                    mfile.write(f"{time},{x},{y},{z}\n")
+
+            self._set_bed_mesh(heights)
 
 def np_rolling_mean(data, window, center=True):
     half_window = (window - 1) // 2 if center else 0
