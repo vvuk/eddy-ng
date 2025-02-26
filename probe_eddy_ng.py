@@ -217,9 +217,6 @@ class ProbeEddyParams:
     tap_max_samples: int = 5
     # The maximum standard deviation for any 3 samples to be considered valid.
     tap_samples_stddev: float = 0.020
-    # Random distance to move from the tap point for each sample. The move will be from
-    # the original point up to this radius distance away.
-    tap_random_radius: float = 0.0
 
     # When probing multiple points (not rapid scan), how long to sample for at each probe point,
     # after a scan_sample_time_delay delay. The total dwell time at each probe point is
@@ -375,9 +372,6 @@ class ProbeEddyParams:
         )
         self.tap_samples_stddev = config.getfloat(
             "tap_samples_stddev", self.tap_samples_stddev, above=0.0
-        )
-        self.tap_random_radius = config.getfloat(
-            "tap_random_radius", self.tap_random_radius, minval=0.0
         )
         self.tap_trigger_safe_start_height = config.getfloat(
             "tap_trigger_safe_start_height",
