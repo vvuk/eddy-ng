@@ -2640,9 +2640,9 @@ class ProbeEddyScanningProbe:
 
             # what callers want to know is "what Z would the toolhead be at, if it was at the height
             # the probe would 'trigger'", because this is all done in terms of klicky-type probes
-            th_pos[2] = float(self._scan_z + z_deviation)
+            z = float(self._scan_z + z_deviation)
 
-            results.append([th_pos[0], th_pos[1], th_pos[2]])
+            results.append([th_pos[0], th_pos[1], z])
 
         # reset notes so that this session can continue to be used
         self._notes = []
