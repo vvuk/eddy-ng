@@ -601,7 +601,7 @@ class ProbeEddy:
 
     def _log_msg(self, msg):
         logging.info(f"{self._name}: {msg}")
-        self._gcode.respond_info(f"EDDYng: {msg}")
+        self._gcode.respond_info(f"{msg}", log=False)
 
     def _log_info(self, msg):
         logging.info(f"{self._name}: {msg}")
@@ -1172,7 +1172,7 @@ class ProbeEddy:
             if self._cmd_helper is not None:
                 self._cmd_helper.last_z_result = float(r.value)
 
-            self._last_probe_result = r.value
+            self._last_probe_result = float(r.value)
 
             if home_z:
                 th = self._printer.lookup_object("toolhead")
@@ -1603,11 +1603,11 @@ class ProbeEddy:
         status.update(
             {
                 "name": self._full_name,
-                "home_trigger_height": self.params.home_trigger_height,
-                "tap_offset": self._tap_offset,
-                "tap_adjust_z": self._tap_adjust_z,
-                "last_probe_result": self._last_probe_result,
-                "last_tap_z": self._last_tap_z,
+                "home_trigger_height": float(self.params.home_trigger_height),
+                "tap_offset": float(self._tap_offset),
+                "tap_adjust_z": float(self._tap_adjust_z),
+                "last_probe_result": float(self._last_probe_result),
+                "last_tap_z": float(self._last_tap_z),
             }
         )
         return status
@@ -1636,6 +1636,9 @@ class ProbeEddy:
         if not self._z_homed():
             raise self._printer.command_error("Must home Z before PROBE")
 
+        if not self.calibrated():
+            raise self._printer.command_error("Eddy probe not calibrated!")
+
         th = self._printer.lookup_object("toolhead")
         th_pos = th.get_position()
         if th_pos[2] < z:
@@ -1644,18 +1647,18 @@ class ProbeEddy:
         th.dwell(0.100)
         th.wait_moves()
 
-        if not self.calibrated():
-            raise self._printer.command_error("Eddy probe not calibrated!")
-
         r = self.probe_static_height(duration)
         if not r.valid:
             raise self._printer.command_error("Probe captured no samples!")
+
+        height = r.value
+        height += self._tap_offset
 
         # At what Z position would the toolhead be at for the probe to read
         # _home_trigger_height? In other words, if the probe tells us
         # the height is 1.5 when the toolhead is at z=2.0, if the toolhead
         # was moved up to 2.5, then the probe should read 2.0.
-        probe_z = z + (z - r.value)
+        probe_z = z + (z - height)
 
         return [th_pos[0], th_pos[1], probe_z]
 
@@ -2153,7 +2156,7 @@ class ProbeEddy:
         # Adjust the computed tap_z by the user's tap_adjust_z, typically to raise
         # it to account for flex in the system (otherwise the Z would be too low)
         computed_tap_z = adjusted_tap_z = tap_z + tap_adjust_z
-        self._last_tap_z = tap_z
+        self._last_tap_z = float(tap_z)
 
         th = self._toolhead
 
@@ -2196,7 +2199,7 @@ class ProbeEddy:
         th.wait_moves()
 
         result = self.probe_static_height()
-        self._tap_offset = self.params.home_trigger_height - result.value
+        self._tap_offset = float(self.params.home_trigger_height - result.value)
 
         self._log_msg(
             f"Probe computed tap Z at {computed_tap_z:.3f} (tap at z={tap_z:.3f}, stddev {tap_stddev:.3f}),"
@@ -2647,6 +2650,9 @@ class ProbeEddyScanningProbe:
                     f"ProbeEddyScanningProbe warning: toolhead not at home_trigger_height ({self._scan_z:.3f}) during probes (saw {th_pos[2]:.3f})"
                 )
 
+            h_orig = height
+            tz_orig = th_pos[2]
+
             # adjust the sensor height value based on the fine-tuned tap offset amount
             height += self._tap_offset
 
@@ -2657,7 +2663,6 @@ class ProbeEddyScanningProbe:
             # what callers want to know is "what Z would the toolhead be at, if it was at the height
             # the probe would 'trigger'", because this is all done in terms of klicky-type probes
             th_pos[2] = float(self._scan_z + z_deviation)
-            # toolhead_pos[2] = height
 
             results.append([th_pos[0], th_pos[1], th_pos[2]])
 

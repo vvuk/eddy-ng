@@ -71,7 +71,7 @@ class LDC1612_ng:
         self.printer: Printer = config.get_printer()
 
         self._name = config.get_name().split()[-1]
-        self._verbose = config.getboolean("verbose", True)
+        self._verbose = config.getboolean("debug", False)
 
         device_choices = {
             "ldc1612": PRODUCT_UNKNOWN,
@@ -118,7 +118,6 @@ class LDC1612_ng:
         if drive_current == 0:
             drive_current = self._default_drive_current
         self._drive_current = drive_current
-        logging.info(f"ldc dc {self._drive_current}")
 
         self._deglitch: str = config.get("ldc_deglitch", "default").lower()
         self._data_rate: int = config.getint(
