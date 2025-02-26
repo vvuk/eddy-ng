@@ -3526,13 +3526,13 @@ class ProbeEddyFrequencyMap:
         if self._ftoh is None:
             raise self._eddy._printer.command_error("Calling freq_to_height on uncalibrated map")
         if self._ftoh_high is not None and freq < self._ftoh.domain[0]:
-            return self._ftoh_high(1.0 / freq)
-        return self._ftoh(1.0 / freq)
+            return float(self._ftoh_high(1.0 / freq))
+        return float(self._ftoh(1.0 / freq))
 
     def height_to_freq(self, height: float) -> float:
         if self._htof is None:
             raise self._eddy._printer.command_error("Calling height_to_freq on uncalibrated map")
-        return 1.0 / self._htof(height)
+        return 1.0 / float(self._htof(height))
 
     def calibrated(self) -> bool:
         return (self._ftoh is not None and self._htof is not None)
