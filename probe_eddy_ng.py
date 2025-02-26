@@ -2577,15 +2577,6 @@ class ProbeEddyScanningProbe:
         self._sampler.finish()
         self._sampler = None
 
-    def _lookup_toolhead_pos(self, time):
-        pos, _ = get_toolhead_kin_pos(self._printer, time)
-        return pos
-
-        # kin_spos = {s.get_name(): s.mcu_to_commanded_position(
-        #                              s.get_past_mcu_position(time))
-        #            for s in self._toolhead_kin.get_steppers()}
-        # return self._toolhead_kin.calc_position(kin_spos)
-
     def _rapid_lookahead_cb(self, time):
         # the time passed here is the time when the move finishes;
         start_time = time - self._sample_time / 2.0
@@ -2627,9 +2618,7 @@ class ProbeEddyScanningProbe:
         )
         for start_time, sample_time, th_pos in self._notes:
             if th_pos is None:
-                # this is giving a totally wrong position. I don't know what's up with that.
-                th_pos = self._lookup_toolhead_pos(sample_time)
-                # logging.info(f"th @ {sample_time:.3f}: {th_pos[0]:.2f} {th_pos[1]:.2f} {th_pos[2]:.2f}")
+                th_pos, _ = self.eddy._get_trapq_position(sample_time)
 
             end_time = start_time + self._sample_time
             height = self._sampler.find_height_at_time(start_time, end_time)
