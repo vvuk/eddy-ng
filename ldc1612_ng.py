@@ -63,6 +63,7 @@ class LDC1612_ng_homing_result:
     trigger_time: float
     tap_start_time: float
     tap_end_time: float
+    error: int
 
 
 # Interface class to LDC1612 mcu support
@@ -269,7 +270,7 @@ class LDC1612_ng:
 
         self._ldc1612_ng_finish_home_cmd = self._mcu.lookup_query_command(
             "ldc1612_ng_finish_home oid=%c",
-            "ldc1612_ng_finish_home_reply oid=%c trigger_clock=%u tap_start_clock=%u tap_end_clock=%u",
+            "ldc1612_ng_finish_home_reply oid=%c trigger_clock=%u tap_start_clock=%u tap_end_clock=%u error=%u",
             oid=self._oid,
             cq=cmdqueue,
         )
@@ -338,6 +339,20 @@ class LDC1612_ng:
             if s & (1 << bit):
                 flags.append(flag)
         return " ".join(flags)
+
+    def data_error_to_str(self, d: int):
+        err_bits = [
+            "Under-range Error",
+            "Over-range Error",
+            "Watchdog Error",
+            "Amplitude Error"
+        ]
+        d = d >> 12 # shift out the data bits
+        errors = []
+        for bit, err in enumerate(err_bits):
+            if d & (1 << bit):
+                errors.append(err)
+        return " ".join(errors)
 
     def read_one_value(self):
         self._init_chip()
@@ -428,11 +443,12 @@ class LDC1612_ng:
         trigger_clock = reply["trigger_clock"]
         tap_start_clock = reply["tap_start_clock"]
         tap_end_clock = reply["tap_end_clock"]
+        error = reply["error"]
         trigger_time = self._convert_clock(trigger_clock)
         tap_start_time = self._convert_clock(tap_start_clock)
         tap_end_time = self._convert_clock(tap_end_clock)
 
-        return LDC1612_ng_homing_result(trigger_time, tap_start_time, tap_end_time)
+        return LDC1612_ng_homing_result(trigger_time, tap_start_time, tap_end_time, error)
 
     def set_sos_section(self, sect_num: int, sect_vals: List[float]):
         print(sect_vals)

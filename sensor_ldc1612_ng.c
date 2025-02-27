@@ -160,6 +160,8 @@ struct ldc1612_ng_homing {
     uint8_t error_count;
     // Number we're allowed to see, from home setup
     uint8_t error_threshold;
+    // The final error that caused an abort
+    uint32_t error;
 
     union {
         struct ldc1612_ng_homing_wma_tap wma_tap;
@@ -561,12 +563,13 @@ command_ldc1612_ng_finish_home(uint32_t *args)
     uint32_t trigger_time = lh->trigger_time; // note: same as homing_clock in parent struct
     uint32_t tap_start_time = lh->tap_start_time;
     uint32_t tap_end_time = lh->tap_end_time;
+    uint32_t error = lh->error;
 
     ld->ts = NULL;
     lh->mode = 0;
 
-    sendf("ldc1612_ng_finish_home_reply oid=%c trigger_clock=%u tap_start_clock=%u tap_end_clock=%u"
-          , args[0], trigger_time, tap_start_time, tap_end_time);
+    sendf("ldc1612_ng_finish_home_reply oid=%c trigger_clock=%u tap_start_clock=%u tap_end_clock=%u error=%u"
+          , args[0], trigger_time, tap_start_time, tap_end_time, error);
 
     dprint("ZZZ finish trig_t=%u tap_s=%u tap_e=%u", trigger_time, tap_start_time, tap_end_time);
 }
@@ -698,6 +701,8 @@ check_error(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
 
     if (lh->error_count <= lh->error_threshold)
         return false;
+
+    lh->error = data;
 
     // Sensor reports an issue - cancel homing
     notify_trigger(ld, 0, ld->other_reason_base + REASON_ERROR_SENSOR);

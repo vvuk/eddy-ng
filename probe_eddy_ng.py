@@ -2888,6 +2888,7 @@ class ProbeEddyEndstopWrapper:
         trigger_time = home_result.trigger_time
         tap_start_time = home_result.tap_start_time
         tap_end_time = home_result.tap_end_time
+        error = self._sensor.data_error_to_str(home_result.error) if home_result.error != 0 else ""
 
         self._sampler.memo("trigger_time", trigger_time)
         if self.tap_config is not None:
@@ -2896,7 +2897,8 @@ class ProbeEddyEndstopWrapper:
             self._sampler.memo("tap_threshold", self.tap_config.threshold)
 
         self.eddy._log_debug(
-            f"trigger_time {trigger_time} (mcu: {self._mcu.print_time_to_clock(trigger_time)}) tap time: {tap_start_time}-{tap_end_time}"
+                f"trigger_time {trigger_time} (mcu: {self._mcu.print_time_to_clock(trigger_time)}) "
+                f"tap time: {tap_start_time}-{tap_end_time} {error}"
         )
 
         # nb: _dispatch.stop() will treat anything >= REASON_COMMS_TIMEOUT as an error,
@@ -2929,17 +2931,14 @@ class ProbeEddyEndstopWrapper:
                 "Communication timeout during homing"
             )
         if res == self.REASON_ERROR_SENSOR:
-            status = self._sensor.latched_status_str()
-            raise self._printer.command_error(
-                "Sensor error" + (f" (ldc status: {status})" if status else "")
-            )
+            raise self._printer.command_error(f"Sensor error ({error})")
         if res == self.REASON_ERROR_PROBE_TOO_LOW:
             raise self._printer.command_error(
                 "Probe too low at start of homing, did not clear safe height."
             )
         if res == self.REASON_ERROR_TOO_EARLY:
             raise self._printer.command_error(
-                "Probe did not clear safe height after safe time."
+                "Probe cleared safe height too early."
             )
         if res == mcu.MCU_trsync.REASON_PAST_END_TIME:
             raise self._printer.command_error(
