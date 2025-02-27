@@ -46,7 +46,7 @@ except:
 
 from .homing import HomingMove
 
-from . import ldc1612_ng, probe, manual_probe
+from . import ldc1612_ng, probe, manual_probe, bed_mesh
 
 try:
     import plotly  # noqa
@@ -2603,7 +2603,8 @@ class ProbeEddyScanningProbe:
     def _rapid_lookahead_cb(self, time):
         # the time passed here is the time when the move finishes;
         start_time = time - self._sample_time / 2.0
-        self._notes.append([start_time, time, None])
+        th_pos, _ = self.eddy._get_trapq_position(time)
+        self._notes.append([start_time, time, th_pos])
 
     def run_probe(self, gcmd):
         if self._is_rapid:
