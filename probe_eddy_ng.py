@@ -30,6 +30,8 @@ try:
     from klippy.configfile import error as configerror
     from klippy.gcode import GCodeCommand
     from klippy.toolhead import ToolHead
+
+    IS_KALICO = True
 except:
     import mcu
     import pins
@@ -39,6 +41,8 @@ except:
     from configfile import error as configerror
     from gcode import GCodeCommand
     from toolhead import ToolHead
+
+    IS_KALICO = False
 
 from .homing import HomingMove
 
@@ -584,6 +588,10 @@ class ProbeEddy:
         self._printer.register_event_handler(
             "klippy:connect", self._handle_connect
         )
+
+        # patch bed_mesh because Klipper
+        if not IS_KALICO:
+            bed_mesh.ProbeManager.start_probe = bed_mesh_ProbeManager_start_probe_override
 
     def _log_error(self, msg):
         logging.error(f"{self._name}: {msg}")
@@ -3561,6 +3569,19 @@ def np_rolling_mean(data, window, center=True):
 def np_rmse(p, x, y):
     y_hat = p(x)
     return np.sqrt(np.mean((y - y_hat) ** 2))
+
+
+def bed_mesh_ProbeManager_start_probe_override(self, gcmd):
+    method = gcmd.get("METHOD", "automatic").lower()
+    can_scan = False
+    pprobe = self.printer.lookup_object("probe", None)
+    if pprobe is not None:
+        probe_name = pprobe.get_status(None).get("name", "")
+        can_scan = "eddy" in probe_name
+    if method == "rapid_scan" and can_scan:
+        self.rapid_scan_helper.perform_rapid_scan(gcmd)
+    else:
+        self.probe_helper.start_probe(gcmd)
 
 
 def load_config_prefix(config: ConfigWrapper):
