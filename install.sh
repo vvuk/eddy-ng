@@ -58,7 +58,7 @@ if [ "$UNINSTALL" == "true" ]; then
     done
     
     # Reverse the patch
-    if [ -f "$TARGET_DIR/klippy/extras/bed_mesh.py" ]; then
+    if grep -q "ldc1612_ng" "$TARGET_DIR/src/Makefile" ; then
         echo "Reversing patch..."
         (cd "$TARGET_DIR" && patch -p1 -R < "$SCRIPT_DIR/$PATCH_FILE")
     fi
@@ -68,20 +68,12 @@ else
         SRC_FILE="${file%%:*}"
         SRC_PATH="${SCRIPT_DIR}/${SRC_FILE}"
         DEST_DIR="$TARGET_DIR/${file#*:}"
-        DEST_PATH="${DEST_DIR}/${SRC_FILE}"
+	LINKPATH="$(realpath $SRC_PATH --relative-to=$DEST_DIR)"
         
-        if [ -f "$DEST_PATH" -a "$SRC_FILE" == "sensor_ldc1612_ng.c" ] &&
-            ! cmp -s "$SRC_PATH" "$DEST_PATH" ;
-        then
-            NEEDS_REBUILD=1
-        fi
-
-        echo "Copying $SRC_FILE to $DEST_DIR"
-        cp "$SRC_FILE" "$DEST_DIR/"
+	ln -sfv "$LINKPATH" "$DEST_DIR/"
     done
-    
-    BED_MESH_FILE="$TARGET_DIR/klippy/extras/bed_mesh.py"
-    if [ -f "$BED_MESH_FILE" ] && ! grep -q "eddy-ng patched" "$BED_MESH_FILE"; then
+
+    if ! grep -q "ldc1612_ng" "$TARGET_DIR/src/Makefile"; then
         echo "Applying patch..."
         (cd "$TARGET_DIR" && patch -p1 < "$SCRIPT_DIR/$PATCH_FILE")
     else
