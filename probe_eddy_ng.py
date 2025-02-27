@@ -2592,24 +2592,26 @@ class ProbeEddyScanningProbe:
         self._sampler.finish()
         self._sampler = None
 
-    def _rapid_lookahead_cb(self, time):
-        # the time passed here is the time when the move finishes;
+    def _rapid_lookahead_cb(self, time, th_pos):
+        # The time passed here is the time when the move finishes;
+        # but this is super obnoxious because we don't get any info
+        # here about _where_ the move is to. So we explicitly pass
+        # in the last position in run_probe
         start_time = time - self._sample_time / 2.0
-        th_pos, _ = self.eddy._get_trapq_position(time)
         self._notes.append([start_time, time, th_pos])
 
     def run_probe(self, gcmd):
+        th = self._toolhead
+        th_pos = th.get_position()
+
         if self._is_rapid:
             # this callback is attached to the last move in the queue, so that
             # we can grab the toolhead position when the toolhead actually hits it
-            self._toolhead.register_lookahead_callback(self._rapid_lookahead_cb)
+
+            self._toolhead.register_lookahead_callback(lambda time: self._rapid_lookahead_cb(time, th_pos))
             return
 
-        th = self._toolhead
-
         th.dwell(self._sample_time_delay)
-
-        th_pos = th.get_position()
         start_time = th.get_last_move_time()
         self._toolhead.dwell(self._sample_time + self._sample_time_delay)
         self._notes.append((start_time, start_time + self._sample_time / 2.0, th_pos))
@@ -2635,6 +2637,8 @@ class ProbeEddyScanningProbe:
         for start_time, sample_time, th_pos in self._notes:
             if th_pos is None:
                 th_pos, _ = self.eddy._get_trapq_position(sample_time)
+                if th_pos is None:
+                    raise self._printer.command_error(f"No trapq history found for {sample_time:.3f} and no position!")
 
             end_time = start_time + self._sample_time
             height = self._sampler.find_height_at_time(start_time, end_time)
