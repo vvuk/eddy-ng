@@ -614,6 +614,11 @@ class ProbeEddy:
             self.cmd_CALIBRATE_help,
         )
         gcode.register_command(
+            "PROBE_EDDY_NG_CALIBRATION_STATUS",
+            self.cmd_CALIBRATION_STATUS,
+            self.cmd_CALIBRATION_STATUS_help,
+        )
+        gcode.register_command(
             "PROBE_EDDY_NG_SETUP",
             self.cmd_SETUP,
             self.cmd_SETUP_help,
@@ -1037,6 +1042,16 @@ class ProbeEddy:
                 f"Cleared calibration for drive current {drive_current}"
             )
         self.save_config()
+
+    cmd_CALIBRATION_STATUS_help = "Display information about EDDYng calibration"
+
+    def cmd_CALIBRATION_STATUS(self, gcmd: GCodeCommand):
+        for dc in self._dc_to_fmap:
+            m = self._dc_to_fmap[dc]
+            hmin, hmax = m.height_range
+            fmin, fmax = m.freq_range
+            fspread = m.freq_spread()
+            self._log_msg(f"Drive current {dc}: {hmin:.3f} to {hmax:.3f} ({fmin:.1f} to {fmax:.1f}, {fspread:.2f}%; ftoh_high: {m._ftoh_high is not None})")
 
     def cmd_SET_TAP_OFFSET(self, gcmd: GCodeCommand):
         value = gcmd.get_float("VALUE", None)
