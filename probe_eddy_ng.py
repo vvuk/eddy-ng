@@ -355,6 +355,14 @@ class ProbeEddyParams:
             "tap_threshold", default_tap_threshold
         )
 
+        self.scan_sample_time = config.getfloat(
+            "scan_sample_time", self.scan_sample_time, above=0.0
+        )
+        self.scan_sample_time_delay = config.getfloat(
+            "scan_sample_time_delay", self.scan_sample_time_delay, minval=0.0
+        )
+
+
         # for 'butter'
         self.tap_butter_lowcut = config.getfloat(
             "tap_butter_lowcut", self.tap_butter_lowcut, above=0.0
