@@ -241,7 +241,7 @@ class ProbeEddyParams:
     # remove some safety checks, largely for testing/development
     allow_unsafe: bool = False
     # whether to write the tap plot for the last tap
-    write_tap_plot: bool = True
+    write_tap_plot: bool = False
     # whether to write the tap plot for every tap
     write_every_tap_plot: bool = False
     # maximum number of errors to allow in a row on the sensor
@@ -579,7 +579,7 @@ class ProbeEddy:
         self._tap_adjust_z = self.params.tap_adjust_z
 
         # define our own commands
-        self._dummy_gcode_cmd = self._gcode.create_gcode_command("", "", {})
+        self._dummy_gcode_cmd: GCodeCommand = self._gcode.create_gcode_command("", "", {})
         self.define_commands(self._gcode)
 
         self._printer.register_event_handler(
@@ -2011,6 +2011,7 @@ class ProbeEddy:
             "SAMPLES_STDDEV", self.params.tap_samples_stddev, above=0.0
         )
         home_z: bool = gcmd.get_int("HOME_Z", 1) == 1
+        write_plot_arg = gcmd.get_int("PLOT", None)
 
         mode = gcmd.get("MODE", self.params.tap_mode).lower()
         if mode not in ("wma", "butter"):
@@ -2029,6 +2030,12 @@ class ProbeEddy:
             raise self._printer.command_error(
                 "Z axis must be homed before tapping"
             )
+
+        write_tap_plot = self.params.write_tap_plot
+        write_every_tap_plot = self.params.write_every_tap_plot and write_tap_plot
+        if write_plot_arg is not None:
+            write_tap_plot = write_plot_arg > 0
+            write_every_tap_plot = write_plot_arg > 1
 
         tapcfg = ProbeEddy.TapConfig(mode=mode, threshold=tap_threshold)
         if mode == "butter":
@@ -2117,7 +2124,7 @@ class ProbeEddy:
                 )
                 sample_i += 1
 
-                if self.params.write_every_tap_plot:
+                if write_every_tap_plot:
                     self._write_tap_plot(tap, sample_i)
 
                 if tap.error:
@@ -2153,10 +2160,7 @@ class ProbeEddy:
                         break
         finally:
             self._sensor.set_drive_current(self.params.reg_drive_current)
-            if (
-                self.params.write_tap_plot
-                and not self.params.write_every_tap_plot
-            ):
+            if write_tap_plot and not write_every_tap_plot:
                 self._write_tap_plot(tap)
 
         # If we didn't compute a tap_z report the error
@@ -2177,9 +2181,11 @@ class ProbeEddy:
 
         th = self._toolhead
 
+        homed_to_str = ""
         if home_z:
             th_pos = th.get_position()
             th_pos[2] = -(tap_adjust_z + tap_overshoot)
+            homed_to_str = f"homed z={th_pos[2]:.3f}, "
             self._set_toolhead_position(th_pos, [2])
             self._last_tap_gcode_adjustment = 0.0
             adjusted_tap_z = 0.0
@@ -2219,8 +2225,9 @@ class ProbeEddy:
         self._tap_offset = float(self.params.home_trigger_height - result.value)
 
         self._log_msg(
-            f"Probe computed tap Z at {computed_tap_z:.3f} (tap at z={tap_z:.3f}, stddev {tap_stddev:.3f}),"
-            f" sensor offset {self._tap_offset:.3f} at z={self.params.home_trigger_height:.3f}"
+            f"Probe {homed_to_str}computed tap at {computed_tap_z:.3f} (tap at z={tap_z:.3f}, "
+            f"stddev {tap_stddev:.3f}) with {samples} samples, "
+            f"sensor offset {self._tap_offset:.3f} at z={self.params.home_trigger_height:.3f}"
         )
 
         if do_retract:
