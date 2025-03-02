@@ -348,6 +348,7 @@ class ProbeEddyParams:
             -1.0,
             above=0.0,
         )
+        self.tap_time_position = config.getfloat("tap_time_position", self.tap_time_position, minval=0.0, maxval=1.0)
 
         if self.tap_trigger_safe_start_height == -1.0:  # sentinel
             self.tap_trigger_safe_start_height = self.home_trigger_height / 2.0
