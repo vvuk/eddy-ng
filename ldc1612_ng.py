@@ -345,9 +345,9 @@ class LDC1612_ng:
             "Under-range Error",
             "Over-range Error",
             "Watchdog Error",
-            "Amplitude Error"
+            "Amplitude Error",
         ]
-        d = d >> 12 # shift out the data bits
+        d = d >> 12  # shift out the data bits
         errors = []
         for bit, err in enumerate(err_bits):
             if d & (1 << bit):
@@ -448,7 +448,9 @@ class LDC1612_ng:
         tap_start_time = self._convert_clock(tap_start_clock)
         tap_end_time = self._convert_clock(tap_end_clock)
 
-        return LDC1612_ng_homing_result(trigger_time, tap_start_time, tap_end_time, error)
+        return LDC1612_ng_homing_result(
+            trigger_time, tap_start_time, tap_end_time, error
+        )
 
     def set_sos_section(self, sect_num: int, sect_vals: List[float]):
         print(sect_vals)

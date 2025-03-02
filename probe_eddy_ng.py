@@ -221,6 +221,13 @@ class ProbeEddyParams:
     tap_max_samples: int = 5
     # The maximum standard deviation for any 3 samples to be considered valid.
     tap_samples_stddev: float = 0.020
+    # Where in the time range of tap detection start to the time the threshold
+    # is crossed should the tap be placed. 0.0 places it at the earliest start
+    # of tap detection; 1.0 places it at the point where the threshold is hit.
+    # A value of 0.5 generally results in more consistent tap position detection,
+    # but you may want to adjust this for your configuration. This is a number
+    # in the range of 0.0 to 1.0.
+    tap_time_position: float = 0.5
 
     # When probing multiple points (not rapid scan), how long to sample for at each probe point,
     # after a scan_sample_time_delay delay. The total dwell time at each probe point is
@@ -362,7 +369,6 @@ class ProbeEddyParams:
             "scan_sample_time_delay", self.scan_sample_time_delay, minval=0.0
         )
 
-
         # for 'butter'
         self.tap_butter_lowcut = config.getfloat(
             "tap_butter_lowcut", self.tap_butter_lowcut, above=0.0
@@ -395,7 +401,9 @@ class ProbeEddyParams:
             self.tap_trigger_safe_start_height = self.home_trigger_height / 2.0
 
         self.allow_unsafe = config.getboolean("allow_unsafe", self.allow_unsafe)
-        self.write_tap_plot = config.getboolean("write_tap_plot", self.write_tap_plot)
+        self.write_tap_plot = config.getboolean(
+            "write_tap_plot", self.write_tap_plot
+        )
         self.write_every_tap_plot = config.getboolean(
             "write_every_tap_plot", self.write_every_tap_plot
         )
@@ -546,7 +554,9 @@ class ProbeEddy:
         else:
             for dc in calibrated_drive_currents:
                 _ = config.get(f"calibration_{dc}")
-            self.params._warning_msgs.append("EDDYng calibration: calibration data invalid, please recalibrate")
+            self.params._warning_msgs.append(
+                "EDDYng calibration: calibration data invalid, please recalibrate"
+            )
 
         # Our virtual endstop wrapper -- used for homing.
         self._endstop_wrapper = ProbeEddyEndstopWrapper(self)
@@ -587,7 +597,9 @@ class ProbeEddy:
         self._tap_adjust_z = self.params.tap_adjust_z
 
         # define our own commands
-        self._dummy_gcode_cmd: GCodeCommand = self._gcode.create_gcode_command("", "", {})
+        self._dummy_gcode_cmd: GCodeCommand = self._gcode.create_gcode_command(
+            "", "", {}
+        )
         self.define_commands(self._gcode)
 
         self._printer.register_event_handler(
@@ -599,7 +611,9 @@ class ProbeEddy:
 
         # patch bed_mesh because Klipper
         if not IS_KALICO:
-            bed_mesh.ProbeManager.start_probe = bed_mesh_ProbeManager_start_probe_override
+            bed_mesh.ProbeManager.start_probe = (
+                bed_mesh_ProbeManager_start_probe_override
+            )
 
     def _log_error(self, msg):
         logging.error(f"{self._name}: {msg}")
@@ -720,7 +734,9 @@ class ProbeEddy:
         for msg in self.params._warning_msgs:
             self._log_warning(msg)
 
-    def _get_trapq_position(self, print_time: float) -> Tuple[Tuple[float, float, float], float]:
+    def _get_trapq_position(
+        self, print_time: float
+    ) -> Tuple[Tuple[float, float, float], float]:
         ffi_main, ffi_lib = chelper.get_ffi()
         data = ffi_main.new("struct pull_move[1]")
         count = ffi_lib.trapq_extract_old(self._trapq, data, 1, 0.0, print_time)
@@ -740,7 +756,9 @@ class ProbeEddy:
     def current_drive_current(self) -> int:
         return self._sensor.get_drive_current()
 
-    def map_for_drive_current(self, dc: Optional[int] = None) -> ProbeEddyFrequencyMap:
+    def map_for_drive_current(
+        self, dc: Optional[int] = None
+    ) -> ProbeEddyFrequencyMap:
         if dc is None:
             dc = self.current_drive_current()
         if dc not in self._dc_to_fmap:
@@ -750,12 +768,16 @@ class ProbeEddy:
         return self._dc_to_fmap[dc]
 
     # helpers to forward to the map
-    def height_to_freq(self, height: float, drive_current: Optional[int] = None) -> float:
+    def height_to_freq(
+        self, height: float, drive_current: Optional[int] = None
+    ) -> float:
         if drive_current is None:
             drive_current = self.current_drive_current()
         return self.map_for_drive_current(drive_current).height_to_freq(height)
 
-    def freq_to_height(self, freq: float, drive_current: Optional[int] = None) -> float:
+    def freq_to_height(
+        self, freq: float, drive_current: Optional[int] = None
+    ) -> float:
         if drive_current is None:
             drive_current = self.current_drive_current()
         return self.map_for_drive_current(drive_current).freq_to_height(freq)
@@ -1067,7 +1089,9 @@ class ProbeEddy:
             hmin, hmax = m.height_range
             fmin, fmax = m.freq_range
             fspread = m.freq_spread()
-            self._log_msg(f"Drive current {dc}: {hmin:.3f} to {hmax:.3f} ({fmin:.1f} to {fmax:.1f}, {fspread:.2f}%; ftoh_high: {m._ftoh_high is not None})")
+            self._log_msg(
+                f"Drive current {dc}: {hmin:.3f} to {hmax:.3f} ({fmin:.1f} to {fmax:.1f}, {fspread:.2f}%; ftoh_high: {m._ftoh_high is not None})"
+            )
 
     def cmd_SET_TAP_OFFSET(self, gcmd: GCodeCommand):
         value = gcmd.get_float("VALUE", None)
@@ -1238,7 +1262,9 @@ class ProbeEddy:
             lambda kin_pos: self.cmd_SETUP_next(gcmd, kin_pos),
         )
 
-    def cmd_SETUP_next(self, gcmd: GCodeCommand, kin_pos: Optional[List[float]]):
+    def cmd_SETUP_next(
+        self, gcmd: GCodeCommand, kin_pos: Optional[List[float]]
+    ):
         if kin_pos is None:
             # User cancelled ManualProbeHelper
             self._z_not_homed()
@@ -1408,7 +1434,9 @@ class ProbeEddy:
             lambda kin_pos: self.cmd_CALIBRATE_next(gcmd, kin_pos),
         )
 
-    def cmd_CALIBRATE_next(self, gcmd: GCodeCommand, kin_pos: Optional[List[float]]):
+    def cmd_CALIBRATE_next(
+        self, gcmd: GCodeCommand, kin_pos: Optional[List[float]]
+    ):
         th = self._printer.lookup_object("toolhead")
         if kin_pos is None:
             # User cancelled ManualProbeHelper
@@ -2040,7 +2068,9 @@ class ProbeEddy:
             )
 
         write_tap_plot = self.params.write_tap_plot
-        write_every_tap_plot = self.params.write_every_tap_plot and write_tap_plot
+        write_every_tap_plot = (
+            self.params.write_every_tap_plot and write_tap_plot
+        )
         if write_plot_arg is not None:
             write_tap_plot = write_plot_arg > 0
             write_every_tap_plot = write_plot_arg > 1
@@ -2458,7 +2488,16 @@ class ProbeEddy:
                 line=dict(color="gray", width=1, dash="dash"),
             )
 
-        fig.add_shape(type="line", x0=0, x1=1, y0=tap.probe_z, y1=tap.probe_z, xref="paper", yref="y", line=dict(color="orange", width=1))
+        fig.add_shape(
+            type="line",
+            x0=0,
+            x1=1,
+            y0=tap.probe_z,
+            y1=tap.probe_z,
+            xref="paper",
+            yref="y",
+            line=dict(color="orange", width=1),
+        )
 
         # toolhead and sensor Z
         fig.add_trace(go.Scatter(x=s_t, y=s_z, mode="lines", name="Z"))
@@ -2631,13 +2670,17 @@ class ProbeEddyScanningProbe:
             # this callback is attached to the last move in the queue, so that
             # we can grab the toolhead position when the toolhead actually hits it
 
-            self._toolhead.register_lookahead_callback(lambda time: self._rapid_lookahead_cb(time, th_pos))
+            self._toolhead.register_lookahead_callback(
+                lambda time: self._rapid_lookahead_cb(time, th_pos)
+            )
             return
 
         th.dwell(self._sample_time_delay)
         start_time = th.get_last_move_time()
         self._toolhead.dwell(self._sample_time + self._sample_time_delay)
-        self._notes.append((start_time, start_time + self._sample_time / 2.0, th_pos))
+        self._notes.append(
+            (start_time, start_time + self._sample_time / 2.0, th_pos)
+        )
 
     def pull_probed_results(self):
         if self._is_rapid:
@@ -2661,7 +2704,9 @@ class ProbeEddyScanningProbe:
             if th_pos is None:
                 th_pos, _ = self.eddy._get_trapq_position(sample_time)
                 if th_pos is None:
-                    raise self._printer.command_error(f"No trapq history found for {sample_time:.3f} and no position!")
+                    raise self._printer.command_error(
+                        f"No trapq history found for {sample_time:.3f} and no position!"
+                    )
 
             end_time = start_time + self._sample_time
             height = self._sampler.find_height_at_time(start_time, end_time)
@@ -2916,7 +2961,18 @@ class ProbeEddyEndstopWrapper:
         trigger_time = home_result.trigger_time
         tap_start_time = home_result.tap_start_time
         tap_end_time = home_result.tap_end_time
-        error = self._sensor.data_error_to_str(home_result.error) if home_result.error != 0 else ""
+        error = (
+            self._sensor.data_error_to_str(home_result.error)
+            if home_result.error != 0
+            else ""
+        )
+
+        if self.tap_config is not None:
+            if tap_start_time > 0. and tap_end_time > 0.:
+                nt = tap_start_time + (tap_end_time - tap_start_time) * self.eddy.params.tap_time_position
+                if abs(nt - trigger_time) > 0.010:
+                    logging.error(f"TAP TRIGGER WRONG: trigger: {trigger_time:.3f} nt: {nt:.3f}")
+                trigger_time = nt
 
         self._sampler.memo("trigger_time", trigger_time)
         if self.tap_config is not None:
@@ -2925,8 +2981,8 @@ class ProbeEddyEndstopWrapper:
             self._sampler.memo("tap_threshold", self.tap_config.threshold)
 
         self.eddy._log_debug(
-                f"trigger_time {trigger_time} (mcu: {self._mcu.print_time_to_clock(trigger_time)}) "
-                f"tap time: {tap_start_time}-{tap_end_time} {error}"
+            f"trigger_time {trigger_time} (mcu: {self._mcu.print_time_to_clock(trigger_time)}) "
+            f"tap time: {tap_start_time}-{tap_end_time} {error}"
         )
 
         # nb: _dispatch.stop() will treat anything >= REASON_COMMS_TIMEOUT as an error,
@@ -3430,15 +3486,25 @@ class ProbeEddyFrequencyMap:
                 )
 
         low_samples = avg_heights <= ProbeEddyFrequencyMap.low_z_threshold
-        high_samples = avg_heights >= ProbeEddyFrequencyMap.low_z_threshold - 0.5
+        high_samples = (
+            avg_heights >= ProbeEddyFrequencyMap.low_z_threshold - 0.5
+        )
 
-        ftoh_low_fn = npp.Polynomial.fit(1.0 / avg_freqs[low_samples], avg_heights[low_samples], deg=9)
-        htof_low_fn = npp.Polynomial.fit(avg_heights[low_samples], 1.0 / avg_freqs[low_samples], deg=9)
+        ftoh_low_fn = npp.Polynomial.fit(
+            1.0 / avg_freqs[low_samples], avg_heights[low_samples], deg=9
+        )
+        htof_low_fn = npp.Polynomial.fit(
+            avg_heights[low_samples], 1.0 / avg_freqs[low_samples], deg=9
+        )
 
         if np.count_nonzero(high_samples) > 50:
-            ftoh_high_fn = npp.Polynomial.fit(1.0 / avg_freqs[high_samples], avg_heights[high_samples], deg=9)
+            ftoh_high_fn = npp.Polynomial.fit(
+                1.0 / avg_freqs[high_samples], avg_heights[high_samples], deg=9
+            )
         else:
-            self._eddy._log_debug(f"not computing ftoh_high, not enough high samples")
+            self._eddy._log_debug(
+                f"not computing ftoh_high, not enough high samples"
+            )
             ftoh_high_fn = None
 
         # Calculate rms, only for the low values (where error is most relevant)
@@ -3476,13 +3542,24 @@ class ProbeEddyFrequencyMap:
 
         if write_debug_files:
             self._write_calibration_plot(
-                times, avg_freqs, avg_heights, rmse_fth, rmse_htf, vels=raw_vels,
+                times,
+                avg_freqs,
+                avg_heights,
+                rmse_fth,
+                rmse_htf,
+                vels=raw_vels,
             )
 
         return rmse_fth, rmse_htf
 
     def _write_calibration_plot(
-        self, times, freqs, heights, rmse_fth, rmse_htf, vels=None,
+        self,
+        times,
+        freqs,
+        heights,
+        rmse_fth,
+        rmse_htf,
+        vels=None,
     ):
         if not HAS_PLOTLY:
             return
@@ -3496,10 +3573,14 @@ class ProbeEddyFrequencyMap:
         low_samples = heights <= ProbeEddyFrequencyMap.low_z_threshold
         high_samples = heights >= ProbeEddyFrequencyMap.low_z_threshold - 0.5
 
-        f_to_z_low_err = heights[low_samples] - self._ftoh(1.0 / freqs[low_samples])
+        f_to_z_low_err = heights[low_samples] - self._ftoh(
+            1.0 / freqs[low_samples]
+        )
 
         if self._ftoh_high is not None:
-            f_to_z_high_err = heights[high_samples] - self._ftoh_high(1.0 / freqs[high_samples])
+            f_to_z_high_err = heights[high_samples] - self._ftoh_high(
+                1.0 / freqs[high_samples]
+            )
         else:
             f_to_z_high_err = None
 
@@ -3525,7 +3606,9 @@ class ProbeEddyFrequencyMap:
                 )
             )
 
-        fig.add_trace(go.Scatter(x=times, y=freqs, mode="lines", name="F", yaxis="y2"))
+        fig.add_trace(
+            go.Scatter(x=times, y=freqs, mode="lines", name="F", yaxis="y2")
+        )
 
         fig.add_trace(
             go.Scatter(
@@ -3537,17 +3620,37 @@ class ProbeEddyFrequencyMap:
             )
         )
 
-        fig.add_trace(go.Scatter(x=times[low_samples], y=f_to_z_low_err, mode="lines", name="Err", yaxis="y3"))
+        fig.add_trace(
+            go.Scatter(
+                x=times[low_samples],
+                y=f_to_z_low_err,
+                mode="lines",
+                name="Err",
+                yaxis="y3",
+            )
+        )
         if f_to_z_high_err is not None:
-            fig.add_trace(go.Scatter(x=times[high_samples], y=f_to_z_high_err, mode="lines", name="Err (high)", yaxis="y3"))
+            fig.add_trace(
+                go.Scatter(
+                    x=times[high_samples],
+                    y=f_to_z_high_err,
+                    mode="lines",
+                    name="Err (high)",
+                    yaxis="y3",
+                )
+            )
 
         if vels is not None:
-            fig.add_trace(go.Scatter(x=times, y=vels, mode="lines", name="V", yaxis="y4"))
+            fig.add_trace(
+                go.Scatter(x=times, y=vels, mode="lines", name="V", yaxis="y4")
+            )
 
         fig.update_layout(
             hovermode="x unified",
             title=f"Calibration for drive current {self.drive_current}",
-            yaxis2=dict(title="Freq", overlaying="y", tickformat="d", side="right"),
+            yaxis2=dict(
+                title="Freq", overlaying="y", tickformat="d", side="right"
+            ),
             yaxis3=dict(overlaying="y", side="right", position=0.1),
             yaxis4=dict(overlaying="y", side="right", position=0.2),
         )
@@ -3555,18 +3658,22 @@ class ProbeEddyFrequencyMap:
 
     def freq_to_height(self, freq: float) -> float:
         if self._ftoh is None:
-            raise self._eddy._printer.command_error("Calling freq_to_height on uncalibrated map")
+            raise self._eddy._printer.command_error(
+                "Calling freq_to_height on uncalibrated map"
+            )
         if self._ftoh_high is not None and freq < self._ftoh.domain[0]:
             return float(self._ftoh_high(1.0 / freq))
         return float(self._ftoh(1.0 / freq))
 
     def height_to_freq(self, height: float) -> float:
         if self._htof is None:
-            raise self._eddy._printer.command_error("Calling height_to_freq on uncalibrated map")
+            raise self._eddy._printer.command_error(
+                "Calling height_to_freq on uncalibrated map"
+            )
         return 1.0 / float(self._htof(height))
 
     def calibrated(self) -> bool:
-        return (self._ftoh is not None and self._htof is not None)
+        return self._ftoh is not None and self._htof is not None
 
 
 def np_rolling_mean(data, window, center=True):
