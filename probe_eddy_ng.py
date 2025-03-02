@@ -739,6 +739,7 @@ class ProbeEddy:
             fmap.save_calibration()
 
         configfile = self._printer.lookup_object("configfile")
+        configfile.remove_section(self._full_name)
         configfile.set(
             self._full_name,
             "calibrated_drive_currents",
@@ -752,7 +753,7 @@ class ProbeEddy:
         if self.params._config_reg_drive_current == 0 or self.params.reg_drive_current != self.params._config_reg_drive_current:
             if self.params._config_reg_drive_current != 0:
                 self._log_warning(
-                    f"Warning: reg_drive_current set in config ({self.params._config_reg_drive_current}) is different the value that is being saved. Please remove the config value, as it will override this one."
+                    f"Warning: reg_drive_current explicitly set in config ({self.params._config_reg_drive_current}) is different the value that is being saved. Please remove the config value, as it will override this one."
                 )
             if self.params.reg_drive_current != 0:
                 configfile.set(
@@ -763,7 +764,7 @@ class ProbeEddy:
         if self.params._config_tap_drive_current == 0 or self.params.tap_drive_current != self.params._config_tap_drive_current:
             if self.params._config_tap_drive_current != 0:
                 self._log_warning(
-                    f"Warning: tap_drive_current set in config ({self.params._config_tap_drive_current}) is different the value that is being saved. Please remove the config value, as it will override this one."
+                    f"Warning: tap_drive_current explicitly set in config ({self.params._config_tap_drive_current}) is different the value that is being saved. Please remove the config value, as it will override this one."
                 )
             if self.params.tap_drive_current != 0:
                 configfile.set(
@@ -1221,6 +1222,7 @@ class ProbeEddy:
             self._log_error(result_msg)
 
         if state > FINDING_HOMING:
+            self._sensor.set_drive_current(self.params.reg_drive_current)
             self.save_config()
 
         self._z_not_homed()
