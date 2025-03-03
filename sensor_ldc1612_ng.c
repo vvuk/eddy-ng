@@ -152,9 +152,8 @@ struct ldc1612_ng_homing {
     // earlier than when the tap was detected).
     uint32_t trigger_time;
 
-    // If it was a tap, the start/end time of tap detection
+    // If it was a tap, the start of tap detection
     uint32_t tap_start_time;
-    uint32_t tap_end_time;
 
     // Number of errors we've seen in a row
     uint8_t error_count;
@@ -562,16 +561,15 @@ command_ldc1612_ng_finish_home(uint32_t *args)
 
     uint32_t trigger_time = lh->trigger_time; // note: same as homing_clock in parent struct
     uint32_t tap_start_time = lh->tap_start_time;
-    uint32_t tap_end_time = lh->tap_end_time;
     uint32_t error = lh->error;
 
     ld->ts = NULL;
     lh->mode = 0;
 
-    sendf("ldc1612_ng_finish_home_reply oid=%c trigger_clock=%u tap_start_clock=%u tap_end_clock=%u error=%u"
-          , args[0], trigger_time, tap_start_time, tap_end_time, error);
+    sendf("ldc1612_ng_finish_home_reply oid=%c trigger_clock=%u tap_start_clock=%u error=%u"
+          , args[0], trigger_time, tap_start_time, error);
 
-    dprint("ZZZ finish trig_t=%u tap_s=%u tap_e=%u", trigger_time, tap_start_time, tap_end_time);
+    dprint("ZZZ finish tap_s=%u trig_t=%u", tap_start_time, trigger_time);
 }
 DECL_COMMAND(command_ldc1612_ng_finish_home,
              "ldc1612_ng_finish_home oid=%c");
@@ -852,8 +850,7 @@ check_wma_tap(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
     if (wma_tap->tap_start_value - wma_d_avg >= wma_tap->tap_threshold) {
         // Note: we notify with the time the tap started, not the current time
         notify_trigger(ld, lh->tap_start_time, ld->success_reason);
-        lh->trigger_time = lh->tap_start_time;
-        lh->tap_end_time = time;
+        lh->trigger_time = time;
         dprint("ZZZ tap t=%u n=%u l=%u (f=%u)", lh->tap_start_time, time, wma_tap->tap_start_value - wma_d_avg, data);
     }
 }
@@ -895,15 +892,9 @@ check_sos_tap(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
     if (val < sos_tap->last_value) {
         float diff = sos_tap->tap_start_value - val;
         if (diff >= sos_tap->tap_threshold) {
-            // Note: we notify with the midpoint of the tap start time and the
-            // end (trigger) time. This seems to be the best balance that handles
-            // early (soft) detection.
-            uint32_t tap_t = (time - lh->tap_start_time) / 2;
-            tap_t += lh->tap_start_time;
-            notify_trigger(ld, tap_t, ld->success_reason);
-            lh->trigger_time = tap_t;
-            lh->tap_end_time = time;
-            dprint("ZZZ tap t=%u n=%u l=%f (f=%f)", lh->tap_start_time, time, sos_tap->tap_start_value - val, freq);
+            lh->trigger_time = time;
+            notify_trigger(ld, time, ld->success_reason);
+            dprint("ZZZ tap st=%u tt=%u l=%f (f=%f)", lh->tap_start_time, time, sos_tap->tap_start_value - val, freq);
             return;
         }
     } else if (val > sos_tap->last_value) {

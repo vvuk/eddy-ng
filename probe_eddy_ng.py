@@ -796,17 +796,16 @@ class ProbeEddy:
             with open(self.save_samples_path, "w") as data_file:
                 samples = sampler.get_samples()
                 raw_samples = sampler.get_raw_samples()
-                data_file.write("time,frequency,z,kin_z,kin_v,raw_f,trigger_time,tap_start_time,tap_end_time\n")
+                data_file.write("time,frequency,z,kin_z,kin_v,raw_f,trigger_time,tap_start_time\n")
                 trigger_time = kwargs.get("trigger_time", "")
                 tap_start_time = kwargs.get("tap_start_time", "")
-                tap_end_time = kwargs.get("tap_end_time", "")
                 for i in range(len(samples)):
                     s_t, s_freq, s_z = samples[i]
                     _, raw_f, _ = raw_samples[i]
                     past_pos, past_v = self._get_trapq_position(s_t)
                     past_k_z = past_pos[2] if past_pos is not None else ""
                     past_v = past_v if past_v is not None else ""
-                    data_file.write(f"{s_t},{s_freq},{s_z},{past_k_z},{past_v},{raw_f},{trigger_time},{tap_start_time},{tap_end_time}\n")
+                    data_file.write(f"{s_t},{s_freq},{s_z},{past_k_z},{past_v},{raw_f},{trigger_time},{tap_start_time}\n")
             logging.info(f"Wrote {len(samples)} samples to {self.save_samples_path}")
             self.save_samples_path = None
 
@@ -1736,9 +1735,12 @@ class ProbeEddy:
         # the toolhead is pushing into the build plate.
         overshoot = probe_z - now_z
 
-        tap_time = self._endstop_wrapper.last_trigger_time
         tap_start_time = self._endstop_wrapper.last_tap_start_time
-        tap_end_time = self._endstop_wrapper.last_tap_end_time
+        tap_end_time = self._endstop_wrapper.last_trigger_time
+
+        # compute the tap_time as the point between start and end, indicated by
+        # tap_time_position
+        tap_time = tap_start_time + (tap_end_time - tap_start_time) * self.params.tap_time_position
 
         return ProbeEddy.TapResult(
             error=error,
@@ -2477,7 +2479,6 @@ class ProbeEddyEndstopWrapper:
         # the times of the last successful endstop home_wait
         self.last_trigger_time = 0.0
         self.last_tap_start_time = 0.0
-        self.last_tap_end_time = 0.0
 
         self._homing_in_progress = False
         self._sampler: ProbeEddySampler = None
@@ -2573,7 +2574,6 @@ class ProbeEddyEndstopWrapper:
 
         self.last_trigger_time = 0.0
         self.last_tap_start_time = 0.0
-        self.last_tap_end_time = 0.0
 
         trigger_height = self._home_trigger_height
         safe_height = trigger_height + self._home_trigger_safe_start_offset
@@ -2638,24 +2638,15 @@ class ProbeEddyEndstopWrapper:
         home_result = self._sensor.finish_home()
         trigger_time = home_result.trigger_time
         tap_start_time = home_result.tap_start_time
-        tap_end_time = home_result.tap_end_time
         error = self._sensor.data_error_to_str(home_result.error) if home_result.error != 0 else ""
-
-        if self.tap_config is not None:
-            if tap_start_time > 0.0 and tap_end_time > 0.0:
-                nt = tap_start_time + (tap_end_time - tap_start_time) * self.eddy.params.tap_time_position
-                if abs(nt - trigger_time) > 0.010:
-                    logging.error(f"TAP TRIGGER WRONG: trigger: {trigger_time:.3f} nt: {nt:.3f}")
-                trigger_time = nt
 
         self._sampler.memo("trigger_time", trigger_time)
         if self.tap_config is not None:
             self._sampler.memo("tap_start_time", tap_start_time)
-            self._sampler.memo("tap_end_time", tap_end_time)
             self._sampler.memo("tap_threshold", self.tap_config.threshold)
 
         self.eddy._log_debug(
-            f"trigger_time {trigger_time} (mcu: {self._mcu.print_time_to_clock(trigger_time)}) tap time: {tap_start_time}-{tap_end_time} {error}"
+            f"trigger_time {trigger_time} (mcu: {self._mcu.print_time_to_clock(trigger_time)}) tap time: {tap_start_time}-{trigger_time} {error}"
         )
 
         # nb: _dispatch.stop() will treat anything >= REASON_COMMS_TIMEOUT as an error,
@@ -2665,21 +2656,19 @@ class ProbeEddyEndstopWrapper:
 
         # clean these up, and only update them if successful
         self.last_trigger_time = 0.0
-        self.last_tap_start_tie = 0.0
-        self.last_tap_end_time = 0.0
+        self.last_tap_start_time = 0.0
 
         # always reset this; taps are one-shot usages of the endstop wrapper
         self.tap_config = None
 
         # if we're doing at ap, we wait for samples for the end as well so that we can get
         # beter data for analysis
-        self._sampler.wait_for_sample_at_time(max(trigger_time, tap_end_time))
+        self._sampler.wait_for_sample_at_time(trigger_time)
 
         # success?
         if res == mcu.MCU_trsync.REASON_ENDSTOP_HIT:
             self.last_trigger_time = trigger_time
             self.last_tap_start_time = tap_start_time
-            self.last_tap_end_time = tap_end_time
             return trigger_time
 
         # various errors
