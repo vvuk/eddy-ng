@@ -258,9 +258,6 @@ class ProbeEddyParams:
 
     tap_trigger_safe_start_height: float = 1.5
 
-    _config_reg_drive_current: int = 0
-    _config_tap_drive_current: int = 0
-
     _warning_msgs: List[str] = field(default_factory=list)
 
     @staticmethod
@@ -289,32 +286,8 @@ class ProbeEddyParams:
         )
         self.calibration_z_max = config.getfloat("calibration_z_max", self.calibration_z_max, above=0.0)
 
-        # "saved_" is the values that save_config will write
-        saved_reg_drive_current = config.getint("saved_reg_drive_current", 0)
-        saved_tap_drive_current = config.getint("saved_tap_drive_current", 0)
-        reg_drive_current = self._config_reg_drive_current = config.getint("reg_drive_current", 0, minval=0, maxval=31)
-        tap_drive_current = self._config_tap_drive_current = config.getint("tap_drive_current", 0, minval=0, maxval=31)
-
-        if saved_reg_drive_current != 0 and reg_drive_current != 0 and reg_drive_current != saved_reg_drive_current:
-            printer = config.get_printer()
-            msg = f"probe_eddy_ng has reg_drive_current specified in config and in saved variables. Config value ({reg_drive_current}) is taking precedence. Remove one of these to remove this warning."
-            logging.warning(msg)
-            self._warning_msgs.append(msg)
-
-        if saved_tap_drive_current != 0 and tap_drive_current != 0 and tap_drive_current != saved_tap_drive_current:
-            printer = config.get_printer()
-            msg = f"probe_eddy_ng has tap_drive_current specified in config and in saved variables. Config value ({tap_drive_current}) is taking precedence. Remove one of these to remove this warning."
-            logging.warning(msg)
-            self._warning_msgs.append(msg)
-
-        # the config value overrides a saved value, if any
-        if reg_drive_current == 0:
-            reg_drive_current = saved_reg_drive_current
-        if tap_drive_current == 0:
-            tap_drive_current = saved_tap_drive_current
-
-        self.reg_drive_current = reg_drive_current
-        self.tap_drive_current = tap_drive_current
+        self.reg_drive_current = config.getint("reg_drive_current", 0, minval=0, maxval=31)
+        self.tap_drive_current = config.getint("tap_drive_current", 0, minval=0, maxval=31)
 
         self.tap_start_z = config.getfloat("tap_start_z", self.tap_start_z, above=0.0)
         self.tap_target_z = config.getfloat("tap_target_z", self.tap_target_z)
@@ -453,9 +426,19 @@ class ProbeEddy:
 
         self.params = ProbeEddyParams()
         self.params.load_from_config(config)
-        if self.params.reg_drive_current == 0:
-            # set as default
-            self.params.reg_drive_current = self._sensor._drive_current
+
+        # figure out if either of these comes from the autosave section
+        # so we can sort out what we want to write out later on
+        asfc = self._printer.lookup_object("configfile").autosave.fileconfig
+        self._saved_reg_drive_current = asfc.getint(self._full_name, "reg_drive_current", fallback=None)
+        self._saved_tap_drive_current = asfc.getint(self._full_name, "tap_drive_current", fallback=None)
+
+        # in case there's legacy drive currents
+        old_saved_reg_drive_current = asfc.getint(self._full_name, "saved_reg_drive_current", fallback=0)
+        old_saved_tap_drive_current = asfc.getint(self._full_name, "saved_tap_drive_current", fallback=0)
+
+        self._reg_drive_current = self.params.reg_drive_current or old_saved_reg_drive_current or self._sensor._drive_current
+        self._tap_drive_current = self.params.tap_drive_current or old_saved_tap_drive_current or self._reg_drive_current
 
         # at what minimum physical height to start homing. It must be above the safe start position,
         # because we need to move from the start through the safe start position
@@ -479,13 +462,13 @@ class ProbeEddy:
 
         self._dc_to_fmap: Dict[int, ProbeEddyFrequencyMap] = {}
         if not calibration_bad:
-            dc_to_fmap: Dict[int, ProbeEddyFrequencyMap] = {}
             for dc in calibrated_drive_currents:
-                dc_to_fmap[dc] = ProbeEddyFrequencyMap(self)
-                dc_to_fmap[dc].load_from_config(config, dc)
-            self._dc_to_fmap = dc_to_fmap
+                fmap = ProbeEddyFrequencyMap(self)
+                if fmap.load_from_config(config, dc):
+                    self._dc_to_fmap[dc] = fmap
         else:
             for dc in calibrated_drive_currents:
+                # read so that there are no warnings about unknown fields
                 _ = config.get(f"calibration_{dc}")
             self.params._warning_msgs.append("EDDYng calibration: calibration data invalid, please recalibrate")
 
@@ -666,6 +649,12 @@ class ProbeEddy:
     def current_drive_current(self) -> int:
         return self._sensor.get_drive_current()
 
+    def reset_drive_current(self, tap=False):
+        dc = self._tap_drive_current if tap else self._reg_drive_current
+        if dc == 0:
+            raise self._printer.command_error(f"Unknown {"tap" if tap else "homing"} drive current")
+        self._sensor.set_drive_current(dc)
+
     def map_for_drive_current(self, dc: Optional[int] = None) -> ProbeEddyFrequencyMap:
         if dc is None:
             dc = self.current_drive_current()
@@ -735,11 +724,9 @@ class ProbeEddy:
                 )
 
     def save_config(self):
-        for _, fmap in self._dc_to_fmap.items():
-            fmap.save_calibration()
-
         configfile = self._printer.lookup_object("configfile")
         configfile.remove_section(self._full_name)
+
         configfile.set(
             self._full_name,
             "calibrated_drive_currents",
@@ -750,28 +737,15 @@ class ProbeEddy:
             "calibration_version",
             str(ProbeEddyFrequencyMap.calibration_version),
         )
-        if self.params._config_reg_drive_current == 0 or self.params.reg_drive_current != self.params._config_reg_drive_current:
-            if self.params._config_reg_drive_current != 0:
-                self._log_warning(
-                    f"Warning: reg_drive_current explicitly set in config ({self.params._config_reg_drive_current}) is different the value that is being saved. Please remove the config value, as it will override this one."
-                )
-            if self.params.reg_drive_current != 0:
-                configfile.set(
-                    self._full_name,
-                    "saved_reg_drive_current",
-                    str(self.params.reg_drive_current),
-                )
-        if self.params._config_tap_drive_current == 0 or self.params.tap_drive_current != self.params._config_tap_drive_current:
-            if self.params._config_tap_drive_current != 0:
-                self._log_warning(
-                    f"Warning: tap_drive_current explicitly set in config ({self.params._config_tap_drive_current}) is different the value that is being saved. Please remove the config value, as it will override this one."
-                )
-            if self.params.tap_drive_current != 0:
-                configfile.set(
-                    self._full_name,
-                    "saved_tap_drive_current",
-                    str(self.params.tap_drive_current),
-                )
+
+        if self.params.reg_drive_current != self._reg_drive_current or self.params.reg_drive_current == self._saved_reg_drive_current:
+            configfile.set(self._full_name, "reg_drive_current", str(self._reg_drive_current))
+            
+        if self.params.tap_drive_current != self._tap_drive_current or self.params.tap_drive_current == self._saved_tap_drive_current:
+            configfile.set(self._full_name, "tap_drive_current", str(self._tap_drive_current))
+
+        for _, fmap in self._dc_to_fmap.items():
+            fmap.save_calibration()
 
         self._log_msg("Calibration saved. Issue a SAVE_CONFIG to write the values to your config file and restart Klipper.")
 
@@ -1179,7 +1153,7 @@ class ProbeEddy:
                 self._log_info(f"dc {drive_current} homing {ok_for_homing} tap {ok_for_tap}, {fth_rms} {htf_rms}")
                 if mapping.freq_spread() < 0.30:
                     self._log_warning(
-                        f"frequency spread {mapping.freq_spread()} is very low at drive current {drive_current}. (The sensor is probably mounted too high.)"
+                        f"frequency spread {mapping.freq_spread()} is very low at drive current {drive_current}. (The sensor is probably mounted too high; the height includes any case thickness.)"
                     )
                     ok_for_homing = ok_for_tap = False
                 if fth_rms is None or fth_rms > 0.025:
@@ -1188,13 +1162,13 @@ class ProbeEddy:
 
             if state == FINDING_HOMING and ok_for_homing:
                 self._dc_to_fmap[drive_current] = mapping
-                self.params.reg_drive_current = drive_current
+                self._reg_drive_current = drive_current
                 self._log_msg(f"using {drive_current} for homing.")
                 state = FINDING_TAP
 
             if state == FINDING_TAP and ok_for_tap:
                 self._dc_to_fmap[drive_current] = mapping
-                self.params.tap_drive_current = drive_current
+                self._tap_drive_current = drive_current
                 self._log_msg(f"using {drive_current} for tap.")
                 state = DONE
 
@@ -1205,9 +1179,9 @@ class ProbeEddy:
             if drive_current - start_drive_current >= max_dc_increase:
                 # we've failed completely
                 if state == FINDING_HOMING:
-                    result_msg = "Failed to find homing drive current. (The sensor is probably mounted too low.)"
+                    result_msg = "Failed to find homing drive current. (Have you checked the sensor height?)"
                 elif state == FINDING_TAP:
-                    result_msg = "Failed to find tap drive current, but homing is set up. (The sensor is probably mounted too low.)"
+                    result_msg = "Failed to find tap drive current, but homing is set up. (Have you checked the sensor height?)"
                 else:
                     result_msg = "Unknown state?"
                 break
@@ -1221,7 +1195,7 @@ class ProbeEddy:
             self._log_error(result_msg)
 
         if state > FINDING_HOMING:
-            self._sensor.set_drive_current(self.params.reg_drive_current)
+            self.reset_drive_current()
             self.save_config()
 
         self._z_not_homed()
@@ -1396,7 +1370,7 @@ class ProbeEddy:
         return times, freqs, heights, vels
 
     def cmd_TEST_DRIVE_CURRENT(self, gcmd: GCodeCommand):
-        drive_current: int = gcmd.get_int("DRIVE_CURRENT", self.params.reg_drive_current, minval=1, maxval=31)
+        drive_current: int = gcmd.get_int("DRIVE_CURRENT", self._reg_drive_current, minval=1, maxval=31)
         z_start: float = gcmd.get_float("START_Z", self.params.calibration_z_max, above=2.0)
         z_end: float = gcmd.get_float("TARGET_Z", 0.0)
         debug: bool = gcmd.get_int("DEBUG", 0) == 1
@@ -1785,13 +1759,10 @@ class ProbeEddy:
         if gcmd is None:
             gcmd = self._dummy_gcode_cmd
 
-        tap_drive_current = self.params.tap_drive_current
-        if tap_drive_current == 0:
-            tap_drive_current = self.params.reg_drive_current
         tap_drive_current: int = gcmd.get_int(
             name="DRIVE_CURRENT",
-            default=tap_drive_current,
-            minval=0,
+            default=self._tap_drive_current,
+            minval=1,
             maxval=31,
         )
         tap_speed: float = gcmd.get_float("SPEED", self.params.tap_speed, above=0.0)
@@ -1940,7 +1911,7 @@ class ProbeEddy:
                     if tap_z is not None:
                         break
         finally:
-            self._sensor.set_drive_current(self.params.reg_drive_current)
+            self.reset_drive_current()
             if write_tap_plot and not write_every_tap_plot:
                 self._write_tap_plot(tap)
 
@@ -2969,10 +2940,15 @@ class ProbeEddyFrequencyMap:
             return
 
         data = pickle.loads(base64.b64decode(calibstr))
-        ftoh = data["ftoh"]
-        ftoh_high = data["ftoh_high"]
-        htof = data["htof"]
-        dc = data["dc"]
+        v = data.get("v", None)
+        if v is None or v < self.calibration_version:
+            self._eddy._log_info(f"Calibration for dc {drive_current} is old ({v}), needs recalibration")
+            return False
+
+        ftoh = data.get("ftoh", None)
+        ftoh_high = data.get("ftoh_high", None)
+        htof = data.get("htof", None)
+        dc = data.get("dc", None)
         h_range = data.get("h_range", (math.inf, -math.inf))
         f_range = data.get("f_range", (math.inf, -math.inf))
 
@@ -2987,6 +2963,7 @@ class ProbeEddyFrequencyMap:
         self.drive_current = drive_current
 
         self._eddy._log_info(f"Loaded calibration for drive current {drive_current}")
+        return True
 
     def save_calibration(self):
         if self._ftoh is None or self._htof is None:
@@ -2994,6 +2971,7 @@ class ProbeEddyFrequencyMap:
 
         configfile = self._eddy._printer.lookup_object("configfile")
         data = {
+            "v": self.calibration_version,
             "ftoh": self._ftoh,
             "ftoh_high": self._ftoh_high,
             "htof": self._htof,
