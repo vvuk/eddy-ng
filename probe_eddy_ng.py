@@ -1618,8 +1618,6 @@ class ProbeEddy:
         threshold: float
         sos: List[List[float]] = None
 
-    # self.save_samples_path = "/tmp/tap-samples.csv"
-
     def do_one_tap(
         self,
         start_z: float,
@@ -1734,7 +1732,6 @@ class ProbeEddy:
 
         s_f = np.asarray([s[1] for s in samples])
         first_one = np.argmax(s_f >= trigger_freq)
-        logging.info(f"{first_one}")
         s_t = np.asarray([s[0] for s in samples[first_one:]])
         s_f = np.asarray([s[1] for s in samples[first_one:]])
 
@@ -1871,7 +1868,9 @@ class ProbeEddy:
             sample_last_err = None
 
             while sample_i < max_samples:
-                self.save_samples_path = "/tmp/tap-samples.csv"
+                if self.params.debug:
+                    self.save_samples_path = f"/tmp/tap-samples-{sample_i}.csv"
+
                 tap = self.do_one_tap(
                     start_z=tap_start_z,
                     target_z=target_z,
@@ -1915,8 +1914,12 @@ class ProbeEddy:
             if write_tap_plot and not write_every_tap_plot:
                 self._write_tap_plot(tap)
 
+        th = self._toolhead
+
         # If we didn't compute a tap_z report the error
         if tap_z is None:
+            # raise toolhead on failed tap
+            th.manual_move([None, None, tap_start_z], lift_speed)
             err_msg = "Tap failed:"
             if tap_stddev is not None:
                 err_msg += f" stddev {tap_stddev:.3f} > {samples_stddev:.3f}."
@@ -1930,8 +1933,6 @@ class ProbeEddy:
         # it to account for flex in the system (otherwise the Z would be too low)
         computed_tap_z = adjusted_tap_z = tap_z + tap_adjust_z
         self._last_tap_z = float(tap_z)
-
-        th = self._toolhead
 
         homed_to_str = ""
         if home_z:
@@ -2039,13 +2040,17 @@ class ProbeEddy:
         s_z = np.asarray([s[2] for s in samples])
         s_kinz = np.asarray([self._get_trapq_position(s[0])[0][2] for s in samples])
 
+        # Any values below 0.0 are suspect because they were not calibrated,
+        # and so are just extrapolated from the fit. So just don't show them.
+        s_z = s_z[s_z >= 0.0]
+
         time_start = s_t.min()
 
         # normalize times to start at 0
         s_t = s_t - time_start
-        trigger_time = memos.get("trigger_time", time_start) - time_start
         tap_start_time = memos.get("tap_start_time", time_start) - time_start
-        tap_end_time = memos.get("tap_end_time", time_start) - time_start
+        tap_end_time = memos.get("trigger_time", time_start) - time_start
+        trigger_time = tap_start_time + (tap_end_time - tap_start_time) * self.params.tap_time_position
         tap_threshold = memos.get("tap_threshold", 0)
 
         time_len = s_t.max()
@@ -2234,7 +2239,6 @@ class ProbeEddy:
                 mode="lines",
                 name="Freq",
                 yaxis="y2",
-                visible="legendonly",
             )
         )
         fig.add_trace(
@@ -2291,7 +2295,7 @@ class ProbeEddy:
             height=800,
         )
         fig.write_html(tapplot_path, include_plotlyjs="cdn")
-        logging.info("Wrote tap plot")
+        logging.info(f"Wrote tap plot to {tapplot_path}")
 
 
 # Probe interface that does only scanning, no up/down movement.
