@@ -413,7 +413,6 @@ class LDC1612_ng:
         return LDC1612_ng_homing_result(trigger_time, tap_start_time, error)
 
     def set_sos_section(self, sect_num: int, sect_vals: List[float]):
-        print(sect_vals)
         # pack sect_vals into a byte array using struct.pack
         sect_bytes = [b for b in struct.pack("<6f", *sect_vals)]
         self._ldc1612_ng_set_sos_section.send([self._oid, sect_num, sect_bytes])
