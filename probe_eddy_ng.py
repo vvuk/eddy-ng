@@ -2033,7 +2033,7 @@ class ProbeEddy:
         s_rf = s_f = np.asarray([s[1] for s in raw_samples])
         s_true_f = np.asarray([s[1] for s in samples])
         s_z = np.asarray([s[2] for s in samples])
-        s_kinz = np.asarray([self._get_trapq_position(s[0])[0][2] for s in samples])
+        s_kinz = np.asarray([(self._get_trapq_position(s[0]) or [[0,0,-10]])[0][2] for s in samples])
 
         # Any values below 0.0 are suspect because they were not calibrated,
         # and so are just extrapolated from the fit. So just don't show them.
