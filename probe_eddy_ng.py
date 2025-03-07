@@ -653,7 +653,7 @@ class ProbeEddy:
     def reset_drive_current(self, tap=False):
         dc = self._tap_drive_current if tap else self._reg_drive_current
         if dc == 0:
-            raise self._printer.command_error(f"Unknown {"tap" if tap else "homing"} drive current")
+            raise self._printer.command_error(f"Unknown {'tap' if tap else 'homing'} drive current")
         self._sensor.set_drive_current(dc)
 
     def map_for_drive_current(self, dc: Optional[int] = None) -> ProbeEddyFrequencyMap:
@@ -744,7 +744,7 @@ class ProbeEddy:
 
         if self.params.reg_drive_current != self._reg_drive_current or self.params.reg_drive_current == self._saved_reg_drive_current:
             configfile.set(self._full_name, "reg_drive_current", str(self._reg_drive_current))
-            
+
         if self.params.tap_drive_current != self._tap_drive_current or self.params.tap_drive_current == self._saved_tap_drive_current:
             configfile.set(self._full_name, "tap_drive_current", str(self._tap_drive_current))
 
@@ -1520,9 +1520,7 @@ class ProbeEddy:
 
         # If we can't get a value at all for right now, for safety, just abort.
         if now_height is None:
-            raise self._printer.command_error(
-                "Couldn't get any valid samples from sensor."
-            )
+            raise self._printer.command_error("Couldn't get any valid samples from sensor.")
 
         self._log_debug(f"probe_to_start_position_unhomed: now: {now_height} (start {start_height})")
         if abs(now_height - start_height) <= start_height_ok_factor:
