@@ -224,10 +224,10 @@ class ProbeEddyParams:
     # Where in the time range of tap detection start to the time the threshold
     # is crossed should the tap be placed. 0.0 places it at the earliest start
     # of tap detection; 1.0 places it at the point where the threshold is hit.
-    # A value of 0.5 generally results in more consistent tap position detection,
+    # A value between 0.2-0.5 generally results in more consistent tap position detection,
     # but you may want to adjust this for your configuration. This is a number
     # in the range of 0.0 to 1.0.
-    tap_time_position: float = 0.5
+    tap_time_position: float = 0.3
 
     # When probing multiple points (not rapid scan), how long to sample for at each probe point,
     # after a scan_sample_time_delay delay. The total dwell time at each probe point is
@@ -406,6 +406,7 @@ class ProbeEddy:
         logging.info("Hello from ProbeEddyNG")
 
         self._printer: Printer = config.get_printer()
+        self._reactor = self._printer.get_reactor()
         self._gcode = self._printer.lookup_object("gcode")
         self._full_name = config.get_name()
         self._name = self._full_name.split()[-1]
@@ -678,14 +679,17 @@ class ProbeEddy:
             drive_current = self.current_drive_current()
         return drive_current in self._dc_to_fmap and self._dc_to_fmap[drive_current].calibrated()
 
+    def _print_time_now(self):
+        return self._mcu.estimated_print_time(self._reactor.monotonic())
+
     def _z_homed(self):
-        curtime_r = self._printer.get_reactor().monotonic()
-        kin_status = self._printer.lookup_object("toolhead").get_kinematics().get_status(curtime_r)
+        curtime = self._reactor.monotonic()
+        kin_status = self._printer.lookup_object("toolhead").get_kinematics().get_status(curtime)
         return "z" in kin_status["homed_axes"]
 
     def _xy_homed(self):
-        curtime_r = self._printer.get_reactor().monotonic()
-        kin_status = self._printer.lookup_object("toolhead").get_kinematics().get_status(curtime_r)
+        curtime = self._reactor.monotonic()
+        kin_status = self._printer.lookup_object("toolhead").get_kinematics().get_status(curtime)
         return "x" in kin_status["homed_axes"] and "y" in kin_status["homed_axes"]
 
     def _z_hop(self, by=5.0):
@@ -957,10 +961,8 @@ class ProbeEddy:
         )
 
     def probe_static_height(self, duration: float = 0.100) -> ProbeEddyProbeResult:
-        reactor = self._printer.get_reactor()
-        now = self._mcu.estimated_print_time(reactor.monotonic())
-
         with self.start_sampler() as sampler:
+            now = self._print_time_now()
             sampler.wait_for_sample_at_time(now + (duration + self._sensor._ldc_settle_time))
             sampler.finish()
 
@@ -968,12 +970,12 @@ class ProbeEddy:
             if len(samples) == 0:
                 return ProbeEddyProbeResult([])
 
-            # skip LDC1612_SETTLETIME samples at start and end by looking
-            # at the time values
-            stime = samples[0][0] + self._sensor._ldc_settle_time
             etime = samples[-1][0]
+            stime = etime - duration
 
             samples = [s[2] for s in samples if s[0] > stime]
+            if len(samples) == 0:
+                raise self._printer.command_error(f"No samples")
 
             min_value = min(samples)
             max_value = max(samples)
@@ -1519,9 +1521,7 @@ class ProbeEddy:
         # If we can't get a value at all for right now, for safety, just abort.
         if now_height is None:
             raise self._printer.command_error(
-                "Couldn't get any valid samples from sensor. "
-                "If the toolhead is high off the build plate, this usually "
-                "indicates a bad reg_drive_current."
+                "Couldn't get any valid samples from sensor."
             )
 
         self._log_debug(f"probe_to_start_position_unhomed: now: {now_height} (start {start_height})")
@@ -1709,9 +1709,6 @@ class ProbeEddy:
 
         tap_start_time = self._endstop_wrapper.last_tap_start_time
         tap_end_time = self._endstop_wrapper.last_trigger_time
-
-        # compute the tap_time as the point between start and end, indicated by
-        # tap_time_position
         tap_time = tap_start_time + (tap_end_time - tap_start_time) * self.params.tap_time_position
 
         return ProbeEddy.TapResult(
@@ -2158,7 +2155,7 @@ class ProbeEddy:
                 y1=1,
                 xref="x",
                 yref="paper",
-                line=dict(color="green", width=1),
+                line=dict(color="#0080c0", width=2),
             )
         if trigger_time > 0:
             fig.add_shape(
@@ -2169,7 +2166,7 @@ class ProbeEddy:
                 y1=1,
                 xref="x",
                 yref="paper",
-                line=dict(color="orange", width=1),
+                line=dict(color="violet", width=2),
             )
         if tap_end_time > 0:
             fig.add_shape(
@@ -2180,7 +2177,7 @@ class ProbeEddy:
                 y1=1,
                 xref="x",
                 yref="paper",
-                line=dict(color="green", width=1),
+                line=dict(color="#0080c0", width=2),
             )
         if tap_threshold > 0:
             fig.add_shape(
@@ -2216,7 +2213,7 @@ class ProbeEddy:
                     x=butter_s_t,
                     y=butter_s_v,
                     mode="lines",
-                    name="butter",
+                    name="signal",
                     yaxis="y4",
                 )
             )
@@ -2226,7 +2223,7 @@ class ProbeEddy:
                     y=butter_accum,
                     mode="lines",
                     line=dict(color="#626b73"),
-                    name="butter_threshold",
+                    name="threshold",
                     yaxis="y3",
                 )
             )
@@ -2288,6 +2285,7 @@ class ProbeEddy:
 
         fig.update_layout(
             hovermode="x unified",
+            title=dict(text=f"Tap {tapnum}: {tap.probe_z:.3f}"),
             yaxis=dict(title="Z", side="right"),  # Z axis
             yaxis2=dict(overlaying="y", title="Freq", tickformat="d", side="left"),  # Freq + WMA
             yaxis3=dict(overlaying="y", side="left", tickformat="d", position=0.2),  # derivatives, tap accum
@@ -2439,7 +2437,7 @@ class ProbeEddyEndstopWrapper:
         self._sensor = eddy._sensor
         self._printer = eddy._printer
         self._mcu = eddy._mcu
-        self._reactor = eddy._printer.get_reactor()
+        self._reactor = eddy._reactor
 
         # these two are filled in by the outside.
         self.tap_config: Optional[ProbeEddy.TapConfig] = None
@@ -2615,8 +2613,10 @@ class ProbeEddyEndstopWrapper:
         tap_start_time = home_result.tap_start_time
         error = self._sensor.data_error_to_str(home_result.error) if home_result.error != 0 else ""
 
+        is_tap = self.tap_config is not None
+
         self._sampler.memo("trigger_time", trigger_time)
-        if self.tap_config is not None:
+        if is_tap:
             self._sampler.memo("tap_start_time", tap_start_time)
             self._sampler.memo("tap_threshold", self.tap_config.threshold)
 
@@ -2636,7 +2636,7 @@ class ProbeEddyEndstopWrapper:
         # always reset this; taps are one-shot usages of the endstop wrapper
         self.tap_config = None
 
-        # if we're doing at ap, we wait for samples for the end as well so that we can get
+        # if we're doing a tap, we wait for samples for the end as well so that we can get
         # beter data for analysis
         self._sampler.wait_for_sample_at_time(trigger_time)
 
@@ -2644,6 +2644,8 @@ class ProbeEddyEndstopWrapper:
         if res == mcu.MCU_trsync.REASON_ENDSTOP_HIT:
             self.last_trigger_time = trigger_time
             self.last_tap_start_time = tap_start_time
+            if is_tap:
+                return tap_start_time + (trigger_time - tap_start_time) * self.eddy.params.tap_time_position
             return trigger_time
 
         # various errors
@@ -2781,14 +2783,10 @@ class ProbeEddySampler:
         return self._samples[-1][2]
 
     # wait for a sample for the current time and get a new height
-    def get_height_now(self, average=False) -> Optional[float]:
-        start = end = self._mcu.estimated_print_time(self._reactor.monotonic())
-        if average:
-            end = start + 0.100
-        if not self.wait_for_sample_at_time(end, max_wait_time=0.250, raise_error=False):
+    def get_height_now(self) -> Optional[float]:
+        now = self.eddy._print_time_now()
+        if not self.wait_for_sample_at_time(now, max_wait_time=1.000, raise_error=False):
             return None
-        if average:
-            return self.find_height_at_time(start, end)
         return self.get_last_height()
 
     # Wait until a sample for the given time arrives
@@ -2804,7 +2802,7 @@ class ProbeEddySampler:
                 return report_no_samples()
             return self._raw_samples[-1][0] >= sample_print_time
 
-        wait_start_time = self._mcu.estimated_print_time(self._reactor.monotonic())
+        wait_start_time = self.eddy._print_time_now()
 
         # if sample_print_time is in the future, make sure to wait max_wait_time
         # past the expected time
@@ -2820,11 +2818,15 @@ class ProbeEddySampler:
         self.eddy._log_debug(
             f"EDDYng waiting for sample at {sample_print_time:.3f} (now: {wait_start_time:.3f}, max_wait_time: {max_wait_time:.3f})"
         )
+        now = self.eddy._print_time_now()
         while len(self._raw_samples) == 0 or self._raw_samples[-1][0] < sample_print_time:
-            now = self._mcu.estimated_print_time(self._reactor.monotonic())
+            now = self.eddy._print_time_now()
             if now - wait_start_time > max_wait_time:
                 return report_no_samples()
             self._reactor.pause(self._reactor.monotonic() + 0.010)
+
+        if now - wait_start_time > 1.0:
+            self.eddy._log_info(f"note: waited {now - wait_start_time:.3f}s for sample")
 
         return True
 
@@ -2833,14 +2835,14 @@ class ProbeEddySampler:
     # depends on the data rate
     def wait_for_samples(
         self,
-        max_wait_time=0.250,
+        max_wait_time=0.300,
         count_errors=False,
         min_samples=1,
         new_only=False,
         raise_error=True,
     ):
         # Make sure enough samples have been collected
-        wait_start_time = self._mcu.estimated_print_time(self._reactor.monotonic())
+        wait_start_time = self.eddy._print_time_now()
 
         start_error_count = self._errors
         if new_only:
@@ -2849,7 +2851,7 @@ class ProbeEddySampler:
             start_count = 0
 
         while (len(self._raw_samples) + (self._errors if count_errors else 0)) - start_count < min_samples:
-            now = self._mcu.estimated_print_time(self._reactor.monotonic())
+            now = self.eddy._print_time_now()
             if now - wait_start_time > max_wait_time:
                 if raise_error:
                     raise self._printer.command_error(
