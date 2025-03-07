@@ -1322,6 +1322,7 @@ class ProbeEddy:
             self._log_error(result_msg)
 
         if state > FINDING_HOMING:
+            self._sensor.set_drive_current(self.params.reg_drive_current)
             self.save_config()
 
         self._z_not_homed()
