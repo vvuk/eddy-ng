@@ -6,7 +6,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 from __future__ import annotations
 
-import os, logging, math, bisect, re
+import os, logging, math, bisect, re, time
 import numpy as np
 import numpy.polynomial as npp
 import traceback
@@ -2770,7 +2770,7 @@ class ProbeEddySampler:
     def find_heights_at_times(self, intervals):
         self._update_samples()
         times = self.times
-        heights = self.heights
+        heights = np.asarray(self.heights)
         num_samples = len(times)
 
         interval_heights = []
@@ -2783,14 +2783,12 @@ class ProbeEddySampler:
                 raise self._printer.command_error(f"No samples in time range {iv_start}-{iv_end}")
 
             istart = i
-
-            # find end
             while i < num_samples and times[i] < iv_end:
                 i += 1
             iend = i-1
 
             median = np.median(heights[istart:iend])
-            interval_heights.append(median)
+            interval_heights.append(float(median))
 
         return interval_heights
 
@@ -3230,6 +3228,7 @@ class BedMeshScanHelper:
             if not include:
                 continue
             indexed_points.append((x, y, i))
+            i += 1
 
         def sort_points(a, b):
             if a[1] < b[1]: # y first
@@ -3249,7 +3248,8 @@ class BedMeshScanHelper:
         for _ in range(self._y_points):
             row = []
             for _ in range(self._x_points):
-                row.append(heights[indices[ki]])
+                v = heights[indices[ki]]
+                row.append(self._scan_z - v)
                 ki += 1
             matrix.append(row)
 
@@ -3294,11 +3294,11 @@ class BedMeshScanHelper:
             with open("/tmp/mesh.csv", "w") as mfile:
                 mfile.write("time,x,y,z\n")
                 for i in range(len(self._mesh_points)):
-                    time = path_times[i]
+                    t = path_times[i]
                     x = self._mesh_points[i][0]
                     y = self._mesh_points[i][1]
                     z = heights[i]
-                    mfile.write(f"{time},{x},{y},{z}\n")
+                    mfile.write(f"{t},{x},{y},{z}\n")
 
             self._set_bed_mesh(heights)
 
