@@ -9,21 +9,33 @@ FILES_TO_COPY=(
 PATCH_FILE="klipper.patch"
 
 usage() {
-    echo "Usage: $0 [--uninstall] [TARGET_DIR]"
+    echo "Usage: $0 [-u|--uninstall] [--copy] [TARGET_DIR]"
     exit 1
 }
 
-if [ "$1" == "--help" ]; then
-    usage
-fi
+UNINSTALL=0
+COPY=0
+TARGET_DIR=""
 
-UNINSTALL=false
-if [ "$1" == "--uninstall" ]; then
-    UNINSTALL=true
+while [[ $# -gt 0 ]] ; do
+    case "$1" in
+        -u|--uninstall)
+            UNINSTALL=1
+            ;;
+        --copy)
+            COPY=1
+            ;;
+        -h|--help|--*)
+            usage
+            ;;
+        *)
+            [ ! -z "$TARGET_DIR" ] && usage
+            TARGET_DIR="$1"
+            ;;
+    esac
     shift
-fi
+done
 
-TARGET_DIR="$1"
 if [ -z "$TARGET_DIR" ]; then
     if [ -d "$HOME/klipper" ]; then
         TARGET_DIR="$HOME/klipper"
@@ -40,9 +52,14 @@ if [ ! -d "$TARGET_DIR" ]; then
     exit 1
 fi
 
+if [[ "$COPY" == "0" && -d "/System/Library" ]] ; then
+    echo "Forcing copy on macOS"
+    COPY=1
+fi
+
 NEEDS_REBUILD=0
 
-if [ "$UNINSTALL" == "true" ]; then
+if [ "$UNINSTALL" == "1" ]; then
     echo "Uninstalling files..."
     for file in "${FILES_TO_COPY[@]}"; do
         SRC_FILE="${SCRIPT_DIR}/${file%%:*}"
@@ -58,7 +75,7 @@ if [ "$UNINSTALL" == "true" ]; then
     done
     
     # Reverse the patch
-    if [ -f "$TARGET_DIR/klippy/extras/bed_mesh.py" ]; then
+    if grep -q "ldc1612_ng" "$TARGET_DIR/src/Makefile" ; then
         echo "Reversing patch..."
         (cd "$TARGET_DIR" && patch -p1 -R < "$SCRIPT_DIR/$PATCH_FILE")
     fi
@@ -68,20 +85,16 @@ else
         SRC_FILE="${file%%:*}"
         SRC_PATH="${SCRIPT_DIR}/${SRC_FILE}"
         DEST_DIR="$TARGET_DIR/${file#*:}"
-        DEST_PATH="${DEST_DIR}/${SRC_FILE}"
-        
-        if [ -f "$DEST_PATH" -a "$SRC_FILE" == "sensor_ldc1612_ng.c" ] &&
-            ! cmp -s "$SRC_PATH" "$DEST_PATH" ;
-        then
-            NEEDS_REBUILD=1
+       
+        if [ "$COPY" == "1" ] ; then
+            cp -v "$SRC_FILE" "$DEST_DIR/"
+        else
+            LINKPATH="$(realpath $SRC_PATH --relative-to=$DEST_DIR)"
+            ln -sfv "$LINKPATH" "$DEST_DIR/"
         fi
-
-        echo "Copying $SRC_FILE to $DEST_DIR"
-        cp "$SRC_FILE" "$DEST_DIR/"
     done
-    
-    BED_MESH_FILE="$TARGET_DIR/klippy/extras/bed_mesh.py"
-    if [ -f "$BED_MESH_FILE" ] && ! grep -q "eddy-ng patched" "$BED_MESH_FILE"; then
+
+    if ! grep -q "ldc1612_ng" "$TARGET_DIR/src/Makefile"; then
         echo "Applying patch..."
         (cd "$TARGET_DIR" && patch -p1 < "$SCRIPT_DIR/$PATCH_FILE")
     else

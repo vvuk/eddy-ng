@@ -1,16 +1,3 @@
-diff --git klippy/extras/bed_mesh.py klippy/extras/bed_mesh.py
-index bd8f697e3..758f8be04 100644
---- a/klippy/extras/bed_mesh.py
-+++ b/klippy/extras/bed_mesh.py
-@@ -866,7 +866,7 @@ class ProbeManager:
-         pprobe = self.printer.lookup_object("probe", None)
-         if pprobe is not None:
-             probe_name = pprobe.get_status(None).get("name", "")
--            can_scan = probe_name.startswith("probe_eddy_current")
-+            can_scan = "eddy" in probe_name # eddy-ng patched
-         if method == "rapid_scan" and can_scan:
-             self.rapid_scan_helper.perform_rapid_scan(gcmd)
-         else:
 diff --git src/Makefile src/Makefile
 index cfedc56f7..422e0179e 100644
 --- a/src/Makefile
