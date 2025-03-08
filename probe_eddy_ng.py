@@ -805,7 +805,7 @@ class ProbeEddy:
                     past_pos, past_v = self._get_trapq_position(times[i])
                     past_k_z = past_pos[2] if past_pos is not None else ""
                     past_v = past_v if past_v is not None else ""
-                    data_file.write(f"{times[i]},{freqs[i]},{heights[i] if heights else ""},{past_k_z},{past_v},{raw_freqs[i]},{trigger_time},{tap_start_time}\n")
+                    data_file.write(f"{times[i]},{freqs[i]},{heights[i] if heights else ''},{past_k_z},{past_v},{raw_freqs[i]},{trigger_time},{tap_start_time}\n")
             logging.info(f"Wrote {len(times)} samples to {self.save_samples_path}")
             self.save_samples_path = None
 
