@@ -661,6 +661,12 @@ class ProbeEddy:
         velocity = move.start_v + move.accel * move_time
         return pos, velocity
 
+    def _get_trapq_height(self, print_time: float) -> float:
+        th_pos, _ = self._get_trapq_position(print_time)
+        if th_pos is None:
+            return None
+        return th_pos[2]
+
     def current_drive_current(self) -> int:
         return self._sensor.get_drive_current()
 
@@ -2027,10 +2033,9 @@ class ProbeEddy:
             return
 
         s_t = np.asarray(self._last_sampler.times)
-        s_rf = np.asarray(self._last_sampler.raw_freqs)
         s_true_f = np.asarray(self._last_sampler.freqs)
         s_z = np.asarray(self._last_sampler.heights)
-        s_kinz = np.vectorize(self._get_trapq_position)(s_t)
+        s_kinz = np.vectorize(self._get_trapq_height)(s_t)
 
         # Any values below 0.0 are suspect because they were not calibrated,
         # and so are just extrapolated from the fit. So just don't show them.
