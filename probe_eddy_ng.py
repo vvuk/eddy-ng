@@ -391,7 +391,6 @@ class ProbeEddyProbeResult:
     @classmethod
     def make(cls, times: List[float], heights: List[float], errors: int = 0) -> ProbeEddyProbeResult:
         h = np.array(heights)
-        logging.info(f"make: {len(times)} heights {len(heights)} h {len(h)}")
         return ProbeEddyProbeResult(
             samples=h.tolist(),
             mean=float(np.mean(h)),
@@ -2659,7 +2658,6 @@ class ProbeEddySampler:
         self._update_samples()
 
     def _update_samples(self):
-        logging.info(f"{len(self.freqs)} - {len(self.raw_freqs)}")
         if len(self.freqs) == len(self.raw_freqs):
             return
 
@@ -2669,10 +2667,8 @@ class ProbeEddySampler:
         freqs_np = np.asarray(self.raw_freqs[start_idx:]) * conv_ratio
         self.freqs.extend(freqs_np.tolist())
 
-        logging.info(f"fs: {len(self.freqs)}")
         if self._fmap is not None:
             heights_np = self._fmap.freqs_to_heights_np(freqs_np)
-            logging.info(f"us: {len(heights_np)}")
             self.heights.extend(heights_np.tolist())
 
     @property
@@ -3164,14 +3160,9 @@ class ProbeEddyFrequencyMap:
         invfreqs = 1.0 / freqs
         if self._ftoh_high is not None:
             heights = np.zeros(len(invfreqs))
-            logging.info(f"ftoh domain: {self._ftoh.domain}")
-            logging.info(f"freqs: {freqs[0:2]}")
-            logging.info(f"invfreqs: {invfreqs[0:2]}")
             low_freq_vals = invfreqs > self._ftoh.domain[1]
-            logging.info(f"f: {low_freq_vals}")
             heights[low_freq_vals] = np.vectorize(self._ftoh_high, otypes=[float])(invfreqs[low_freq_vals])
             heights[~low_freq_vals] = np.vectorize(self._ftoh, otypes=[float])(invfreqs[~low_freq_vals])
-            logging.info(f"h: {heights}")
         else:
             heights = self._ftoh(invfreqs)
         return heights
