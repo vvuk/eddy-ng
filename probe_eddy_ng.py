@@ -1933,7 +1933,7 @@ class ProbeEddy:
         if home_z:
             th_pos = th.get_position()
             th_pos[2] = -(tap_adjust_z + tap_overshoot)
-            homed_to_str = f"homed z={th_pos[2]:.3f}, "
+            homed_to_str = f"homed z with overshoot={th_pos[2]:.3f}, "
             self._set_toolhead_position(th_pos, [2])
             self._last_tap_gcode_adjustment = 0.0
             adjusted_tap_z = 0.0
@@ -1971,8 +1971,8 @@ class ProbeEddy:
         self._tap_offset = float(self.params.home_trigger_height - result.value)
 
         self._log_msg(
-            f"Probe {homed_to_str}computed tap at {computed_tap_z:.3f} (tap at z={tap_z:.3f}, "
-            f"stddev {tap_stddev:.3f}) with {samples} samples, "
+            f"Probe computed tap at {computed_tap_z:.3f} (tap at z={tap_z:.3f}, "
+            f"stddev {tap_stddev:.3f}) with {samples} samples, {homed_to_str}"
             f"sensor offset {self._tap_offset:.3f} at z={self.params.home_trigger_height:.3f}"
         )
 
