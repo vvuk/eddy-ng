@@ -2724,7 +2724,7 @@ class ProbeEddySampler:
             return self.times[-1] >= sample_print_time
 
         # quick check
-        if self.times[-1] >= sample_print_time:
+        if self.times and self.times[-1] >= sample_print_time:
             return True
 
         wait_start_time = self.eddy._print_time_now()
