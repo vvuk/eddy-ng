@@ -3179,8 +3179,8 @@ class ProbeEddyFrequencyMap:
         heights = np.zeros(len(freqs))
         if self._ftoh_high is not None:
             low_freq_vals = freqs < self._ftoh.domain[0]
-            heights[low_freq_vals] = np.vectorize(self._ftoh_high)(freqs[low_freq_vals])
-            heights[~low_freq_vals] = np.vectorize(self._ftoh)(freqs[~low_freq_vals])
+            heights[low_freq_vals] = np.vectorize(self._ftoh_high, otypes=[float])(freqs[low_freq_vals])
+            heights[~low_freq_vals] = np.vectorize(self._ftoh, otypes=[float])(freqs[~low_freq_vals])
         else:
             heights = self._ftoh(heights)
         return heights
