@@ -391,6 +391,7 @@ class ProbeEddyProbeResult:
     @classmethod
     def make(cls, times: List[float], heights: List[float], errors: int = 0) -> ProbeEddyProbeResult:
         h = np.array(heights)
+        logging.info(f"make: {len(times)} heights {len(heights)} h {len(h)}")
         return ProbeEddyProbeResult(
             samples=h.tolist(),
             mean=float(np.mean(h)),
@@ -1035,6 +1036,7 @@ class ProbeEddy:
 
             if save:
                 self.save_samples_path = "/tmp/eddy-probe-static.csv"
+
             r = self.probe_static_height(duration)
 
             if self._cmd_helper is not None:
@@ -2654,19 +2656,23 @@ class ProbeEddySampler:
             raise self._printer.command_error("ProbeEddySampler.finish(): eddy._sampler is not us!")
         self.eddy._sampler_finished(self)
         self._stopped = True
+        self._update_samples()
 
     def _update_samples(self):
+        logging.info(f"{len(self.freqs)} - {len(self.raw_freqs)}")
         if len(self.freqs) == len(self.raw_freqs):
             return
 
-        start_idx = len(self.times)
         conv_ratio = self._sensor.freqval_conversion_value()
 
+        start_idx = len(self.freqs)
         freqs_np = np.asarray(self.raw_freqs[start_idx:]) * conv_ratio
         self.freqs.extend(freqs_np.tolist())
 
+        logging.info(f"fs: {len(self.freqs)}")
         if self._fmap is not None:
             heights_np = self._fmap.freqs_to_heights_np(freqs_np)
+            logging.info(f"us: {len(heights_np)}")
             self.heights.extend(heights_np.tolist())
 
     @property
@@ -3147,20 +3153,27 @@ class ProbeEddyFrequencyMap:
     def freq_to_height(self, freq: float) -> float:
         if self._ftoh is None:
             raise self._eddy._printer.command_error("Calling freq_to_height on uncalibrated map")
-        if self._ftoh_high is not None and freq < self._ftoh.domain[0]:
-            return float(self._ftoh_high(1.0 / freq))
-        return float(self._ftoh(1.0 / freq))
+        invfreq = 1.0 / freq
+        if self._ftoh_high is not None and invfreq < self._ftoh.domain[0]:
+            return float(self._ftoh_high(invfreq))
+        return float(self._ftoh(invfreq))
 
     def freqs_to_heights_np(self, freqs: np.array) -> np.array:
         if self._ftoh is None:
             raise self._eddy._printer.command_error("Calling freqs_to_heights on uncalibrated map")
-        heights = np.zeros(len(freqs))
+        invfreqs = 1.0 / freqs
         if self._ftoh_high is not None:
-            low_freq_vals = freqs < self._ftoh.domain[0]
-            heights[low_freq_vals] = np.vectorize(self._ftoh_high, otypes=[float])(freqs[low_freq_vals])
-            heights[~low_freq_vals] = np.vectorize(self._ftoh, otypes=[float])(freqs[~low_freq_vals])
+            heights = np.zeros(len(invfreqs))
+            logging.info(f"ftoh domain: {self._ftoh.domain}")
+            logging.info(f"freqs: {freqs[0:2]}")
+            logging.info(f"invfreqs: {invfreqs[0:2]}")
+            low_freq_vals = invfreqs > self._ftoh.domain[1]
+            logging.info(f"f: {low_freq_vals}")
+            heights[low_freq_vals] = np.vectorize(self._ftoh_high, otypes=[float])(invfreqs[low_freq_vals])
+            heights[~low_freq_vals] = np.vectorize(self._ftoh, otypes=[float])(invfreqs[~low_freq_vals])
+            logging.info(f"h: {heights}")
         else:
-            heights = self._ftoh(heights)
+            heights = self._ftoh(invfreqs)
         return heights
 
     def height_to_freq(self, height: float) -> float:
