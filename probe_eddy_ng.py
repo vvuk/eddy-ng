@@ -997,7 +997,7 @@ class ProbeEddy:
         if first_idx == len(sampler.times):
             raise self._printer.command_error(f"No samples in time range")
 
-        errors = sampler.get_error_count()
+        errors = sampler.error_count
         return ProbeEddyProbeResult.make(sampler.times[first_idx:], sampler.heights[first_idx:], errors=errors)
 
     cmd_PROBE_help = "Probe the height using the eddy current sensor, moving the toolhead to the home trigger height, or Z if specified."
@@ -2588,12 +2588,6 @@ class ProbeEddySampler:
         self._errors = 0
         self._fmap = eddy.map_for_drive_current() if calculate_heights else None
 
-        # this will hold the raw samples coming in from the sensor,
-        # with an empty 3rd (height) value
-        self._raw_samples = []
-        # this will hold samples with a height filled in (if we're doing that)
-        self._samples = []
-
         self.times = []
         self.raw_freqs = []
         self.freqs = []
@@ -2632,7 +2626,6 @@ class ProbeEddySampler:
 
         self._errors += msg["errors"]
         data = msg["data"]
-        self._raw_samples.extend(data)
 
         # data is (t, fv)
         if data:
@@ -2649,7 +2642,6 @@ class ProbeEddySampler:
         if self._stopped:
             raise self._printer.command_error("ProbeEddySampler.start() called after finish()")
         if not self._started:
-            self._raw_samples = []
             self._sensor.add_bulk_sensor_data_client(self._add_hw_measurement)
             self._started = True
 
@@ -2664,25 +2656,11 @@ class ProbeEddySampler:
         self._stopped = True
 
     def _update_samples(self):
-        if len(self._samples) == len(self._raw_samples):
+        if len(self.freqs) == len(self.raw_freqs):
             return
 
         start_idx = len(self.times)
         conv_ratio = self._sensor.freqval_conversion_value()
-
-        #start_idx = len(self._samples)
-        if self._fmap is not None:
-            new_samples = [
-                (
-                    t,
-                    round(conv_ratio * f, ndigits=3),
-                    self._fmap.freq_to_height(round(conv_ratio * f, ndigits=3)),
-                )
-                for t, f, _ in self._raw_samples[start_idx:]
-            ]
-            self._samples.extend(new_samples)
-        else:
-            self._samples.extend([(t, round(conv_ratio * f, ndigits=3), math.inf) for t, f, _ in self._raw_samples[start_idx:]])
 
         freqs_np = np.asarray(self.raw_freqs[start_idx:]) * conv_ratio
         self.freqs.extend(freqs_np.tolist())
@@ -2691,7 +2669,8 @@ class ProbeEddySampler:
             heights_np = self._fmap.freqs_to_heights_np(freqs_np)
             self.heights.extend(heights_np.tolist())
 
-    def get_error_count(self):
+    @property
+    def error_count(self):
         return self._errors
 
     # get the last sampled height
@@ -2770,12 +2749,11 @@ class ProbeEddySampler:
         wait_start_time = self.eddy._print_time_now()
 
         start_error_count = self._errors
+        start_count = 0
         if new_only:
-            start_count = len(self._raw_samples) + (self._errors if count_errors else 0)
-        else:
-            start_count = 0
+            start_count = len(self.raw_freqs) + (self._errors if count_errors else 0)
 
-        while (len(self._raw_samples) + (self._errors if count_errors else 0)) - start_count < min_samples:
+        while (len(self.raw_freqs) + (self._errors if count_errors else 0)) - start_count < min_samples:
             now = self.eddy._print_time_now()
             if now - wait_start_time > max_wait_time:
                 if raise_error:
@@ -2820,16 +2798,16 @@ class ProbeEddySampler:
 
         self._update_samples()
 
-        if len(self._samples) == 0:
+        if len(self.times) == 0:
             raise self._printer.command_error("No samples at all, so none in time range")
 
         self.eddy._log_debug(
-            f"find_height_at_time: {len(self._samples)} samples, time range {self._samples[0][0]:.3f} to {self._samples[-1][0]:.3f}"
+            f"find_height_at_time: {len(self.times)} samples, time range {self.times[0][0]:.3f} to {self.times[-1][0]:.3f}"
         )
 
         # find the first sample that is >= start_time
         start_idx = bisect.bisect_left(self.times, start_time)
-        if start_idx >= len(self._samples):
+        if start_idx >= len(self.times):
             raise self._printer.command_error("Nothing after start_time?")
 
         # find the last sample that is < end_time
