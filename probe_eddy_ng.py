@@ -1898,6 +1898,7 @@ class ProbeEddy:
                     # only one sample, we're done
                     tap_z = tap.probe_z
                     tap_stddev = 0.0
+                    tap_overshoot = tap.overshoot
                     break
 
                 if len(results) >= samples:
