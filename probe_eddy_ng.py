@@ -387,6 +387,20 @@ class ProbeEddyProbeResult:
         stddev_sum = np.sum([(s - self.value) ** 2.0 for s in self.samples])
         return (stddev_sum / len(self.samples)) ** 0.5
 
+    @classmethod
+    def make(cls, times: List[float], heights: List[float], errors: int = 0) -> ProbeEddyProbeResult:
+        h = np.array(heights)
+        return ProbeEddyProbeResult(
+            samples=h.tolist(),
+            mean=float(np.mean(h)),
+            median=float(np.median(h)),
+            min_value=float(np.min(h)),
+            max_value=float(np.max(h)),
+            tstart=float(times[0]),
+            tend=float(times[-1]),
+            errors=errors
+        )
+
     def __format__(self, spec):
         if spec == "v":
             return f"{self.value:.3f}"
@@ -819,7 +833,7 @@ class ProbeEddy:
         duration: float = gcmd.get_float("DURATION", 0.100, above=0.0)
         # whether to check +/- 1mm positions for accuracy
         start_z: float = gcmd.get_float("Z", 5.0)
-        offsets = gcmd.get("OFFSETS", None)
+        offsets: str = gcmd.get("OFFSETS", None)
 
         probe_speed = gcmd.get_float("SPEED", self.params.probe_speed, above=0.0)
         lift_speed = gcmd.get_float("LIFT_SPEED", self.params.lift_speed, above=0.0)
@@ -960,33 +974,18 @@ class ProbeEddy:
             sampler.wait_for_sample_at_time(now + (duration + self._sensor._ldc_settle_time))
             sampler.finish()
 
-            samples = sampler.get_samples()
-            if len(samples) == 0:
-                return ProbeEddyProbeResult([])
+        if sampler.count == 0:
+            return ProbeEddyProbeResult([])
 
-            etime = samples[-1][0]
-            stime = etime - duration
+        etime = sampler.times[-1]
+        stime = etime - duration
 
-            samples = [s[2] for s in samples if s[0] > stime]
-            if len(samples) == 0:
-                raise self._printer.command_error(f"No samples")
+        first_idx = bisect.bisect_left(sampler.times, stime)
+        if first_idx == len(sampler.times):
+            raise self._printer.command_error(f"No samples in time range")
 
-            min_value = min(samples)
-            max_value = max(samples)
-
-            mean: float = float(np.mean(samples))
-            median: float = float(np.median(samples))
-
-            return ProbeEddyProbeResult(
-                samples=samples,
-                mean=float(mean),
-                median=float(median),
-                min_value=float(min_value),
-                max_value=float(max_value),
-                tstart=float(stime),
-                tend=float(etime),
-                errors=sampler.get_error_count(),
-            )
+        errors = sampler.get_error_count()
+        return ProbeEddyProbeResult.make(sampler.times[first_idx:], sampler.heights[first_idx:], errors=errors)
 
     cmd_PROBE_help = "Probe the height using the eddy current sensor, moving the toolhead to the home trigger height, or Z if specified."
 
@@ -1345,8 +1344,7 @@ class ProbeEddy:
             sampler.finish()
 
         # the samples are a list of [print_time, freq, dummy_height] tuples
-        samples = sampler.get_samples()
-        if len(samples) == 0:
+        if sampler.count == 0:
             return None, None, None, None
 
         freqs = []
@@ -1713,16 +1711,16 @@ class ProbeEddy:
             tap_end_time=tap_end_time,
         )
 
-    def _compute_butter_tap(self, samples, raw_samples):
+    def _compute_butter_tap(self, sampler):
         if not HAS_SCIPY:
             return None, None
 
         trigger_freq = self.height_to_freq(self.params.home_trigger_height)
 
-        s_f = np.asarray([s[1] for s in samples])
+        s_f = np.asarray(sampler.freqs)
         first_one = np.argmax(s_f >= trigger_freq)
-        s_t = np.asarray([s[0] for s in samples[first_one:]])
-        s_f = np.asarray([s[1] for s in samples[first_one:]])
+        s_t = np.asarray(sampler.times[first_one:])
+        s_f = np.asarray(sampler.freqs[first_one:])
 
         lowcut = self.params.tap_butter_lowcut
         highcut = self.params.tap_butter_highcut
@@ -2591,6 +2589,14 @@ class ProbeEddySampler:
 
         self.memos = dict()
 
+    @property
+    def raw_count(self):
+        return len(self.times)
+
+    @property
+    def count(self):
+        return len(self.heights) if self.heights else 0
+
     # this is just a handy way to communicate values between different parts of the system,
     # specifically to record things like trigger times for plotting
     def memo(self, name, value):
@@ -2673,13 +2679,6 @@ class ProbeEddySampler:
             heights_np = self._fmap.freqs_to_heights_np(freqs_np)
             self.heights.extend(heights_np.tolist())
 
-    def get_raw_samples(self):
-        return self._raw_samples.copy()
-
-    def get_samples(self):
-        self._update_samples()
-        return self._samples.copy()
-
     def get_error_count(self):
         return self._errors
 
@@ -2708,9 +2707,13 @@ class ProbeEddySampler:
 
         if self._stopped:
             # if we're not getting any more samples, we can check directly
-            if len(self._raw_samples) == 0:
+            if len(self.times) == 0:
                 return report_no_samples()
-            return self._raw_samples[-1][0] >= sample_print_time
+            return self.times[-1] >= sample_print_time
+
+        # quick check
+        if self.times[-1] >= sample_print_time:
+            return True
 
         wait_start_time = self.eddy._print_time_now()
 
@@ -2729,7 +2732,7 @@ class ProbeEddySampler:
             f"EDDYng waiting for sample at {sample_print_time:.3f} (now: {wait_start_time:.3f}, max_wait_time: {max_wait_time:.3f})"
         )
         now = self.eddy._print_time_now()
-        while len(self._raw_samples) == 0 or self._raw_samples[-1][0] < sample_print_time:
+        while len(self.times) == 0 or self.times[-1] < sample_print_time:
             now = self.eddy._print_time_now()
             if now - wait_start_time > max_wait_time:
                 return report_no_samples()
@@ -2772,14 +2775,6 @@ class ProbeEddySampler:
 
         return True
 
-    def find_closest_height_at_time(self, time) -> Optional[float]:
-        self._update_samples()
-        if len(self._samples) == 0:
-            return None
-        # find the closest sample to the given time
-        idx = np.argmin([abs(t - time) for t, _, _ in self._samples])
-        return self._samples[idx][2]
-
     def find_height_at_time(self, start_time, end_time):
         if end_time < start_time:
             raise self._printer.command_error("find_height_at_time: end_time is before start_time")
@@ -2790,28 +2785,29 @@ class ProbeEddySampler:
             raise self._printer.command_error("No samples at all, so none in time range")
 
         self.eddy._log_debug(
-            f"EDDYng find_height_at_time: {len(self._samples)} samples, time range {self._samples[0][0]:.3f} to {self._samples[-1][0]:.3f}"
+            f"find_height_at_time: {len(self._samples)} samples, time range {self._samples[0][0]:.3f} to {self._samples[-1][0]:.3f}"
         )
 
         # find the first sample that is >= start_time
-        start_idx = bisect.bisect_left([t for t, _, _ in self._samples], start_time)
+        start_idx = bisect.bisect_left(self.times, start_time)
         if start_idx >= len(self._samples):
             raise self._printer.command_error("Nothing after start_time?")
 
         # find the last sample that is <= end_time
-        end_idx = bisect.bisect_right([t for t, _, _ in self._samples], end_time)
-        if end_idx == 0:
-            raise self._printer.command_error("found something at start_time, but not before end_time?")
+        # find the last sample that is < end_time
+        end_idx = start_idx
+        while end_idx < len(self.times) and self.times[end_idx] < end_time:
+            end_idx += 1
 
         # average the heights of the samples in the range
-        heights = [h for _, _, h in self._samples[start_idx:end_idx]]
+        heights = self.heights[start_idx:end_idx]
         if len(heights) == 0:
             raise self._printer.command_error(f"no samples between time {start_time:.1f} and {end_time:.1f}!")
         hmin, hmax = np.min(heights), np.max(heights)
         mean = np.mean(heights)
         median = np.median(heights)
         self.eddy._log_debug(
-            f"EDDYng find_height_at_time: {len(heights)} samples, median: {median:.3f}, mean: {mean:.3f} (range {hmin:.3f}-{hmax:.3f})"
+            f"find_height_at_time: {len(heights)} samples, median: {median:.3f}, mean: {mean:.3f} (range {hmin:.3f}-{hmax:.3f})"
         )
 
         return float(median)
@@ -2901,7 +2897,7 @@ class ProbeEddyFrequencyMap:
     def calibrate_from_values(
         self,
         drive_current: int,
-        times: List[float],
+        raw_times: List[float],
         raw_freqs_list: List[float],
         raw_heights_list: List[float],
         raw_vels_list: List[float],
@@ -2916,7 +2912,7 @@ class ProbeEddyFrequencyMap:
             return None, None
 
         # everything must be a np.array or things get confused below
-        times = np.asarray(times)
+        times = np.asarray(raw_times)
         raw_freqs = np.asarray(raw_freqs_list)
         raw_heights = np.asarray(raw_heights_list)
         raw_vels = np.asarray(raw_vels_list)
