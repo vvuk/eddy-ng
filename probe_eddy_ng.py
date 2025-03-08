@@ -478,12 +478,8 @@ class ProbeEddy:
 
         # There can only be one active sampler at a time
         self._sampler: ProbeEddySampler = None
+        self._last_sampler: ProbeEddySampler = None
         self.save_samples_path = None
-        # This is a hack to keep the last set of data around so that we can
-        # do plots and things. It's updated after finish()
-        self._last_sampler_samples = None
-        self._last_sampler_raw_samples = None
-        self._last_sampler_memos = None
 
         # The last tap Z value, in absolute axis terms. Used for status.
         self._last_tap_z = 0.0
@@ -768,28 +764,26 @@ class ProbeEddy:
         if self._sampler is not sampler:
             raise self._printer.command_error("EDDYng finishing sampler that's not active")
 
+        self._last_sampler = sampler
         self._sampler = None
 
         if self.save_samples_path is not None:
             with open(self.save_samples_path, "w") as data_file:
-                samples = sampler.get_samples()
-                raw_samples = sampler.get_raw_samples()
+                times = sampler.times
+                raw_freqs = sampler.raw_freqs
+                freqs = sampler.freqs
+                heights = sampler.heights
+
                 data_file.write("time,frequency,z,kin_z,kin_v,raw_f,trigger_time,tap_start_time\n")
                 trigger_time = kwargs.get("trigger_time", "")
                 tap_start_time = kwargs.get("tap_start_time", "")
-                for i in range(len(samples)):
-                    s_t, s_freq, s_z = samples[i]
-                    _, raw_f, _ = raw_samples[i]
-                    past_pos, past_v = self._get_trapq_position(s_t)
+                for i in range(len(times)):
+                    past_pos, past_v = self._get_trapq_position(times[i])
                     past_k_z = past_pos[2] if past_pos is not None else ""
                     past_v = past_v if past_v is not None else ""
-                    data_file.write(f"{s_t},{s_freq},{s_z},{past_k_z},{past_v},{raw_f},{trigger_time},{tap_start_time}\n")
-            logging.info(f"Wrote {len(samples)} samples to {self.save_samples_path}")
+                    data_file.write(f"{times[i]},{freqs[i]},{heights[i] if heights else ""},{past_k_z},{past_v},{raw_freqs[i]},{trigger_time},{tap_start_time}\n")
+            logging.info(f"Wrote {len(times)} samples to {self.save_samples_path}")
             self.save_samples_path = None
-
-        self._last_sampler_samples = sampler.get_samples()
-        self._last_sampler_raw_samples = sampler.get_raw_samples()
-        self._last_sampler_memos = sampler.memos
 
     cmd_STATUS_help = "Query the last raw coil value and status"
 
@@ -2020,20 +2014,18 @@ class ProbeEddy:
             filename = f"tap-{tapnum}.html"
         tapplot_path = f"/tmp/{filename}"
 
-        samples = self._last_sampler_samples
-        raw_samples = self._last_sampler_raw_samples
-        memos = self._last_sampler_memos
-        if samples is None or raw_samples is None or len(samples) == 0 or len(raw_samples) == 0:
-            # delete any old plots to avoid confusion
-            if os.path.exists(tapplot_path):
-                os.remove(tapplot_path)
+        # delete any old plots to avoid confusion
+        if os.path.exists(tapplot_path):
+            os.remove(tapplot_path)
+
+        if not self._last_sampler or not self._last_sampler.times:
             return
 
-        s_t = np.asarray([s[0] for s in samples])
-        s_rf = s_f = np.asarray([s[1] for s in raw_samples])
-        s_true_f = np.asarray([s[1] for s in samples])
-        s_z = np.asarray([s[2] for s in samples])
-        s_kinz = np.asarray([(self._get_trapq_position(s[0]) or [[0,0,-10]])[0][2] for s in samples])
+        s_t = np.asarray(self._last_sampler.times)
+        s_rf = np.asarray(self._last_sampler.raw_freqs)
+        s_true_f = np.asarray(self._last_sampler.freqs)
+        s_z = np.asarray(self._last_sampler.heights)
+        s_kinz = np.vectorize(self._get_trapq_position)(s_t)
 
         # Any values below 0.0 are suspect because they were not calibrated,
         # and so are just extrapolated from the fit. So just don't show them.
@@ -2043,85 +2035,22 @@ class ProbeEddy:
 
         # normalize times to start at 0
         s_t = s_t - time_start
-        tap_start_time = memos.get("tap_start_time", time_start) - time_start
-        tap_end_time = memos.get("trigger_time", time_start) - time_start
+        tap_start_time = self._last_sampler.memos.get("tap_start_time", time_start) - time_start
+        tap_end_time = self._last_sampler.memos.get("trigger_time", time_start) - time_start
         trigger_time = tap_start_time + (tap_end_time - tap_start_time) * self.params.tap_time_position
-        tap_threshold = memos.get("tap_threshold", 0)
+        tap_threshold = self._last_sampler.memos.get("tap_threshold", 0)
 
         time_len = s_t.max()
 
         # compute the butterworth filter, if we have scipy
         if tap is not None and HAS_SCIPY:
-            butter_s_t, butter_s_v = self._compute_butter_tap(samples, raw_samples)
+            butter_s_t, butter_s_v = self._compute_butter_tap(self._last_sampler)
             butter_s_t = butter_s_t - time_start
         else:
             butter_s_t = butter_s_v = None
 
-        # Compute exactly (mostly) how the C code does it, so that the accum
-        # values are identical
-        FREQ_WINDOW_SIZE = 16
-        WMA_D_WINDOW_SIZE = 4
-        s_freq_weight_sum = (FREQ_WINDOW_SIZE * (FREQ_WINDOW_SIZE + 1)) / 2
-
-        c_freq_buffer = np.zeros(FREQ_WINDOW_SIZE, np.uint32)
-        c_wma_d_buf = np.zeros(WMA_D_WINDOW_SIZE, np.int32)
-        c_freq_i = 0
-        c_wma_d_i = 0
-
-        c_last_wma = np.uint32(0)
-        c_last_wma_d_avg = np.int32(0)
-
-        c_tap_accum = np.int32(0)
-
-        c_wmas = np.zeros(len(s_rf), np.uint32)
-        c_wma_ds = np.zeros(len(s_rf), np.int32)
-        c_wma_d_avgs = np.zeros(len(s_rf), np.int32)
-        c_tap_accums = np.zeros(len(s_rf), np.int32)
-
-        # pre-fill so that the values don't blow up
-        for i in range(FREQ_WINDOW_SIZE):
-            c_freq_buffer[i] = s_rf[0]
-
-        for sample_i, rawf in enumerate(np.array(s_rf)):
-            c_freq_buffer[c_freq_i] = rawf
-            c_freq_i = (c_freq_i + 1) % FREQ_WINDOW_SIZE
-
-            c_wma_numerator = np.uint64(0)
-            for i in range(FREQ_WINDOW_SIZE):
-                j = (c_freq_i + i) % FREQ_WINDOW_SIZE
-                weight = np.uint64(i + 1)
-                val = c_freq_buffer[j]
-                c_wma_numerator += val * weight
-
-            c_wma = np.uint32(c_wma_numerator // s_freq_weight_sum)
-            c_wma_d = np.int32(c_wma) - np.int32(c_last_wma)
-
-            c_wma_d_buf[c_wma_d_i] = c_wma_d
-            c_wma_d_i = (c_wma_d_i + 1) % WMA_D_WINDOW_SIZE
-            c_wma_d_avg = np.int32(0)
-            for i in range(WMA_D_WINDOW_SIZE):
-                c_wma_d_avg += c_wma_d_buf[i]
-            c_wma_d_avg = c_wma_d_avg // WMA_D_WINDOW_SIZE
-
-            if c_wma_d_avg < c_last_wma_d_avg:
-                c_tap_accum += c_last_wma_d_avg - c_wma_d_avg
-            else:
-                c_tap_accum = 0
-
-            c_last_wma = c_wma
-            c_last_wma_d_avg = c_wma_d_avg
-
-            c_wmas[sample_i] = c_wma
-            # the first few blow up because they
-            # start at 0 and go up to the large int freqval
-            if sample_i < 32:
-                c_tap_accum = 0
-                c_wma_d_avg = 0
-                c_wma_d = 0
-            c_wma_ds[sample_i] = c_wma_d
-            c_wma_d_avgs[sample_i] = c_wma_d_avg
-            c_tap_accums[sample_i] = c_tap_accum
-
+        # Do this roughly how the C code does it, to keep the values identical
+        # TODO Just report the value from the mcu?
         butter_accum = None
         if butter_s_v is not None:
             # Note: we don't handle freq offset or
@@ -2234,48 +2163,6 @@ class ProbeEddy:
                 mode="lines",
                 name="Freq",
                 yaxis="y2",
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=s_t,
-                y=c_wmas,
-                mode="lines",
-                name="wma",
-                yaxis="y2",
-                visible="legendonly",
-            )
-        )
-
-        # the derivative and deriv averages
-        fig.add_trace(
-            go.Scatter(
-                x=s_t,
-                y=c_wma_ds,
-                mode="lines",
-                name="wma_d",
-                yaxis="y3",
-                visible="legendonly",
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=s_t,
-                y=c_wma_d_avgs,
-                mode="lines",
-                name="wma_d_avg",
-                yaxis="y3",
-                visible="legendonly",
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=s_t,
-                y=c_tap_accums,
-                mode="lines",
-                name="wma_threshold",
-                yaxis="y3",
-                visible="legendonly",
             )
         )
 
@@ -2697,6 +2584,11 @@ class ProbeEddySampler:
         # this will hold samples with a height filled in (if we're doing that)
         self._samples = []
 
+        self.times = []
+        self.raw_freqs = []
+        self.freqs = []
+        self.heights = [] if self._fmap is not None else None
+
         self.memos = dict()
 
     # this is just a handy way to communicate values between different parts of the system,
@@ -2721,7 +2613,18 @@ class ProbeEddySampler:
             return False
 
         self._errors += msg["errors"]
-        self._raw_samples.extend(msg["data"])
+        data = msg["data"]
+        self._raw_samples.extend(data)
+
+        # data is (t, fv)
+        if data:
+            times, raw_freqs = zip(*data)
+        else:
+            times, raw_freqs = [], []
+
+        self.times.extend(times)
+        self.raw_freqs.extend(raw_freqs)
+
         return True
 
     def start(self):
@@ -2746,8 +2649,10 @@ class ProbeEddySampler:
         if len(self._samples) == len(self._raw_samples):
             return
 
-        start_idx = len(self._samples)
+        start_idx = len(self.times)
         conv_ratio = self._sensor.freqval_conversion_value()
+
+        #start_idx = len(self._samples)
         if self._fmap is not None:
             new_samples = [
                 (
@@ -2761,6 +2666,13 @@ class ProbeEddySampler:
         else:
             self._samples.extend([(t, round(conv_ratio * f, ndigits=3), math.inf) for t, f, _ in self._raw_samples[start_idx:]])
 
+        freqs_np = np.asarray(self.raw_freqs[start_idx:]) * conv_ratio
+        self.freqs.extend(freqs_np.tolist())
+
+        if self._fmap is not None:
+            heights_np = self._fmap.freqs_to_heights_np(freqs_np)
+            self.heights.extend(heights_np.tolist())
+
     def get_raw_samples(self):
         return self._raw_samples.copy()
 
@@ -2773,12 +2685,12 @@ class ProbeEddySampler:
 
     # get the last sampled height
     def get_last_height(self) -> float:
-        if self._fmap is None:
+        if self.heights is None:
             raise self._printer.command_error("ProbeEddySampler: no height mapping")
         self._update_samples()
-        if len(self._samples) == 0:
+        if len(self.heights) == 0:
             raise self._printer.command_error("ProbeEddySampler: no samples")
-        return self._samples[-1][2]
+        return self.heights[-1]
 
     # wait for a sample for the current time and get a new height
     def get_height_now(self) -> Optional[float]:
@@ -3226,6 +3138,18 @@ class ProbeEddyFrequencyMap:
         if self._ftoh_high is not None and freq < self._ftoh.domain[0]:
             return float(self._ftoh_high(1.0 / freq))
         return float(self._ftoh(1.0 / freq))
+
+    def freqs_to_heights_np(self, freqs: np.array) -> np.array:
+        if self._ftoh is None:
+            raise self._eddy._printer.command_error("Calling freqs_to_heights on uncalibrated map")
+        heights = np.zeros(len(freqs))
+        if self._ftoh_high is not None:
+            low_freq_vals = freqs < self._ftoh.domain[0]
+            heights[low_freq_vals] = np.vectorize(self._ftoh_high)(freqs[low_freq_vals])
+            heights[~low_freq_vals] = np.vectorize(self._ftoh)(freqs[~low_freq_vals])
+        else:
+            heights = self._ftoh(heights)
+        return heights
 
     def height_to_freq(self, height: float) -> float:
         if self._htof is None:
