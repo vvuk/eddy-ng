@@ -254,7 +254,7 @@ class ProbeEddyParams:
     # maximum number of errors to allow in a row on the sensor
     max_errors: int = 0
     # whether to print lots of verbose debug info to the log
-    debug: bool = False
+    debug: bool = True
 
     tap_trigger_safe_start_height: float = 1.5
 
