@@ -1531,7 +1531,7 @@ class ProbeEddy:
 
         # If the sensor thinks we're too low we need to move back up before homing
         if now_height < start_height:
-            move_up_by = start_height - now_height
+            move_up_by = min(start_height, start_height - now_height)
             # give ourselves some room to do so, homing typically doesn't move up,
             # and we should know that we have this room because the sensor tells us we're too low
             th_pos[2] = rail_range[1] - (move_up_by + 10.0)
@@ -1549,8 +1549,6 @@ class ProbeEddy:
             th_pos[2] += move_up_by
             self._log_debug(f"probe_to_start_position_unhomed: moving toolhead up by {move_up_by:.3f} to {th_pos[2]:.3f}")
             th.manual_move([None, None, th_pos[2]], self.params.probe_speed)
-            self._sampler.wait_for_sample_at_time(th.get_last_move_time())
-            now_height = self._sampler.get_last_height()
 
     def probe_to_start_position(self, z_pos=None):
         self._log_debug(f"probe_to_start_position (tt: {self.params.tap_threshold}, z-homed: {self._z_homed()})")
