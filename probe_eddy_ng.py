@@ -1549,6 +1549,8 @@ class ProbeEddy:
             th_pos[2] += move_up_by
             self._log_debug(f"probe_to_start_position_unhomed: moving toolhead up by {move_up_by:.3f} to {th_pos[2]:.3f}")
             th.manual_move([None, None, th_pos[2]], self.params.probe_speed)
+            # TODO: this should just be th.wait_moves()
+            self._sampler.wait_for_sample_at_time(th.get_last_move_time())
 
     def probe_to_start_position(self, z_pos=None):
         self._log_debug(f"probe_to_start_position (tt: {self.params.tap_threshold}, z-homed: {self._z_homed()})")
