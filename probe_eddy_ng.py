@@ -2990,7 +2990,7 @@ class ProbeEddyFrequencyMap:
     def calibrate_from_values(
         self,
         drive_current: int,
-        times: List[float],
+        raw_times: List[float],
         raw_freqs_list: List[float],
         raw_heights_list: List[float],
         raw_vels_list: List[float],
@@ -3005,41 +3005,33 @@ class ProbeEddyFrequencyMap:
             return None, None
 
         # everything must be a np.array or things get confused below
-        times = np.asarray(times)
-        raw_freqs = np.asarray(raw_freqs_list)
-        raw_heights = np.asarray(raw_heights_list)
-        raw_vels = np.asarray(raw_vels_list)
-
-        # smooth out the data; a simple rolling average does the job,
-        # but centered to give more accurate data (since we have the full
-        # data set). The edges of the data just use a smaller window.
-        avg_freqs = np_rolling_mean(raw_freqs, 16)
-        avg_heights = np_rolling_mean(raw_heights, 16)
+        times = np.asarray(raw_times)
+        freqs = np.asarray(raw_freqs_list)
+        heights = np.asarray(raw_heights_list)
+        vels = np.asarray(raw_vels_list) if raw_vels_list else None
 
         if write_debug_files:
             with open("/tmp/eddy-calibration.csv", "w") as data_file:
                 data_file.write("time,frequency,avg_freq,z,avg_z,v\n")
-                for i in range(len(raw_freqs)):
+                for i in range(len(freqs)):
                     s_t = times[i]
-                    s_f = raw_freqs[i]
-                    s_z = raw_heights[i]
-                    s_af = avg_freqs[i]
-                    s_az = avg_heights[i]
-                    s_v = raw_vels[i] if raw_vels is not None else 0.0
-                    data_file.write(f"{s_t},{s_f},{s_af},{s_z},{s_az},{s_v}\n")
-                self._eddy._log_info(f"Wrote {len(raw_freqs)} samples to /tmp/eddy-calibration.csv")
+                    s_f = freqs[i]
+                    s_z = heights[i]
+                    s_v = vels[i] if vels is not None else 0.0
+                    data_file.write(f"{s_t},{s_f},{s_z},,{s_v}\n")
+                self._eddy._log_info(f"Wrote {len(freqs)} samples to /tmp/eddy-calibration.csv")
 
-        if len(avg_freqs) == 0 or len(avg_heights) == 0:
+        if len(freqs) == 0 or len(heights) == 0:
             if report_errors:
                 self._eddy._log_error(
-                    f"Error: Calibration failed, couldn't compute averages ({len(raw_freqs_list)}, {len(raw_heights_list)}, {len(avg_freqs)}, {len(avg_heights)}), probably due to no samples received."
+                    f"Error: Calibration failed, couldn't compute averages ({len(raw_freqs_list)}, {len(raw_heights_list)}), probably due to no valid samples received."
                 )
             return None, None
 
-        max_height = float(avg_heights.max())
-        min_height = float(avg_heights.min())
-        min_freq = float(avg_freqs.min())
-        max_freq = float(avg_freqs.max())
+        max_height = float(heights.max())
+        min_height = float(heights.min())
+        min_freq = float(freqs.min())
+        max_freq = float(freqs.max())
         freq_spread = ((max_freq / min_freq) - 1.0) * 100.0
 
         # Check if our calibration is good enough
@@ -3070,14 +3062,14 @@ class ProbeEddyFrequencyMap:
                     f"Warning: frequency spread is {extremely}low ({freq_spread:.2f}%, {min_freq:.1f}-{max_freq:.1f}), which will greatly impact accuracy. Your sensor may be too high."
                 )
 
-        low_samples = avg_heights <= ProbeEddyFrequencyMap.low_z_threshold
-        high_samples = avg_heights >= ProbeEddyFrequencyMap.low_z_threshold - 0.5
+        low_samples = heights <= ProbeEddyFrequencyMap.low_z_threshold
+        high_samples = heights >= ProbeEddyFrequencyMap.low_z_threshold - 0.5
 
-        ftoh_low_fn = npp.Polynomial.fit(1.0 / avg_freqs[low_samples], avg_heights[low_samples], deg=9)
-        htof_low_fn = npp.Polynomial.fit(avg_heights[low_samples], 1.0 / avg_freqs[low_samples], deg=9)
+        ftoh_low_fn = npp.Polynomial.fit(1.0 / freqs[low_samples], heights[low_samples], deg=9)
+        htof_low_fn = npp.Polynomial.fit(heights[low_samples], 1.0 / freqs[low_samples], deg=9)
 
         if np.count_nonzero(high_samples) > 50:
-            ftoh_high_fn = npp.Polynomial.fit(1.0 / avg_freqs[high_samples], avg_heights[high_samples], deg=9)
+            ftoh_high_fn = npp.Polynomial.fit(1.0 / freqs[high_samples], heights[high_samples], deg=9)
         else:
             self._eddy._log_debug(f"not computing ftoh_high, not enough high samples")
             ftoh_high_fn = None
@@ -3085,13 +3077,13 @@ class ProbeEddyFrequencyMap:
         # Calculate rms, only for the low values (where error is most relevant)
         rmse_fth = np_rmse(
             ftoh_low_fn,
-            1.0 / avg_freqs[low_samples],
-            avg_heights[low_samples],
+            1.0 / freqs[low_samples],
+            heights[low_samples],
         )
         rmse_htf = np_rmse(
             htof_low_fn,
-            avg_heights[low_samples],
-            1.0 / avg_freqs[low_samples],
+            heights[low_samples],
+            1.0 / freqs[low_samples],
         )
 
         if report_errors:
@@ -3118,11 +3110,11 @@ class ProbeEddyFrequencyMap:
         if write_debug_files:
             self._write_calibration_plot(
                 times,
-                avg_freqs,
-                avg_heights,
+                freqs,
+                heights,
                 rmse_fth,
                 rmse_htf,
-                vels=raw_vels,
+                vels=vels,
             )
 
         return rmse_fth, rmse_htf
@@ -3235,18 +3227,6 @@ class ProbeEddyFrequencyMap:
 
     def calibrated(self) -> bool:
         return self._ftoh is not None and self._htof is not None
-
-
-def np_rolling_mean(data, window, center=True):
-    half_window = (window - 1) // 2 if center else 0
-    result = np.empty(len(data), dtype=float)
-
-    for i in range(len(data)):
-        start = max(0, i - half_window)
-        end = min(len(data), i + half_window + 1)
-        result[i] = np.mean(data[start:end])
-
-    return result
 
 
 def np_rmse(p, x, y):
