@@ -6,11 +6,16 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 from __future__ import annotations
 
-import os, logging, math, bisect, re
+import os
+import logging
+import math
+import bisect
+import re
+import traceback
+import pickle
+import base64
 import numpy as np
 import numpy.polynomial as npp
-import traceback
-import pickle, base64
 from itertools import combinations
 
 from dataclasses import dataclass, field
@@ -19,8 +24,8 @@ from typing import (
     List,
     Optional,
     Tuple,
-    final,
     ClassVar,
+    final,
 )
 
 try:
@@ -30,9 +35,11 @@ try:
     from klippy.configfile import error as configerror
     from klippy.gcode import GCodeCommand
     from klippy.toolhead import ToolHead
+    from klippy.extras import probe, manual_probe, bed_mesh
+    from klippy.extras.homing import HomingMove
 
     IS_KALICO = True
-except:
+except ImportError:
     import mcu
     import pins
     import chelper
@@ -41,25 +48,25 @@ except:
     from configfile import error as configerror
     from gcode import GCodeCommand
     from toolhead import ToolHead
+    from . import probe, manual_probe, bed_mesh
+    from .homing import HomingMove
 
     IS_KALICO = False
 
-from .homing import HomingMove
-
-from . import ldc1612_ng, probe, manual_probe, bed_mesh
+from . import ldc1612_ng
 
 try:
     import plotly  # noqa
 
     HAS_PLOTLY = True
-except:
+except ImportError:
     HAS_PLOTLY = False
 
 try:
     import scipy  # noqa
 
     HAS_SCIPY = True
-except:
+except ImportError:
     HAS_SCIPY = False
 
 # In this file, a couple of conventions are used (for sanity).
