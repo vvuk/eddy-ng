@@ -1,0 +1,3 @@
+config WANT_EDDY_NG
+    bool "Include eddy-ng ldc1612 support"
+
