@@ -6,12 +6,13 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 from __future__ import annotations
 
-import os, logging, math, bisect, re
+import os, logging, math, bisect, re, time
 import numpy as np
 import numpy.polynomial as npp
 import traceback
 import pickle, base64
 from itertools import combinations
+from functools import cmp_to_key
 
 from dataclasses import dataclass, field
 from typing import (
@@ -505,6 +506,8 @@ class ProbeEddy:
         # functionality like start_session
         self._printer.add_object("probe", self)
 
+        self._bed_mesh_helper = BedMeshScanHelper(self, config)
+
         # TODO: get rid of this
         if hasattr(probe, "ProbeCommandHelper"):
             self._cmd_helper = probe.ProbeCommandHelper(config, self, self._endstop_wrapper.query_endstop)
@@ -626,6 +629,7 @@ class ProbeEddy:
             self.cmd_TAP,
             self.cmd_TAP_help + " (alias for PROBE_EDDY_NG_TAP)",
         )
+        gcode.register_command("PEMESH", self.cmd_MESH, "")
 
     def _handle_command_error(self, gcmd=None):
         try:
@@ -656,6 +660,12 @@ class ProbeEddy:
         )
         velocity = move.start_v + move.accel * move_time
         return pos, velocity
+
+    def _get_trapq_height(self, print_time: float) -> float:
+        th_pos, _ = self._get_trapq_position(print_time)
+        if th_pos is None:
+            return None
+        return th_pos[2]
 
     def current_drive_current(self) -> int:
         return self._sensor.get_drive_current()
@@ -795,9 +805,12 @@ class ProbeEddy:
                     past_pos, past_v = self._get_trapq_position(times[i])
                     past_k_z = past_pos[2] if past_pos is not None else ""
                     past_v = past_v if past_v is not None else ""
-                    data_file.write(f"{times[i]},{freqs[i]},{heights[i] if heights else ""},{past_k_z},{past_v},{raw_freqs[i]},{trigger_time},{tap_start_time}\n")
+                    data_file.write(f"{times[i]},{freqs[i]},{heights[i] if heights else ''},{past_k_z},{past_v},{raw_freqs[i]},{trigger_time},{tap_start_time}\n")
             logging.info(f"Wrote {len(times)} samples to {self.save_samples_path}")
             self.save_samples_path = None
+
+    def cmd_MESH(self, gcmd: GCodeCommand):
+        self._bed_mesh_helper.scan()
 
     cmd_STATUS_help = "Query the last raw coil value and status"
 
@@ -984,7 +997,7 @@ class ProbeEddy:
         if first_idx == len(sampler.times):
             raise self._printer.command_error(f"No samples in time range")
 
-        errors = sampler.get_error_count()
+        errors = sampler.error_count
         return ProbeEddyProbeResult.make(sampler.times[first_idx:], sampler.heights[first_idx:], errors=errors)
 
     cmd_PROBE_help = "Probe the height using the eddy current sensor, moving the toolhead to the home trigger height, or Z if specified."
@@ -1022,6 +1035,7 @@ class ProbeEddy:
 
             if save:
                 self.save_samples_path = "/tmp/eddy-probe-static.csv"
+
             r = self.probe_static_height(duration)
 
             if self._cmd_helper is not None:
@@ -1890,6 +1904,7 @@ class ProbeEddy:
                     # only one sample, we're done
                     tap_z = tap.probe_z
                     tap_stddev = 0.0
+                    tap_overshoot = tap.overshoot
                     break
 
                 if len(results) >= samples:
@@ -2020,10 +2035,9 @@ class ProbeEddy:
             return
 
         s_t = np.asarray(self._last_sampler.times)
-        s_rf = np.asarray(self._last_sampler.raw_freqs)
         s_true_f = np.asarray(self._last_sampler.freqs)
         s_z = np.asarray(self._last_sampler.heights)
-        s_kinz = np.vectorize(self._get_trapq_position)(s_t)
+        s_kinz = np.vectorize(self._get_trapq_height)(s_t)
 
         # Any values below 0.0 are suspect because they were not calibrated,
         # and so are just extrapolated from the fit. So just don't show them.
@@ -2576,12 +2590,6 @@ class ProbeEddySampler:
         self._errors = 0
         self._fmap = eddy.map_for_drive_current() if calculate_heights else None
 
-        # this will hold the raw samples coming in from the sensor,
-        # with an empty 3rd (height) value
-        self._raw_samples = []
-        # this will hold samples with a height filled in (if we're doing that)
-        self._samples = []
-
         self.times = []
         self.raw_freqs = []
         self.freqs = []
@@ -2620,7 +2628,6 @@ class ProbeEddySampler:
 
         self._errors += msg["errors"]
         data = msg["data"]
-        self._raw_samples.extend(data)
 
         # data is (t, fv)
         if data:
@@ -2637,7 +2644,6 @@ class ProbeEddySampler:
         if self._stopped:
             raise self._printer.command_error("ProbeEddySampler.start() called after finish()")
         if not self._started:
-            self._raw_samples = []
             self._sensor.add_bulk_sensor_data_client(self._add_hw_measurement)
             self._started = True
 
@@ -2650,28 +2656,15 @@ class ProbeEddySampler:
             raise self._printer.command_error("ProbeEddySampler.finish(): eddy._sampler is not us!")
         self.eddy._sampler_finished(self)
         self._stopped = True
+        self._update_samples()
 
     def _update_samples(self):
-        if len(self._samples) == len(self._raw_samples):
+        if len(self.freqs) == len(self.raw_freqs):
             return
 
-        start_idx = len(self.times)
         conv_ratio = self._sensor.freqval_conversion_value()
 
-        #start_idx = len(self._samples)
-        if self._fmap is not None:
-            new_samples = [
-                (
-                    t,
-                    round(conv_ratio * f, ndigits=3),
-                    self._fmap.freq_to_height(round(conv_ratio * f, ndigits=3)),
-                )
-                for t, f, _ in self._raw_samples[start_idx:]
-            ]
-            self._samples.extend(new_samples)
-        else:
-            self._samples.extend([(t, round(conv_ratio * f, ndigits=3), math.inf) for t, f, _ in self._raw_samples[start_idx:]])
-
+        start_idx = len(self.freqs)
         freqs_np = np.asarray(self.raw_freqs[start_idx:]) * conv_ratio
         self.freqs.extend(freqs_np.tolist())
 
@@ -2679,7 +2672,8 @@ class ProbeEddySampler:
             heights_np = self._fmap.freqs_to_heights_np(freqs_np)
             self.heights.extend(heights_np.tolist())
 
-    def get_error_count(self):
+    @property
+    def error_count(self):
         return self._errors
 
     # get the last sampled height
@@ -2712,7 +2706,7 @@ class ProbeEddySampler:
             return self.times[-1] >= sample_print_time
 
         # quick check
-        if self.times[-1] >= sample_print_time:
+        if self.times and self.times[-1] >= sample_print_time:
             return True
 
         wait_start_time = self.eddy._print_time_now()
@@ -2758,12 +2752,11 @@ class ProbeEddySampler:
         wait_start_time = self.eddy._print_time_now()
 
         start_error_count = self._errors
+        start_count = 0
         if new_only:
-            start_count = len(self._raw_samples) + (self._errors if count_errors else 0)
-        else:
-            start_count = 0
+            start_count = len(self.raw_freqs) + (self._errors if count_errors else 0)
 
-        while (len(self._raw_samples) + (self._errors if count_errors else 0)) - start_count < min_samples:
+        while (len(self.raw_freqs) + (self._errors if count_errors else 0)) - start_count < min_samples:
             now = self.eddy._print_time_now()
             if now - wait_start_time > max_wait_time:
                 if raise_error:
@@ -2775,25 +2768,49 @@ class ProbeEddySampler:
 
         return True
 
+    def find_heights_at_times(self, intervals):
+        self._update_samples()
+        times = self.times
+        heights = np.asarray(self.heights)
+        num_samples = len(times)
+
+        interval_heights = []
+        i = 0
+        for iv_start, iv_end in intervals:
+            # find start time of interval
+            while i < num_samples and times[i] < iv_start:
+                i += 1
+            if i == num_samples:
+                raise self._printer.command_error(f"No samples in time range {iv_start}-{iv_end}")
+
+            istart = i
+            while i < num_samples and times[i] < iv_end:
+                i += 1
+            iend = i-1
+
+            median = np.median(heights[istart:iend])
+            interval_heights.append(float(median))
+
+        return interval_heights
+
     def find_height_at_time(self, start_time, end_time):
         if end_time < start_time:
             raise self._printer.command_error("find_height_at_time: end_time is before start_time")
 
         self._update_samples()
 
-        if len(self._samples) == 0:
+        if len(self.times) == 0:
             raise self._printer.command_error("No samples at all, so none in time range")
 
         self.eddy._log_debug(
-            f"find_height_at_time: {len(self._samples)} samples, time range {self._samples[0][0]:.3f} to {self._samples[-1][0]:.3f}"
+            f"find_height_at_time: {len(self.times)} samples, time range {self.times[0][0]:.3f} to {self.times[-1][0]:.3f}"
         )
 
         # find the first sample that is >= start_time
         start_idx = bisect.bisect_left(self.times, start_time)
-        if start_idx >= len(self._samples):
+        if start_idx >= len(self.times):
             raise self._printer.command_error("Nothing after start_time?")
 
-        # find the last sample that is <= end_time
         # find the last sample that is < end_time
         end_idx = start_idx
         while end_idx < len(self.times) and self.times[end_idx] < end_time:
@@ -3131,20 +3148,22 @@ class ProbeEddyFrequencyMap:
     def freq_to_height(self, freq: float) -> float:
         if self._ftoh is None:
             raise self._eddy._printer.command_error("Calling freq_to_height on uncalibrated map")
-        if self._ftoh_high is not None and freq < self._ftoh.domain[0]:
-            return float(self._ftoh_high(1.0 / freq))
-        return float(self._ftoh(1.0 / freq))
+        invfreq = 1.0 / freq
+        if self._ftoh_high is not None and invfreq < self._ftoh.domain[0]:
+            return float(self._ftoh_high(invfreq))
+        return float(self._ftoh(invfreq))
 
     def freqs_to_heights_np(self, freqs: np.array) -> np.array:
         if self._ftoh is None:
             raise self._eddy._printer.command_error("Calling freqs_to_heights on uncalibrated map")
-        heights = np.zeros(len(freqs))
+        invfreqs = 1.0 / freqs
         if self._ftoh_high is not None:
-            low_freq_vals = freqs < self._ftoh.domain[0]
-            heights[low_freq_vals] = np.vectorize(self._ftoh_high)(freqs[low_freq_vals])
-            heights[~low_freq_vals] = np.vectorize(self._ftoh)(freqs[~low_freq_vals])
+            heights = np.zeros(len(invfreqs))
+            low_freq_vals = invfreqs > self._ftoh.domain[1]
+            heights[low_freq_vals] = np.vectorize(self._ftoh_high, otypes=[float])(invfreqs[low_freq_vals])
+            heights[~low_freq_vals] = np.vectorize(self._ftoh, otypes=[float])(invfreqs[~low_freq_vals])
         else:
-            heights = self._ftoh(heights)
+            heights = self._ftoh(invfreqs)
         return heights
 
     def height_to_freq(self, height: float) -> float:
@@ -3155,6 +3174,134 @@ class ProbeEddyFrequencyMap:
     def calibrated(self) -> bool:
         return self._ftoh is not None and self._htof is not None
 
+
+@final
+class BedMeshScanHelper:
+    def __init__(self, eddy, config):
+        self._eddy = eddy
+        self._printer = eddy._printer
+
+        bmc = config.getsection("bed_mesh")
+        self._bed_mesh = eddy._printer.load_object(bmc, "bed_mesh")
+        self._x_points, self._y_points = bmc.getintlist("probe_count", count=2, note_valid=False)
+        self._x_min, self._y_min = bmc.getfloatlist("mesh_min", count=2, note_valid=False)
+        self._x_max, self._y_max = bmc.getfloatlist("mesh_max", count=2, note_valid=False)
+        self._speed = bmc.getfloat("speed", 100.0, above=0.0, note_valid=False)
+        self._scan_z = bmc.getfloat("horizontal_move_z", self._eddy.params.home_trigger_height, above=0.0, note_valid=False)
+
+        self._x_offset = self._eddy.params.x_offset
+        self._y_offset = self._eddy.params.y_offset
+
+        self._mesh_points, self._mesh_path = self._generate_path()
+
+
+    def _generate_path(self):
+        x_vals = np.linspace(self._x_min, self._x_max, self._x_points)
+        y_vals = np.linspace(self._y_min, self._y_max, self._y_points)
+        path = []
+        reverse = False
+
+        for y in y_vals:
+            row = [(x, y, True) for x in (reversed(x_vals) if reverse else x_vals)]
+            path.extend(row)
+            reverse = not reverse
+        return path, path
+
+    def _scan_path(self):
+        th = self._eddy._toolhead
+        times = []
+
+        for pt in self._mesh_path:
+            # TODO bounds
+            th.manual_move([pt[0] - self._x_offset, pt[1] - self._y_offset, None], self._speed)
+            th.register_lookahead_callback(lambda t: times.append(t))
+
+        th.wait_moves()
+
+        return times
+
+    def _set_bed_mesh(self, heights):
+        # heights is in the order of the _mesh_path points; convert to
+        # be ordered min_y..max_y, min_x..max_x, then pull out the heights
+        indexed_points = []
+        i = 0
+        for x, y, include in self._mesh_path:
+            if not include:
+                continue
+            indexed_points.append((x, y, i))
+            i += 1
+
+        def sort_points(a, b):
+            if a[1] < b[1]: # y first
+                return -1
+            if a[1] > b[1]:
+                return 1
+            if a[0] < b[0]: # then x
+                return -1
+            if a[0] > b[0]:
+                return 1
+            return 0
+
+        indices = [ki for _, _, ki in sorted(indexed_points, key=cmp_to_key(sort_points))]
+
+        ki = 0
+        matrix = []
+        for _ in range(self._y_points):
+            row = []
+            for _ in range(self._x_points):
+                v = heights[indices[ki]]
+                row.append(self._scan_z - v)
+                ki += 1
+            matrix.append(row)
+
+        params = self._bed_mesh.bmc.mesh_config.copy()
+        params.update({
+            "min_x": self._x_min,
+            "max_x": self._x_max,
+            "min_y": self._y_min,
+            "max_y": self._y_max,
+            "x_count": self._x_points,
+            "y_count": self._y_points,
+        })
+        mesh = bed_mesh.ZMesh(params, None)
+        try:
+            mesh.build_mesh(matrix)
+        except bed_mesh.BedMeshError as e:
+            raise self._printer.command_error(str(e))
+        self._bed_mesh.set_mesh(mesh)
+        self._eddy._log_msg("Mesh scan complete")
+
+    def scan(self):
+        th = self._eddy._toolhead
+
+        # move to the start point
+        v = self._mesh_path[0]
+        th.manual_move([None, None, 10.0], self._eddy.params.lift_speed)
+        th.manual_move([v[0], v[1], None], self._speed)
+        th.manual_move([None, None, self._scan_z], self._eddy.params.probe_speed)
+        th.wait_moves()
+
+        heights = []
+
+        sample_time = self._eddy.params.scan_sample_time
+
+        with self._eddy.start_sampler() as sampler:
+            path_times = self._scan_path()
+            sampler.wait_for_sample_at_time(path_times[-1] + sample_time*2.)
+            sampler.finish()
+
+            heights = sampler.find_heights_at_times([(t - sample_time/2., t + sample_time/2.) for t in path_times])
+
+            with open("/tmp/mesh.csv", "w") as mfile:
+                mfile.write("time,x,y,z\n")
+                for i in range(len(self._mesh_points)):
+                    t = path_times[i]
+                    x = self._mesh_points[i][0]
+                    y = self._mesh_points[i][1]
+                    z = heights[i]
+                    mfile.write(f"{t},{x},{y},{z}\n")
+
+            self._set_bed_mesh(heights)
 
 def np_rolling_mean(data, window, center=True):
     half_window = (window - 1) // 2 if center else 0
