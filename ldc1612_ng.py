@@ -92,7 +92,7 @@ class LDC1612_ng:
         elif self._device_product == PRODUCT_MELLOW_FLY:
             self._ldc_freq_clk = 40_000_000
             self._ldc_fin_divider = 1
-            self._ldc_fref_divider = 1
+            self._ldc_fref_divider = 2
             self._ldc_settle_time = 0.00125
             self._default_drive_current = 15
         else:  # Generic/BTT Eddy using external 12MHz clock source
