@@ -616,6 +616,18 @@ class ProbeEddy:
             self.cmd_TAP,
             self.cmd_TAP_help + " (alias for PROBE_EDDY_NG_TAP)",
         )
+        gcode.register_command("EDDY_NG_START_STREAM", self.cmd_START_STREAM, "")
+        gcode.register_command("EDDY_NG_STOP_STREAM", self.cmd_STOP_STREAM, "")
+
+    def cmd_START_STREAM(self, gcmd):
+        self.save_samples_path = "/tmp/stream.csv"
+        self._log_info("Eddy sampling enabled")
+        self.start_sampler()
+
+    def cmd_STOP_STREAM(self, gcmd):
+        self._log_info("Eddy sampling finished")
+        self._sampler.finish()
+        self._sampler = None
 
     def _handle_command_error(self, gcmd=None):
         try:
