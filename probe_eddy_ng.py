@@ -2668,9 +2668,9 @@ class ProbeEddySampler:
             raise self._printer.command_error("ProbeEddySampler.finish() called without start()")
         if self.eddy._sampler is not self:
             raise self._printer.command_error("ProbeEddySampler.finish(): eddy._sampler is not us!")
+        self._update_samples()
         self.eddy._sampler_finished(self)
         self._stopped = True
-        self._update_samples()
 
     def _update_samples(self):
         if len(self.freqs) == len(self.raw_freqs):
@@ -3297,6 +3297,7 @@ class BedMeshScanHelper:
             sampler.finish()
 
             heights = sampler.find_heights_at_times([(t - sample_time/2., t + sample_time/2.) for t in path_times])
+            heights = [h - self.eddy._tap_offset for h in heights]
 
             with open("/tmp/mesh.csv", "w") as mfile:
                 mfile.write("time,x,y,z\n")
