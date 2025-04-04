@@ -1751,6 +1751,7 @@ class ProbeEddy:
         if gcmd is None:
             gcmd = self._dummy_gcode_cmd
 
+        orig_drive_current: int = self._sensor.get_drive_current()
         tap_drive_current: int = gcmd.get_int(
             name="DRIVE_CURRENT",
             default=self._tap_drive_current,
@@ -1963,6 +1964,7 @@ class ProbeEddy:
         # tap_z computed above. This does mean that the actual physical height probing happens at
         # is not likely to be exactly the same as the Z position, but all we care about is
         # variance from that position so this should be fine.
+        self._sensor.set_drive_current(orig_drive_current)
         th.manual_move([None, None, self.params.home_trigger_height + 1.0], lift_speed)
         th.manual_move([None, None, self.params.home_trigger_height], tap_speed)
         th.dwell(0.500)
