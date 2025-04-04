@@ -92,7 +92,7 @@ class LDC1612_ng:
         elif self._device_product == PRODUCT_MELLOW_FLY:
             self._ldc_freq_clk = 40_000_000
             self._ldc_fin_divider = 1
-            self._ldc_fref_divider = 1
+            self._ldc_fref_divider = 2
             self._ldc_settle_time = 0.00125
             self._default_drive_current = 15
         else:  # Generic/BTT Eddy using external 12MHz clock source
@@ -153,8 +153,6 @@ class LDC1612_ng:
 
         self._start_count = 0
         self._chip_initialized = False
-        self._last_error_count = 0
-        self._last_err_kind = 0
 
         # Bulk sample message reading
         chip_smooth = self._data_rate * BATCH_UPDATES * 2
@@ -421,24 +419,6 @@ class LDC1612_ng:
     def freqval_conversion_value(self):
         return float(self._ldc_freq_ref) / (1 << 28)
 
-    # Measurement decoding
-    def _convert_samples(self, samples):
-        # TODO! include both converted and uncoverted values
-        count = 0
-        for ptime, val in samples:
-            if val > 0x0FFFFFFF:  # high nibble indicates an error
-                if self._last_err_kind != (val >> 28):
-                    if self._verbose:
-                        logging.info(f"LDC1612 error: {hex(val)}")
-                    self._last_err_kind = val >> 28
-                self._last_error_count += 1
-            else:
-                # Note! Raw values here
-                samples[count] = (round(ptime, 6), val, math.inf)
-                count += 1
-        # remove the samples we didn't fill in because of errors
-        del samples[count:]
-
     def _verify_chip(self):
         # In case of miswiring, testing LDC1612 device ID prevents treating
         # noise or wrong signal as a correctly initialized device
@@ -530,7 +510,6 @@ class LDC1612_ng:
             return
 
         # Start bulk reading
-        self._last_error_count = 0
         rest_ticks = self._mcu.seconds_to_clock(0.5 / self._data_rate)
         self._ldc1612_ng_start_stop_cmd.send([self._oid, rest_ticks])
         # logging.info("LDC1612 starting '%s' measurements", self._name)
@@ -551,11 +530,26 @@ class LDC1612_ng:
 
     def _process_batch(self, eventtime):
         samples = self._ffreader.pull_samples()
-        self._convert_samples(samples)
-        if not samples:
-            return {}
+        count = 0
+        err_count = 0
+        last_err_kind = 0
+        for ptime, val in samples:
+            if val > 0x0FFFFFFF:  # high nibble indicates an error
+                err_kind = (val >> 28)
+                err_count += 1
+                if last_err_kind != err_kind:
+                    if self._verbose:
+                        logging.info(f"LDC1612 error: {hex(val)}")
+                    last_err_kind = err_kind
+            else:
+                # val is a raw value
+                samples[count] = (ptime, val)
+                count += 1
+        # remove the samples we didn't fill in because of errors
+        del samples[count:]
         return {
             "data": samples,
-            "errors": self._last_error_count,
+            "errors": err_count,
             "overflows": self._ffreader.get_last_overflows(),
         }
+
