@@ -10,8 +10,16 @@ import struct
 from dataclasses import dataclass
 from typing import List
 
-from . import bus, bulk_sensor
-from klippy import Printer
+try:
+    from klippy.extras import bus, bulk_sensor
+    from klippy.printer import Printer
+
+    IS_KALICO = True
+except ImportError:
+    from . import bus, bulk_sensor
+    from klippy import Printer
+
+    IS_KALICO = False
 
 MIN_MSG_TIME = 0.100
 
