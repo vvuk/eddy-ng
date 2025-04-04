@@ -3283,7 +3283,7 @@ class BedMeshScanHelper:
         # move to the start point
         v = self._mesh_path[0]
         th.manual_move([None, None, 10.0], self._eddy.params.lift_speed)
-        th.manual_move([v[0], v[1], None], self._speed)
+        th.manual_move([v[0] - self._x_offset, v[1] - self._y_offset, None], self._speed)
         th.manual_move([None, None, self._scan_z], self._eddy.params.probe_speed)
         th.wait_moves()
 
@@ -3297,7 +3297,9 @@ class BedMeshScanHelper:
             sampler.finish()
 
             heights = sampler.find_heights_at_times([(t - sample_time/2., t + sample_time/2.) for t in path_times])
-            heights = [h - self.eddy._tap_offset for h in heights]
+            # Note plus tap_offset here, vs -tap_offset when probing. These are actual
+            # heights, the other is "offset from real"
+            heights = [h + self._eddy._tap_offset for h in heights]
 
             with open("/tmp/mesh.csv", "w") as mfile:
                 mfile.write("time,x,y,z\n")
