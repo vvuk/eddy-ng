@@ -1,0 +1,15 @@
+[project]
+name = "probe-eddy-ng"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "klippy>=0.0",
+    "plotly>=6.0.1",
+    "scipy>=1.15.2",
+]
+
+[tool.pyright]
+executionEnvironments = [
+  { root = "~/proj/k/kalico", extraPaths = [ ] },
+]

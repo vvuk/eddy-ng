@@ -17,7 +17,7 @@ def install_kalico(target_dir: str, uninstall: bool, copy: bool):
     print("Congrats, you're running Kalico!")
 
     python_module_path = os.path.join(target_dir, "klippy/plugins/probe_eddy_ng")
-    firmware_module_path = os.path.join(target_dir, "src/extras/eddy_ng")
+    firmware_module_path = os.path.join(target_dir, "src/extras/eddy-ng")
 
     if os.path.exists(python_module_path) or os.path.islink(python_module_path):
         if not os.path.islink(python_module_path):
@@ -37,10 +37,10 @@ def install_kalico(target_dir: str, uninstall: bool, copy: bool):
 
     if copy:
         shutil.copytree(get_script_dir(), python_module_path)
-        shutil.copytree(os.path.join(get_script_dir(), "eddy_ng"), firmware_module_path)
+        shutil.copytree(os.path.join(get_script_dir(), "eddy-ng"), firmware_module_path)
     else:
         os.symlink(get_script_dir(), python_module_path)
-        os.symlink(os.path.join(get_script_dir(), "eddy_ng"), firmware_module_path)
+        os.symlink(os.path.join(get_script_dir(), "eddy-ng"), firmware_module_path)
 
     print("Installed links to firmware and plugin modules.")
     print("When rebuilding firmware, make sure to select eddy-ng")
@@ -50,7 +50,7 @@ def install_kalico(target_dir: str, uninstall: bool, copy: bool):
 
 def install_klipper(target_dir: str, uninstall: bool, copy: bool):
     FILES_TO_COPY = {
-        "eddy_ng/sensor_ldc1612_ng.c": "src",
+        "eddy-ng/sensor_ldc1612_ng.c": "src",
         "probe_eddy_ng.py": "klippy/extras",
         "ldc1612_ng.py": "klippy/extras"
     }
