@@ -636,9 +636,9 @@ class ProbeEddy:
             self.cmd_TAP_help + " (alias for PROBE_EDDY_NG_TAP)",
         )
 
-        gcode.register_command("EDDY_NG_BED_MESH_EXPERIMENTAL", self.cmd_MESH, "")
-        gcode.register_command("EDDY_NG_START_STREAM_EXPERIMENTAL", self.cmd_START_STREAM, "")
-        gcode.register_command("EDDY_NG_STOP_STREAM_EXPERIMENTAL", self.cmd_STOP_STREAM, "")
+        gcode.register_command("EDDYNG_BED_MESH_EXPERIMENTAL", self.cmd_MESH, "")
+        gcode.register_command("EDDYNG_START_STREAM_EXPERIMENTAL", self.cmd_START_STREAM, "")
+        gcode.register_command("EDDYNG_STOP_STREAM_EXPERIMENTAL", self.cmd_STOP_STREAM, "")
 
     def _handle_command_error(self, gcmd=None):
         try:
@@ -1648,8 +1648,8 @@ class ProbeEddy:
 
         error = None
 
-        now_z = None
         probe_z = None
+        finish_z = None
 
         try:
             # configure the endstop for tap (gets reset at the end of a tap sequence,
@@ -1659,15 +1659,13 @@ class ProbeEddy:
             endstops = [(self._endstop_wrapper, "probe")]
             hmove = HomingMove(self._printer, endstops)
 
-            now_z = None
             try:
                 probe_position = hmove.homing_move(target_position, tap_speed, probe_pos=True)
 
                 # raise toolhead as soon as tap ends
-                now_z = th.get_position()[2]
-                if now_z < 1.0:
+                finish_z = th.get_position()[2]
+                if finish_z < 1.0:
                     th.manual_move([None, None, start_z], lift_speed)
-                    now_z = start_z
 
                 if hmove.check_no_movement() is not None:
                     raise self._printer.command_error("Probe triggered prior to movement")
@@ -1680,7 +1678,7 @@ class ProbeEddy:
                     # TODO: use velocity to determine this
                     return ProbeEddy.TapResult(
                         error=Exception("Tap detected too close to target z"),
-                        toolhead_z=now_z,
+                        toolhead_z=finish_z,
                         probe_z=probe_z,
                         overshoot=0.0,
                         tap_time=0.0,
@@ -1693,16 +1691,15 @@ class ProbeEddy:
                     raise self._printer.command_error("Probing failed due to printer shutdown")
 
                 # in case of failure don't leave the toolhead in a bad spot (i.e. in bed)
-                now_z = now_z or th.get_position()[2]
-                if now_z < 1.0:
+                if th.get_position()[2] < 1.0:
                     th.manual_move([None, None, start_z], lift_speed)
 
                 # If just sensor errors, let the caller handle it
-                self._log_error(f"Tap failed with Z at {now_z:.3f}")
+                self._log_error(f"Tap failed with Z at {finish_z:.3f}")
                 if "Sensor error" or "Probe completed movement" or "Probe triggered prior" in str(err):
                     return ProbeEddy.TapResult(
                         error=err,
-                        toolhead_z=now_z,
+                        toolhead_z=finish_z,
                         probe_z=0.0,
                         overshoot=0.0,
                         tap_time=0.0,
@@ -1714,17 +1711,17 @@ class ProbeEddy:
         finally:
             self._endstop_wrapper.tap_config = None
 
-        # we're at now_z, but probe_z is the actual zero. We expect now_z
-        # to be below or equal to probe_z because there will always be
+        # The toolhead ended at finish_z, but probe_z is the actual zero.
+        # finish_z should be below or equal to probe_z because there will always be
         # a bit of overshoot due to trigger delay, and because we actually
         # fire the trigger later than when the tap starts (and the tap start
         # time is what's used to compute probe_position)
-        if now_z > probe_z:
-            raise self._printer.command_error(f"Unexpected: now_z {now_z:.3f} is above probe_z {probe_z:.3f} after tap")
+        if finish_z > probe_z:
+            raise self._printer.command_error(f"Unexpected: finish_z {finish_z:.3f} is above probe_z {probe_z:.3f} after tap")
 
         # How much the toolhead overshot the real z=0 position. This is the amount
         # the toolhead is pushing into the build plate.
-        overshoot = probe_z - now_z
+        overshoot = probe_z - finish_z
 
         tap_start_time = self._endstop_wrapper.last_tap_start_time
         tap_end_time = self._endstop_wrapper.last_trigger_time
@@ -1733,7 +1730,7 @@ class ProbeEddy:
         return ProbeEddy.TapResult(
             error=error,
             probe_z=probe_z,
-            toolhead_z=now_z,
+            toolhead_z=finish_z,
             overshoot=overshoot,
             tap_time=tap_time,
             tap_start_time=tap_start_time,
@@ -1931,8 +1928,9 @@ class ProbeEddy:
         homed_to_str = ""
         if home_z:
             th_pos = th.get_position()
-            th_pos[2] = -(tap_adjust_z + tap_overshoot)
-            homed_to_str = f"homed z with overshoot={th_pos[2]:.3f}, "
+            true_z_zero = - (tap_adjust_z + tap_overshoot)
+            th_pos[2] = th_pos[2] + true_z_zero
+            homed_to_str = f"homed z with true_z_zero={true_z_zero:.3f}, "
             self._set_toolhead_position(th_pos, [2])
             self._last_tap_gcode_adjustment = 0.0
             adjusted_tap_z = 0.0
@@ -1964,8 +1962,8 @@ class ProbeEddy:
         self._sensor.set_drive_current(orig_drive_current)
         th_now = th.get_position()
         th.manual_move([None, None, self.params.home_trigger_height + 1.0], lift_speed)
-        th.manual_move([th_now[0] - self.params.x_offset, th_now[1] - self.params.y_offset, None], lift_speed)
-        th.manual_move([None, None, self.params.home_trigger_height], tap_speed)
+        th.manual_move([th_now[0] - self.params.x_offset, th_now[1] - self.params.y_offset, None], self.params.move_speed)
+        th.manual_move([None, None, self.params.home_trigger_height], self.params.probe_speed)
         th.dwell(0.500)
         th.wait_moves()
 
@@ -2136,7 +2134,10 @@ class ProbeEddy:
         thtml = 0.0
         if tapplot_path_png:
             t0 = time.time()
-            fig.write_image(tapplot_path_png)
+            try:
+                fig.write_image(tapplot_path_png)
+            except:
+                tapplot_path_png = None
             timg = time.time() - t0
         if tapplot_path_html:
             t0 = time.time()
