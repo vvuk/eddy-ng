@@ -1,6 +1,8 @@
 # EDDY-ng
 #
 # Copyright (C) 2025  Vladimir Vukicevic <vladimir@pobox.com>
+#
+# Based on original probe_eddy_current code by:
 # Copyright (C) 2020-2024  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
@@ -14,9 +16,11 @@ import re
 import traceback
 import pickle
 import base64
+import time
 import numpy as np
 import numpy.polynomial as npp
 from itertools import combinations
+from functools import cmp_to_key
 
 from dataclasses import dataclass, field
 from typing import (
@@ -56,11 +60,14 @@ except ImportError:
 from . import ldc1612_ng
 
 try:
-    import scipy  # noqa
-
-    HAS_SCIPY = True
+    import plotly  # noqa
 except ImportError:
-    HAS_SCIPY = False
+    plotly = None
+
+try:
+    import scipy  # noqa
+except ImportError:
+    scipy = None
 
 # In this file, a couple of conventions are used (for sanity).
 # Variables are named according to:
@@ -355,7 +362,7 @@ class ProbeEddyParams:
         if self.tap_mode == "butter" and not self.is_default_butter_config():
             need_scipy = True
 
-        if need_scipy and not HAS_SCIPY:
+        if need_scipy and not scipy:
             raise printer.config_error(
                 "ProbeEddy: butter mode with custom filter parameters requires scipy, which is not available; please install scipy, use the defaults, or use wma mode"
             )
@@ -386,6 +393,20 @@ class ProbeEddyProbeResult:
     def stddev(self):
         stddev_sum = np.sum([(s - self.value) ** 2.0 for s in self.samples])
         return (stddev_sum / len(self.samples)) ** 0.5
+
+    @classmethod
+    def make(cls, times: List[float], heights: List[float], errors: int = 0) -> ProbeEddyProbeResult:
+        h = np.array(heights)
+        return ProbeEddyProbeResult(
+            samples=h.tolist(),
+            mean=float(np.mean(h)),
+            median=float(np.median(h)),
+            min_value=float(np.min(h)),
+            max_value=float(np.max(h)),
+            tstart=float(times[0]),
+            tend=float(times[-1]),
+            errors=errors
+        )
 
     def __format__(self, spec):
         if spec == "v":
@@ -478,12 +499,8 @@ class ProbeEddy:
 
         # There can only be one active sampler at a time
         self._sampler: ProbeEddySampler = None
+        self._last_sampler: ProbeEddySampler = None
         self.save_samples_path = None
-        # This is a hack to keep the last set of data around so that we can
-        # do plots and things. It's updated after finish()
-        self._last_sampler_samples = None
-        self._last_sampler_raw_samples = None
-        self._last_sampler_memos = None
 
         # The last tap Z value, in absolute axis terms. Used for status.
         self._last_tap_z = 0.0
@@ -494,6 +511,8 @@ class ProbeEddy:
         # This class emulates "PrinterProbe". We use some existing helpers to implement
         # functionality like start_session
         self._printer.add_object("probe", self)
+
+        self._bed_mesh_helper = BedMeshScanHelper(self, config)
 
         # TODO: get rid of this
         if hasattr(probe, "ProbeCommandHelper"):
@@ -617,6 +636,10 @@ class ProbeEddy:
             self.cmd_TAP_help + " (alias for PROBE_EDDY_NG_TAP)",
         )
 
+        gcode.register_command("EDDYNG_BED_MESH_EXPERIMENTAL", self.cmd_MESH, "")
+        gcode.register_command("EDDYNG_START_STREAM_EXPERIMENTAL", self.cmd_START_STREAM, "")
+        gcode.register_command("EDDYNG_STOP_STREAM_EXPERIMENTAL", self.cmd_STOP_STREAM, "")
+
     def _handle_command_error(self, gcmd=None):
         try:
             if self._sampler is not None:
@@ -646,6 +669,12 @@ class ProbeEddy:
         )
         velocity = move.start_v + move.accel * move_time
         return pos, velocity
+
+    def _get_trapq_height(self, print_time: float) -> float:
+        th_pos, _ = self._get_trapq_position(print_time)
+        if th_pos is None:
+            return None
+        return th_pos[2]
 
     def current_drive_current(self) -> int:
         return self._sensor.get_drive_current()
@@ -768,28 +797,29 @@ class ProbeEddy:
         if self._sampler is not sampler:
             raise self._printer.command_error("EDDYng finishing sampler that's not active")
 
+        self._last_sampler = sampler
         self._sampler = None
 
         if self.save_samples_path is not None:
             with open(self.save_samples_path, "w") as data_file:
-                samples = sampler.get_samples()
-                raw_samples = sampler.get_raw_samples()
+                times = sampler.times
+                raw_freqs = sampler.raw_freqs
+                freqs = sampler.freqs
+                heights = sampler.heights
+
                 data_file.write("time,frequency,z,kin_z,kin_v,raw_f,trigger_time,tap_start_time\n")
                 trigger_time = kwargs.get("trigger_time", "")
                 tap_start_time = kwargs.get("tap_start_time", "")
-                for i in range(len(samples)):
-                    s_t, s_freq, s_z = samples[i]
-                    _, raw_f, _ = raw_samples[i]
-                    past_pos, past_v = self._get_trapq_position(s_t)
+                for i in range(len(times)):
+                    past_pos, past_v = self._get_trapq_position(times[i])
                     past_k_z = past_pos[2] if past_pos is not None else ""
                     past_v = past_v if past_v is not None else ""
-                    data_file.write(f"{s_t},{s_freq},{s_z},{past_k_z},{past_v},{raw_f},{trigger_time},{tap_start_time}\n")
-            logging.info(f"Wrote {len(samples)} samples to {self.save_samples_path}")
+                    data_file.write(f"{times[i]},{freqs[i]},{heights[i] if heights else ''},{past_k_z},{past_v},{raw_freqs[i]},{trigger_time},{tap_start_time}\n")
+            logging.info(f"Wrote {len(times)} samples to {self.save_samples_path}")
             self.save_samples_path = None
 
-        self._last_sampler_samples = sampler.get_samples()
-        self._last_sampler_raw_samples = sampler.get_raw_samples()
-        self._last_sampler_memos = sampler.memos
+    def cmd_MESH(self, gcmd: GCodeCommand):
+        self._bed_mesh_helper.scan()
 
     cmd_STATUS_help = "Query the last raw coil value and status"
 
@@ -825,7 +855,7 @@ class ProbeEddy:
         duration: float = gcmd.get_float("DURATION", 0.100, above=0.0)
         # whether to check +/- 1mm positions for accuracy
         start_z: float = gcmd.get_float("Z", 5.0)
-        offsets = gcmd.get("OFFSETS", None)
+        offsets: str = gcmd.get("OFFSETS", None)
 
         probe_speed = gcmd.get_float("SPEED", self.params.probe_speed, above=0.0)
         lift_speed = gcmd.get_float("LIFT_SPEED", self.params.lift_speed, above=0.0)
@@ -966,33 +996,18 @@ class ProbeEddy:
             sampler.wait_for_sample_at_time(now + (duration + self._sensor._ldc_settle_time))
             sampler.finish()
 
-            samples = sampler.get_samples()
-            if len(samples) == 0:
-                return ProbeEddyProbeResult([])
+        if sampler.count == 0:
+            return ProbeEddyProbeResult([])
 
-            etime = samples[-1][0]
-            stime = etime - duration
+        etime = sampler.times[-1]
+        stime = etime - duration
 
-            samples = [s[2] for s in samples if s[0] > stime]
-            if len(samples) == 0:
-                raise self._printer.command_error(f"No samples")
+        first_idx = bisect.bisect_left(sampler.times, stime)
+        if first_idx == len(sampler.times):
+            raise self._printer.command_error(f"No samples in time range")
 
-            min_value = min(samples)
-            max_value = max(samples)
-
-            mean: float = float(np.mean(samples))
-            median: float = float(np.median(samples))
-
-            return ProbeEddyProbeResult(
-                samples=samples,
-                mean=float(mean),
-                median=float(median),
-                min_value=float(min_value),
-                max_value=float(max_value),
-                tstart=float(stime),
-                tend=float(etime),
-                errors=sampler.get_error_count(),
-            )
+        errors = sampler.error_count
+        return ProbeEddyProbeResult.make(sampler.times[first_idx:], sampler.heights[first_idx:], errors=errors)
 
     cmd_PROBE_help = "Probe the height using the eddy current sensor, moving the toolhead to the home trigger height, or Z if specified."
 
@@ -1029,6 +1044,7 @@ class ProbeEddy:
 
             if save:
                 self.save_samples_path = "/tmp/eddy-probe-static.csv"
+
             r = self.probe_static_height(duration)
 
             if self._cmd_helper is not None:
@@ -1351,8 +1367,7 @@ class ProbeEddy:
             sampler.finish()
 
         # the samples are a list of [print_time, freq, dummy_height] tuples
-        samples = sampler.get_samples()
-        if len(samples) == 0:
+        if sampler.count == 0:
             return None, None, None, None
 
         freqs = []
@@ -1602,7 +1617,7 @@ class ProbeEddy:
 
     @dataclass
     class TapResult:
-        error: Exception
+        error: Optional[Exception]
         probe_z: float
         toolhead_z: float
         overshoot: float
@@ -1614,7 +1629,7 @@ class ProbeEddy:
     class TapConfig:
         mode: str
         threshold: float
-        sos: List[List[float]] = None
+        sos: Optional[List[List[float]]] = None
 
     def do_one_tap(
         self,
@@ -1633,8 +1648,8 @@ class ProbeEddy:
 
         error = None
 
-        now_z = None
         probe_z = None
+        finish_z = None
 
         try:
             # configure the endstop for tap (gets reset at the end of a tap sequence,
@@ -1647,10 +1662,14 @@ class ProbeEddy:
             try:
                 probe_position = hmove.homing_move(target_position, tap_speed, probe_pos=True)
 
+                # raise toolhead as soon as tap ends
+                finish_z = th.get_position()[2]
+                if finish_z < 1.0:
+                    th.manual_move([None, None, start_z], lift_speed)
+
                 if hmove.check_no_movement() is not None:
                     raise self._printer.command_error("Probe triggered prior to movement")
 
-                now_z = th.get_position()[2]
                 probe_z = probe_position[2]
 
                 if probe_z - target_z < 0.050:
@@ -1659,7 +1678,7 @@ class ProbeEddy:
                     # TODO: use velocity to determine this
                     return ProbeEddy.TapResult(
                         error=Exception("Tap detected too close to target z"),
-                        toolhead_z=now_z,
+                        toolhead_z=finish_z,
                         probe_z=probe_z,
                         overshoot=0.0,
                         tap_time=0.0,
@@ -1672,15 +1691,15 @@ class ProbeEddy:
                     raise self._printer.command_error("Probing failed due to printer shutdown")
 
                 # in case of failure don't leave the toolhead in a bad spot (i.e. in bed)
-                now_z = th.get_position()[2]
-                if now_z < 1.0:
+                if th.get_position()[2] < 1.0:
                     th.manual_move([None, None, start_z], lift_speed)
 
                 # If just sensor errors, let the caller handle it
-                if "Sensor error" or "Probe completed movement" in str(err):
+                self._log_error(f"Tap failed with Z at {finish_z:.3f}")
+                if "Sensor error" or "Probe completed movement" or "Probe triggered prior" in str(err):
                     return ProbeEddy.TapResult(
                         error=err,
-                        toolhead_z=now_z,
+                        toolhead_z=finish_z,
                         probe_z=0.0,
                         overshoot=0.0,
                         tap_time=0.0,
@@ -1688,22 +1707,21 @@ class ProbeEddy:
                         tap_end_time=0.0,
                     )
                 else:
-                    self._log_error(f"Tap failed at {now_z:.3f}")
                     raise
         finally:
             self._endstop_wrapper.tap_config = None
 
-        # we're at now_z, but probe_z is the actual zero. We expect now_z
-        # to be below or equal to probe_z because there will always be
+        # The toolhead ended at finish_z, but probe_z is the actual zero.
+        # finish_z should be below or equal to probe_z because there will always be
         # a bit of overshoot due to trigger delay, and because we actually
         # fire the trigger later than when the tap starts (and the tap start
         # time is what's used to compute probe_position)
-        if now_z > probe_z:
-            raise self._printer.command_error(f"Unexpected: now_z {now_z:.3f} is above probe_z {probe_z:.3f} after tap")
+        if finish_z > probe_z:
+            raise self._printer.command_error(f"Unexpected: finish_z {finish_z:.3f} is above probe_z {probe_z:.3f} after tap")
 
         # How much the toolhead overshot the real z=0 position. This is the amount
         # the toolhead is pushing into the build plate.
-        overshoot = probe_z - now_z
+        overshoot = probe_z - finish_z
 
         tap_start_time = self._endstop_wrapper.last_tap_start_time
         tap_end_time = self._endstop_wrapper.last_trigger_time
@@ -1712,23 +1730,23 @@ class ProbeEddy:
         return ProbeEddy.TapResult(
             error=error,
             probe_z=probe_z,
-            toolhead_z=now_z,
+            toolhead_z=finish_z,
             overshoot=overshoot,
             tap_time=tap_time,
             tap_start_time=tap_start_time,
             tap_end_time=tap_end_time,
         )
 
-    def _compute_butter_tap(self, samples, raw_samples):
-        if not HAS_SCIPY:
+    def _compute_butter_tap(self, sampler):
+        if not scipy:
             return None, None
 
         trigger_freq = self.height_to_freq(self.params.home_trigger_height)
 
-        s_f = np.asarray([s[1] for s in samples])
+        s_f = np.asarray(sampler.freqs)
         first_one = np.argmax(s_f >= trigger_freq)
-        s_t = np.asarray([s[0] for s in samples[first_one:]])
-        s_f = np.asarray([s[1] for s in samples[first_one:]])
+        s_t = np.asarray(sampler.times[first_one:])
+        s_f = np.asarray(sampler.freqs[first_one:])
 
         lowcut = self.params.tap_butter_lowcut
         highcut = self.params.tap_butter_highcut
@@ -1762,8 +1780,7 @@ class ProbeEddy:
         lift_speed: float = gcmd.get_float("RETRACT_SPEED", self.params.lift_speed, above=0.0)
         tap_start_z: float = gcmd.get_float("START_Z", self.params.tap_start_z, above=2.0)
         target_z: float = gcmd.get_float("TARGET_Z", self.params.tap_target_z)
-        tap_threshold: int = gcmd.get_float("THRESHOLD", None)  # None so we have a sentinel value
-        # tap_threshold = gcmd.get_int('TT', tap_threshold, minval=0) # alias for THRESHOLD
+        tap_threshold: float = gcmd.get_float("THRESHOLD", None)  # None so we have a sentinel value
         tap_threshold = gcmd.get_float("TT", tap_threshold)  # alias for THRESHOLD
         tap_adjust_z = gcmd.get_float("ADJUST_Z", self._tap_adjust_z)
         do_retract = gcmd.get_int("RETRACT", 1) == 1
@@ -1771,7 +1788,7 @@ class ProbeEddy:
         max_samples = gcmd.get_int("MAX_SAMPLES", self.params.tap_max_samples, minval=samples)
         samples_stddev = gcmd.get_float("SAMPLES_STDDEV", self.params.tap_samples_stddev, above=0.0)
         home_z: bool = gcmd.get_int("HOME_Z", 1) == 1
-        write_plot_arg = gcmd.get_int("PLOT", None)
+        write_plot_arg: int = gcmd.get_int("PLOT", None)
 
         mode = gcmd.get("MODE", self.params.tap_mode).lower()
         if mode not in ("wma", "butter"):
@@ -1796,52 +1813,22 @@ class ProbeEddy:
             write_every_tap_plot = write_plot_arg > 1
 
         tapcfg = ProbeEddy.TapConfig(mode=mode, threshold=tap_threshold)
+        # fmt: off
         if mode == "butter":
             if self.params.is_default_butter_config() and self._sensor._data_rate == 250:
                 sos = [
-                    [
-                        0.046131802093312926,
-                        0.09226360418662585,
-                        0.046131802093312926,
-                        1.0,
-                        -1.3297767184682712,
-                        0.5693902189294331,
-                    ],
-                    [
-                        1.0,
-                        -2.0,
-                        1.0,
-                        1.0,
-                        -1.845000600983779,
-                        0.8637525213328747,
-                    ],
+                    [ 0.046131802093312926, 0.09226360418662585, 0.046131802093312926, 1.0, -1.3297767184682712, 0.5693902189294331, ],
+                    [ 1.0, -2.0, 1.0, 1.0, -1.845000600983779, 0.8637525213328747, ],
                 ]
             elif self.params.is_default_butter_config() and self._sensor._data_rate == 500:
                 sos = [
-                    [
-                        0.013359200027856505,
-                        0.02671840005571301,
-                        0.013359200027856505,
-                        1.0,
-                        -1.686278256753083,
-                        0.753714473246724,
-                    ],
-                    [
-                        1.0,
-                        -2.0,
-                        1.0,
-                        1.0,
-                        -1.9250515947328444,
-                        0.9299234737648037,
-                    ],
+                    [ 0.013359200027856505, 0.02671840005571301, 0.013359200027856505, 1.0, -1.686278256753083, 0.753714473246724, ],
+                    [ 1.0, -2.0, 1.0, 1.0, -1.9250515947328444, 0.9299234737648037, ],
                 ]
-            elif HAS_SCIPY:
+            elif scipy:
                 sos = scipy.signal.butter(
                     self.params.tap_butter_order,
-                    [
-                        self.params.tap_butter_lowcut,
-                        self.params.tap_butter_highcut,
-                    ],
+                    [ self.params.tap_butter_lowcut, self.params.tap_butter_highcut, ],
                     btype="bandpass",
                     fs=self._sensor._data_rate,
                     output="sos",
@@ -1849,6 +1836,7 @@ class ProbeEddy:
             else:
                 raise self._printer.command_error("Scipy is not available, cannot use custom filter, or data rate is not 250 or 500")
             tapcfg.sos = sos
+        # fmt: on
 
         results = []
         tap_z = None
@@ -1865,7 +1853,7 @@ class ProbeEddy:
 
             while sample_i < max_samples:
                 if self.params.debug:
-                    self.save_samples_path = f"/tmp/tap-samples-{sample_i}.csv"
+                    self.save_samples_path = f"/tmp/tap-samples-{sample_i+1}.csv"
 
                 tap = self.do_one_tap(
                     start_z=tap_start_z,
@@ -1877,7 +1865,10 @@ class ProbeEddy:
                 sample_i += 1
 
                 if write_every_tap_plot:
-                    self._write_tap_plot(tap, sample_i)
+                    try:
+                        self._write_tap_plot(tap, sample_i)
+                    except Exception as e:
+                        self._log_error(f"Failed to write tap plot: {e}")
 
                 if tap.error:
                     if "too close to target z" in str(tap.error):
@@ -1908,8 +1899,11 @@ class ProbeEddy:
                         break
         finally:
             self.reset_drive_current()
-            if write_tap_plot and not write_every_tap_plot:
-                self._write_tap_plot(tap)
+            if write_tap_plot and not write_every_tap_plot and tap:
+                try:
+                    self._write_tap_plot(tap)
+                except Exception as e:
+                    self._log_error(f"Failed to write tap plot: {e}")
 
         th = self._toolhead
 
@@ -1934,8 +1928,9 @@ class ProbeEddy:
         homed_to_str = ""
         if home_z:
             th_pos = th.get_position()
-            th_pos[2] = -(tap_adjust_z + tap_overshoot)
-            homed_to_str = f"homed z with overshoot={th_pos[2]:.3f}, "
+            true_z_zero = - (tap_adjust_z + tap_overshoot)
+            th_pos[2] = th_pos[2] + true_z_zero
+            homed_to_str = f"homed z with true_z_zero={true_z_zero:.3f}, "
             self._set_toolhead_position(th_pos, [2])
             self._last_tap_gcode_adjustment = 0.0
             adjusted_tap_z = 0.0
@@ -1965,8 +1960,10 @@ class ProbeEddy:
         # is not likely to be exactly the same as the Z position, but all we care about is
         # variance from that position so this should be fine.
         self._sensor.set_drive_current(orig_drive_current)
+        th_now = th.get_position()
         th.manual_move([None, None, self.params.home_trigger_height + 1.0], lift_speed)
-        th.manual_move([None, None, self.params.home_trigger_height], tap_speed)
+        th.manual_move([th_now[0] - self.params.x_offset, th_now[1] - self.params.y_offset, None], self.params.move_speed)
+        th.manual_move([None, None, self.params.home_trigger_height], self.params.probe_speed)
         th.dwell(0.500)
         th.wait_moves()
 
@@ -2014,54 +2011,55 @@ class ProbeEddy:
     # and the filter mostly-exactly how it's done on the probe MCU itself
     # (vs using numpy or similar) to make these graphs more reprensetative
     def _write_tap_plot(self, tap: ProbeEddy.TapResult, tapnum: int = -1):
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            logging.warning("write_tap_plot: matplotlib not installed")
+        if not plotly:
             return
 
         if tapnum == -1:
-            filename = "tap.png"
+            filename_base = "tap"
         else:
-            filename = f"tap-{tapnum+1}.png"
-        tapplot_path = f"/tmp/{filename}"
+            filename_base = f"tap-{tapnum+1}"
+        tapplot_path_png = f"/tmp/{filename_base}.png"
+        tapplot_path_html = f"/tmp/{filename_base}.html"
 
-        samples = self._last_sampler_samples
-        raw_samples = self._last_sampler_raw_samples
-        memos = self._last_sampler_memos
-        if samples is None or raw_samples is None or len(samples) == 0 or len(raw_samples) == 0:
-            # delete any old plots to avoid confusion
-            if os.path.exists(tapplot_path):
-                os.remove(tapplot_path)
+        # delete any old plots to avoid confusion
+        if tapplot_path_html and os.path.exists(tapplot_path_html):
+            os.remove(tapplot_path_html)
+        if tapplot_path_png and os.path.exists(tapplot_path_png):
+            os.remove(tapplot_path_png)
+
+        if not self._last_sampler or not self._last_sampler.times:
             return
 
-        s_t = np.asarray([s[0] for s in samples])
-        s_f = np.asarray([s[1] for s in raw_samples])
-        s_z = np.asarray([s[2] for s in samples])
-        s_kinz = np.asarray([(self._get_trapq_position(s[0]) or [[0,0,-10]])[0][2] for s in samples])
+        s_t = np.asarray(self._last_sampler.times)
+        s_f = np.asarray(self._last_sampler.freqs)
+        s_z = np.asarray(self._last_sampler.heights)
+        s_kinz = np.vectorize(lambda t: self._get_trapq_height(t) or -10)(s_t)
 
         # Any values below 0.0 are suspect because they were not calibrated,
-        # and so are just extrapolated from the fit. So just don't show them.
-        s_z = s_z[s_z >= 0.0]
+        # and so are just extrapolated from the fit. Show them differently.
+        s_lowz = np.ma.masked_where(s_z >= 0, s_z)
+        s_z = np.ma.masked_where(s_z < 0, s_z)
 
         time_start = s_t.min()
 
         # normalize times to start at 0
         s_t = s_t - time_start
-        tap_start_time = memos.get("tap_start_time", time_start) - time_start
-        tap_end_time = memos.get("trigger_time", time_start) - time_start
+        tap_start_time = self._last_sampler.memos.get("tap_start_time", time_start) - time_start
+        tap_end_time = self._last_sampler.memos.get("trigger_time", time_start) - time_start
         trigger_time = tap_start_time + (tap_end_time - tap_start_time) * self.params.tap_time_position
-        tap_threshold = memos.get("tap_threshold", 0)
+        tap_threshold = self._last_sampler.memos.get("tap_threshold", 0)
 
         time_len = s_t.max()
 
         # compute the butterworth filter, if we have scipy
-        if tap is not None and HAS_SCIPY:
-            butter_s_t, butter_s_v = self._compute_butter_tap(samples, raw_samples)
+        if tap is not None and scipy:
+            butter_s_t, butter_s_v = self._compute_butter_tap(self._last_sampler)
             butter_s_t = butter_s_t - time_start
         else:
             butter_s_t = butter_s_v = None
 
+        # Do this roughly how the C code does it, to keep the values identical
+        # TODO Just report the value from the mcu?
         butter_accum = None
         if butter_s_v is not None:
             # Note: we don't handle freq offset or
@@ -2080,48 +2078,83 @@ class ProbeEddy:
                 butter_accum[bi] = accum_val
                 last_value = bv
 
-        fig, ax_freq = plt.subplots(figsize=(10, 8))
-        ax_z = ax_freq.twinx()
-        ax_signal = ax_freq.twinx()
-        ax_threshold = ax_freq.twinx()
+        import plotly.graph_objects as go
 
-        ax_z.yaxis.grid(True)
-        ax_signal.yaxis.grid(True, linestyle='--', color='blue', alpha=0.2)
-        ax_signal.spines["right"].set_position(("outward", 60))
-        ax_threshold.spines["right"].set_position(("outward", 90))
+        (c_red, c_lt_red) = ('#9e4058', '#C2697F')
+        (c_orange, c_lt_orange) = ('#d0641e', '#E68E54')
+        (c_yellow, c_lt_yellow) = ('#f9ab0e', '"#FBC559')
+        (c_green, c_lt_green) = ('#589e40', '#7FC269')
+        (c_blue, c_lt_blue) = ('#2c3778', '#4151B0')
+        (c_purple, c_lt_purple) = ('#513965', '#785596')
 
-        ax_freq.plot(s_t, s_f, label="Freq")
-        ax_z.plot(s_t, s_z, label="Z")
-        ax_z.plot(s_t, s_kinz, label="KinZ")
-        ax_signal.plot(butter_s_t, butter_s_v, label="Filter")
-        ax_threshold.plot(butter_s_t, butter_accum, label="Threshold")
+        fig = go.Figure()
 
+        # fmt: off
         if tap_start_time > 0:
-            ax_z.axvline(tap_start_time, color="#0080c0", linestyle="--", linewidth=2)
+            fig.add_shape(type="line", x0=tap_start_time, x1=tap_start_time, y0=0, y1=1,
+                          xref="x", yref="paper", line=dict(color=c_purple, width=2),)
         if trigger_time > 0:
-            ax_z.axvline(trigger_time, color="violet", linestyle="--", linewidth=2)
+            fig.add_shape(type="line", x0=trigger_time, x1=trigger_time, y0=0, y1=1,
+                          xref="x", yref="paper", line=dict(color=c_lt_orange, width=2),)
         if tap_end_time > 0:
-            ax_z.axvline(tap_end_time, color="#0080c0", linestyle="--", linewidth=2)
+            fig.add_shape(type="line", x0=tap_end_time, x1=tap_end_time, y0=0, y1=1,
+                          xref="x", yref="paper", line=dict(color=c_purple, width=2),)
         if tap_threshold > 0:
-            ax_threshold.axhline(tap_threshold, color="gray", linestyle="--", linewidth=1)
+            fig.add_shape(type="line", x0=0, x1=1, y0=tap_threshold, y1=tap_threshold,
+                          xref="paper", yref="y3", line=dict(color="gray", width=1, dash="dash"),)
 
-        ax_z.set_xlim(max(0.0, time_len - 0.60), time_len)
+        fig.add_shape(type="line", x0=0, x1=1, y0=tap.probe_z, y1=tap.probe_z,
+                      xref="paper", yref="y", line=dict(color=c_lt_orange, width=1),)
 
-        ax_z.set_ylabel("Z")
-        ax_freq.set_ylabel("Freq")
-        ax_signal.set_ylabel("Signal")
-        ax_threshold.set_ylabel("Threshold")
+        # Computed Z, Toolhead Z, Sensor F
+        fig.add_trace(go.Scatter(x=s_t, y=s_z, mode="lines", name="Z", line=dict(color=c_blue)))
+        fig.add_trace(go.Scatter(x=s_t, y=s_lowz, mode="lines", name="Z (low)", line=dict(color=c_lt_blue, dash="dash")))
+        fig.add_trace(go.Scatter(x=s_t, y=s_kinz, mode="lines", name="KinZ", line=dict(color=c_lt_red)))
+        fig.add_trace(go.Scatter(x=s_t, y=s_f, mode="lines", name="Freq", yaxis="y2", line=dict(color=c_orange)))
 
-        ax_freq.set_title(f"Tap {tapnum+1}")
+        # the butter tap if we have the data
+        if butter_s_t is not None:
+            fig.add_trace(go.Scatter(x=butter_s_t, y=butter_s_v, mode="lines", name="signal", yaxis="y4", line=dict(color=c_green)))
+            fig.add_trace(go.Scatter(x=butter_s_t, y=butter_accum, mode="lines", name="threshold", yaxis="y3", line=dict(color="#626b73")))
 
-        lines = ax_z.get_lines() + ax_freq.get_lines() + ax_signal.get_lines() + ax_threshold.get_lines()
-        labels = [line.get_label() for line in lines]
-        fig.legend(lines, labels, loc="upper right")
+        fig.update_xaxes(range=[max(0.0, time_len - 0.60), time_len], autorange=False)
 
-        plt.savefig(tapplot_path)
-        plt.close(fig)
+        fig.update_layout(
+            hovermode="x unified",
+            title=dict(text=f"Tap {tapnum}: {tap.probe_z:.3f}"),
+            yaxis=dict(title="Z", side="right"),  # Z axis
+            yaxis2=dict(overlaying="y", title="Freq", tickformat="d", side="left"),  # Freq + WMA
+            yaxis3=dict(overlaying="y", side="left", tickformat="d", position=0.2),  # derivatives, tap accum
+            yaxis4=dict(overlaying="y", side="right", showticklabels=False),  # filter
+            height=800,
+        )
+        # fmt: on
 
-        logging.info(f"Wrote tap plot to {tapplot_path}")
+        timg = 0.0
+        thtml = 0.0
+        if tapplot_path_png:
+            t0 = time.time()
+            try:
+                fig.write_image(tapplot_path_png)
+            except:
+                tapplot_path_png = None
+            timg = time.time() - t0
+        if tapplot_path_html:
+            t0 = time.time()
+            fig.write_html(tapplot_path_html, include_plotlyjs="cdn")
+            thtml = time.time() - t0
+        self._log_info(f"Wrote tap plot to {tapplot_path_png or ''} {tapplot_path_html or ''}  [took {timg:.1f}, {thtml:.1f}]")
+
+    def cmd_START_STREAM(self, gcmd):
+        self.save_samples_path = "/tmp/stream.csv"
+        self._log_info("Eddy sampling enabled")
+        self.start_sampler()
+
+    def cmd_STOP_STREAM(self, gcmd):
+        self._log_info("Eddy sampling finished")
+        self._sampler.finish()
+        self._sampler = None
+
 
 
 # Probe interface that does only scanning, no up/down movement.
@@ -2399,6 +2432,7 @@ class ProbeEddyEndstopWrapper:
         if self.tap_config is not None:
             if self.tap_config.mode == "butter":
                 sos = self.tap_config.sos
+                assert sos
                 for i in range(len(sos)):
                     self.eddy._sensor.set_sos_section(i, sos[i])
                 mode = "sos"
@@ -2521,13 +2555,20 @@ class ProbeEddySampler:
         self._errors = 0
         self._fmap = eddy.map_for_drive_current() if calculate_heights else None
 
-        # this will hold the raw samples coming in from the sensor,
-        # with an empty 3rd (height) value
-        self._raw_samples = []
-        # this will hold samples with a height filled in (if we're doing that)
-        self._samples = []
+        self.times = []
+        self.raw_freqs = []
+        self.freqs = []
+        self.heights = [] if self._fmap is not None else None
 
         self.memos = dict()
+
+    @property
+    def raw_count(self):
+        return len(self.times)
+
+    @property
+    def count(self):
+        return len(self.heights) if self.heights else 0
 
     # this is just a handy way to communicate values between different parts of the system,
     # specifically to record things like trigger times for plotting
@@ -2551,14 +2592,23 @@ class ProbeEddySampler:
             return False
 
         self._errors += msg["errors"]
-        self._raw_samples.extend(msg["data"])
+        data = msg["data"]
+
+        # data is (t, fv)
+        if data:
+            times, raw_freqs = zip(*data)
+        else:
+            times, raw_freqs = [], []
+
+        self.times.extend(times)
+        self.raw_freqs.extend(raw_freqs)
+
         return True
 
     def start(self):
         if self._stopped:
             raise self._printer.command_error("ProbeEddySampler.start() called after finish()")
         if not self._started:
-            self._raw_samples = []
             self._sensor.add_bulk_sensor_data_client(self._add_hw_measurement)
             self._started = True
 
@@ -2569,46 +2619,36 @@ class ProbeEddySampler:
             raise self._printer.command_error("ProbeEddySampler.finish() called without start()")
         if self.eddy._sampler is not self:
             raise self._printer.command_error("ProbeEddySampler.finish(): eddy._sampler is not us!")
+        self._update_samples()
         self.eddy._sampler_finished(self)
         self._stopped = True
 
     def _update_samples(self):
-        if len(self._samples) == len(self._raw_samples):
+        if len(self.freqs) == len(self.raw_freqs):
             return
 
-        start_idx = len(self._samples)
         conv_ratio = self._sensor.freqval_conversion_value()
+
+        start_idx = len(self.freqs)
+        freqs_np = np.asarray(self.raw_freqs[start_idx:]) * conv_ratio
+        self.freqs.extend(freqs_np.tolist())
+
         if self._fmap is not None:
-            new_samples = [
-                (
-                    t,
-                    round(conv_ratio * f, ndigits=3),
-                    self._fmap.freq_to_height(round(conv_ratio * f, ndigits=3)),
-                )
-                for t, f, _ in self._raw_samples[start_idx:]
-            ]
-            self._samples.extend(new_samples)
-        else:
-            self._samples.extend([(t, round(conv_ratio * f, ndigits=3), math.inf) for t, f, _ in self._raw_samples[start_idx:]])
+            heights_np = self._fmap.freqs_to_heights_np(freqs_np)
+            self.heights.extend(heights_np.tolist())
 
-    def get_raw_samples(self):
-        return self._raw_samples.copy()
-
-    def get_samples(self):
-        self._update_samples()
-        return self._samples.copy()
-
-    def get_error_count(self):
+    @property
+    def error_count(self):
         return self._errors
 
     # get the last sampled height
     def get_last_height(self) -> float:
-        if self._fmap is None:
+        if self.heights is None:
             raise self._printer.command_error("ProbeEddySampler: no height mapping")
         self._update_samples()
-        if len(self._samples) == 0:
+        if len(self.heights) == 0:
             raise self._printer.command_error("ProbeEddySampler: no samples")
-        return self._samples[-1][2]
+        return self.heights[-1]
 
     # wait for a sample for the current time and get a new height
     def get_height_now(self) -> Optional[float]:
@@ -2626,9 +2666,13 @@ class ProbeEddySampler:
 
         if self._stopped:
             # if we're not getting any more samples, we can check directly
-            if len(self._raw_samples) == 0:
+            if len(self.times) == 0:
                 return report_no_samples()
-            return self._raw_samples[-1][0] >= sample_print_time
+            return self.times[-1] >= sample_print_time
+
+        # quick check
+        if self.times and self.times[-1] >= sample_print_time:
+            return True
 
         wait_start_time = self.eddy._print_time_now()
 
@@ -2647,7 +2691,7 @@ class ProbeEddySampler:
             f"EDDYng waiting for sample at {sample_print_time:.3f} (now: {wait_start_time:.3f}, max_wait_time: {max_wait_time:.3f})"
         )
         now = self.eddy._print_time_now()
-        while len(self._raw_samples) == 0 or self._raw_samples[-1][0] < sample_print_time:
+        while len(self.times) == 0 or self.times[-1] < sample_print_time:
             now = self.eddy._print_time_now()
             if now - wait_start_time > max_wait_time:
                 return report_no_samples()
@@ -2673,12 +2717,11 @@ class ProbeEddySampler:
         wait_start_time = self.eddy._print_time_now()
 
         start_error_count = self._errors
+        start_count = 0
         if new_only:
-            start_count = len(self._raw_samples) + (self._errors if count_errors else 0)
-        else:
-            start_count = 0
+            start_count = len(self.raw_freqs) + (self._errors if count_errors else 0)
 
-        while (len(self._raw_samples) + (self._errors if count_errors else 0)) - start_count < min_samples:
+        while (len(self.raw_freqs) + (self._errors if count_errors else 0)) - start_count < min_samples:
             now = self.eddy._print_time_now()
             if now - wait_start_time > max_wait_time:
                 if raise_error:
@@ -2690,13 +2733,30 @@ class ProbeEddySampler:
 
         return True
 
-    def find_closest_height_at_time(self, time) -> Optional[float]:
+    def find_heights_at_times(self, intervals):
         self._update_samples()
-        if len(self._samples) == 0:
-            return None
-        # find the closest sample to the given time
-        idx = np.argmin([abs(t - time) for t, _, _ in self._samples])
-        return self._samples[idx][2]
+        times = self.times
+        heights = np.asarray(self.heights)
+        num_samples = len(times)
+
+        interval_heights = []
+        i = 0
+        for iv_start, iv_end in intervals:
+            # find start time of interval
+            while i < num_samples and times[i] < iv_start:
+                i += 1
+            if i == num_samples:
+                raise self._printer.command_error(f"No samples in time range {iv_start}-{iv_end}")
+
+            istart = i
+            while i < num_samples and times[i] < iv_end:
+                i += 1
+            iend = i-1
+
+            median = np.median(heights[istart:iend])
+            interval_heights.append(float(median))
+
+        return interval_heights
 
     def find_height_at_time(self, start_time, end_time):
         if end_time < start_time:
@@ -2704,32 +2764,35 @@ class ProbeEddySampler:
 
         self._update_samples()
 
-        if len(self._samples) == 0:
+        if len(self.times) == 0:
             raise self._printer.command_error("No samples at all, so none in time range")
 
+        if not self.heights:
+            raise self._printer.command_error("Update samples didn't compute heights")
+
         self.eddy._log_debug(
-            f"EDDYng find_height_at_time: {len(self._samples)} samples, time range {self._samples[0][0]:.3f} to {self._samples[-1][0]:.3f}"
+            f"find_height_at_time: {len(self.times)} samples, time range {self.times[0][0]:.3f} to {self.times[-1][0]:.3f}"
         )
 
         # find the first sample that is >= start_time
-        start_idx = bisect.bisect_left([t for t, _, _ in self._samples], start_time)
-        if start_idx >= len(self._samples):
+        start_idx = bisect.bisect_left(self.times, start_time)
+        if start_idx >= len(self.times):
             raise self._printer.command_error("Nothing after start_time?")
 
-        # find the last sample that is <= end_time
-        end_idx = bisect.bisect_right([t for t, _, _ in self._samples], end_time)
-        if end_idx == 0:
-            raise self._printer.command_error("found something at start_time, but not before end_time?")
+        # find the last sample that is < end_time
+        end_idx = start_idx
+        while end_idx < len(self.times) and self.times[end_idx] < end_time:
+            end_idx += 1
 
         # average the heights of the samples in the range
-        heights = [h for _, _, h in self._samples[start_idx:end_idx]]
+        heights = self.heights[start_idx:end_idx]
         if len(heights) == 0:
             raise self._printer.command_error(f"no samples between time {start_time:.1f} and {end_time:.1f}!")
         hmin, hmax = np.min(heights), np.max(heights)
         mean = np.mean(heights)
         median = np.median(heights)
         self.eddy._log_debug(
-            f"EDDYng find_height_at_time: {len(heights)} samples, median: {median:.3f}, mean: {mean:.3f} (range {hmin:.3f}-{hmax:.3f})"
+            f"find_height_at_time: {len(heights)} samples, median: {median:.3f}, mean: {mean:.3f} (range {hmin:.3f}-{hmax:.3f})"
         )
 
         return float(median)
@@ -2957,15 +3020,14 @@ class ProbeEddyFrequencyMap:
         rmse_htf,
         vels=None,
     ):
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            logging.warning("write_calibration_plot: matplotlib not installed")
+        if not plotly:
             return
 
         if self._ftoh is None or self._htof is None:
-            logging.warning("write_calibration_plot: null calibration?")
+            logging.warning(f"write_calibration_plot: null calibration?")
             return
+
+        import plotly.graph_objects as go
 
         low_samples = heights <= ProbeEddyFrequencyMap.low_z_threshold
         high_samples = heights >= ProbeEddyFrequencyMap.low_z_threshold - 0.5
@@ -2977,61 +3039,92 @@ class ProbeEddyFrequencyMap:
         else:
             f_to_z_high_err = None
 
-        fig, ax1 = plt.subplots(figsize=(12, 6))
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=times, y=heights, mode="lines", name="Z"))
 
-        # Plot heights
-        ax1.plot(times, heights, label="Z", color="blue")
-        ax1.plot(times[low_samples], self._ftoh(1.0 / freqs[low_samples]),
-                label=f"Z {rmse_fth:.4f}", color="cyan")
+        fig.add_trace(
+            go.Scatter(
+                x=times[low_samples],
+                y=self._ftoh(1.0 / freqs[low_samples]),
+                mode="lines",
+                name=f"Z {rmse_fth:.4f}",
+            )
+        )
 
         if self._ftoh_high is not None:
-            ax1.plot(times[high_samples], self._ftoh_high(1.0 / freqs[high_samples]),
-                    label="Z (high)", color="deepskyblue")
+            fig.add_trace(
+                go.Scatter(
+                    x=times[high_samples],
+                    y=self._ftoh_high(1.0 / freqs[high_samples]),
+                    mode="lines",
+                    name=f"Z (high)",
+                )
+            )
 
-        ax1.set_ylabel("Height (Z)")
-        ax1.set_xlabel("Time")
+        fig.add_trace(go.Scatter(x=times, y=freqs, mode="lines", name="F", yaxis="y2"))
 
-        # Freq axis (y2)
-        ax2 = ax1.twinx()
-        ax2.plot(times, freqs, label="F", color="orange", alpha=0.7)
-        ax2.plot(times[low_samples], 1.0 / self._htof(heights[low_samples]),
-                label=f"F ({rmse_htf:.2f})", color="darkorange", linestyle="--")
-        ax2.set_ylabel("Frequency (F)")
+        fig.add_trace(
+            go.Scatter(
+                x=times[low_samples],
+                y=1.0 / self._htof(heights[low_samples]),
+                mode="lines",
+                name=f"F ({rmse_htf:.2f})",
+                yaxis="y2",
+            )
+        )
 
-        # Error axis (y3)
-        ax3 = ax1.twinx()
-        ax3.spines["right"].set_position(("axes", 1.1))
-        ax3.plot(times[low_samples], f_to_z_low_err, label="Err", color="red")
+        fig.add_trace(
+            go.Scatter(
+                x=times[low_samples],
+                y=f_to_z_low_err,
+                mode="lines",
+                name="Err",
+                yaxis="y3",
+            )
+        )
         if f_to_z_high_err is not None:
-            ax3.plot(times[high_samples], f_to_z_high_err, label="Err (high)", color="salmon")
-        ax3.set_ylabel("Error")
+            fig.add_trace(
+                go.Scatter(
+                    x=times[high_samples],
+                    y=f_to_z_high_err,
+                    mode="lines",
+                    name="Err (high)",
+                    yaxis="y3",
+                )
+            )
 
-        # Velocity axis (y4), if applicable
         if vels is not None:
-            ax4 = ax1.twinx()
-            ax4.spines["right"].set_position(("axes", 1.2))
-            ax4.plot(times, vels, label="V", color="green")
-            ax4.set_ylabel("Velocity (V)")
+            fig.add_trace(go.Scatter(x=times, y=vels, mode="lines", name="V", yaxis="y4"))
 
-        # Combine all legends
-        lines, labels = [], []
-        for ax in [ax1, ax2, ax3] + ([ax4] if vels is not None else []):
-            l, lab = ax.get_legend_handles_labels()
-            lines += l
-            labels += lab
-        ax1.legend(lines, labels, loc="upper left")
-
-        plt.title(f"Calibration for drive current {self.drive_current}")
-        plt.tight_layout()
-        plt.savefig("/tmp/eddy-calibration.png", dpi=300)
-        plt.close()
+        fig.update_layout(
+            hovermode="x unified",
+            title=f"Calibration for drive current {self.drive_current}",
+            yaxis2=dict(title="Freq", overlaying="y", tickformat="d", side="right"),
+            yaxis3=dict(overlaying="y", side="right", position=0.1),
+            yaxis4=dict(overlaying="y", side="right", position=0.2),
+        )
+        fig.write_html("/tmp/eddy-calibration.html")
 
     def freq_to_height(self, freq: float) -> float:
         if self._ftoh is None:
             raise self._eddy._printer.command_error("Calling freq_to_height on uncalibrated map")
-        if self._ftoh_high is not None and freq < self._ftoh.domain[0]:
-            return float(self._ftoh_high(1.0 / freq))
-        return float(self._ftoh(1.0 / freq))
+        invfreq = 1.0 / freq
+        if self._ftoh_high is not None and invfreq < self._ftoh.domain[0]:
+            return float(self._ftoh_high(invfreq))
+        return float(self._ftoh(invfreq))
+
+    def freqs_to_heights_np(self, freqs: np.array) -> np.array:
+        if self._ftoh is None:
+            raise self._eddy._printer.command_error("Calling freqs_to_heights on uncalibrated map")
+        invfreqs = 1.0 / freqs
+        if self._ftoh_high is not None:
+            heights = np.zeros(len(invfreqs))
+            low_freq_vals = invfreqs > self._ftoh.domain[1]
+            heights[low_freq_vals] = np.vectorize(self._ftoh_high, otypes=[float])(invfreqs[low_freq_vals])
+            heights[~low_freq_vals] = np.vectorize(self._ftoh, otypes=[float])(invfreqs[~low_freq_vals])
+        else:
+            heights = self._ftoh(invfreqs)
+        return heights
 
     def height_to_freq(self, height: float) -> float:
         if self._htof is None:
@@ -3040,6 +3133,138 @@ class ProbeEddyFrequencyMap:
 
     def calibrated(self) -> bool:
         return self._ftoh is not None and self._htof is not None
+
+
+@final
+class BedMeshScanHelper:
+    def __init__(self, eddy, config):
+        self._eddy = eddy
+        self._printer = eddy._printer
+
+        bmc = config.getsection("bed_mesh")
+        self._bed_mesh = eddy._printer.load_object(bmc, "bed_mesh")
+        self._x_points, self._y_points = bmc.getintlist("probe_count", count=2, note_valid=False)
+        self._x_min, self._y_min = bmc.getfloatlist("mesh_min", count=2, note_valid=False)
+        self._x_max, self._y_max = bmc.getfloatlist("mesh_max", count=2, note_valid=False)
+        self._speed = bmc.getfloat("speed", 100.0, above=0.0, note_valid=False)
+        self._scan_z = bmc.getfloat("horizontal_move_z", self._eddy.params.home_trigger_height, above=0.0, note_valid=False)
+
+        self._x_offset = self._eddy.params.x_offset
+        self._y_offset = self._eddy.params.y_offset
+
+        self._mesh_points, self._mesh_path = self._generate_path()
+
+
+    def _generate_path(self):
+        x_vals = np.linspace(self._x_min, self._x_max, self._x_points)
+        y_vals = np.linspace(self._y_min, self._y_max, self._y_points)
+        path = []
+        reverse = False
+
+        for y in y_vals:
+            row = [(x, y, True) for x in (reversed(x_vals) if reverse else x_vals)]
+            path.extend(row)
+            reverse = not reverse
+        return path, path
+
+    def _scan_path(self):
+        th = self._eddy._toolhead
+        times = []
+
+        for pt in self._mesh_path:
+            # TODO bounds
+            th.manual_move([pt[0] - self._x_offset, pt[1] - self._y_offset, None], self._speed)
+            th.register_lookahead_callback(lambda t: times.append(t))
+
+        th.wait_moves()
+
+        return times
+
+    def _set_bed_mesh(self, heights):
+        # heights is in the order of the _mesh_path points; convert to
+        # be ordered min_y..max_y, min_x..max_x, then pull out the heights
+        indexed_points = []
+        i = 0
+        for x, y, include in self._mesh_path:
+            if not include:
+                continue
+            indexed_points.append((x, y, i))
+            i += 1
+
+        def sort_points(a, b):
+            if a[1] < b[1]: # y first
+                return -1
+            if a[1] > b[1]:
+                return 1
+            if a[0] < b[0]: # then x
+                return -1
+            if a[0] > b[0]:
+                return 1
+            return 0
+
+        indices = [ki for _, _, ki in sorted(indexed_points, key=cmp_to_key(sort_points))]
+
+        ki = 0
+        matrix = []
+        for _ in range(self._y_points):
+            row = []
+            for _ in range(self._x_points):
+                v = heights[indices[ki]]
+                row.append(self._scan_z - v)
+                ki += 1
+            matrix.append(row)
+
+        params = self._bed_mesh.bmc.mesh_config.copy()
+        params.update({
+            "min_x": self._x_min,
+            "max_x": self._x_max,
+            "min_y": self._y_min,
+            "max_y": self._y_max,
+            "x_count": self._x_points,
+            "y_count": self._y_points,
+        })
+        mesh = bed_mesh.ZMesh(params, None)
+        try:
+            mesh.build_mesh(matrix)
+        except bed_mesh.BedMeshError as e:
+            raise self._printer.command_error(str(e))
+        self._bed_mesh.set_mesh(mesh)
+        self._eddy._log_msg("Mesh scan complete")
+
+    def scan(self):
+        th = self._eddy._toolhead
+
+        # move to the start point
+        v = self._mesh_path[0]
+        th.manual_move([None, None, 10.0], self._eddy.params.lift_speed)
+        th.manual_move([v[0] - self._x_offset, v[1] - self._y_offset, None], self._speed)
+        th.manual_move([None, None, self._scan_z], self._eddy.params.probe_speed)
+        th.wait_moves()
+
+        heights = []
+
+        sample_time = self._eddy.params.scan_sample_time
+
+        with self._eddy.start_sampler() as sampler:
+            path_times = self._scan_path()
+            sampler.wait_for_sample_at_time(path_times[-1] + sample_time*2.)
+            sampler.finish()
+
+            heights = sampler.find_heights_at_times([(t - sample_time/2., t + sample_time/2.) for t in path_times])
+            # Note plus tap_offset here, vs -tap_offset when probing. These are actual
+            # heights, the other is "offset from real"
+            heights = [h + self._eddy._tap_offset for h in heights]
+
+            with open("/tmp/mesh.csv", "w") as mfile:
+                mfile.write("time,x,y,z\n")
+                for i in range(len(self._mesh_points)):
+                    t = path_times[i]
+                    x = self._mesh_points[i][0]
+                    y = self._mesh_points[i][1]
+                    z = heights[i]
+                    mfile.write(f"{t},{x},{y},{z}\n")
+
+            self._set_bed_mesh(heights)
 
 
 def np_rmse(p, x, y):
