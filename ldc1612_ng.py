@@ -8,7 +8,7 @@ import math
 import logging
 import struct
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 try:
     from klippy.extras import bus, bulk_sensor
@@ -363,7 +363,7 @@ class LDC1612_ng:
         start_freq: float,
         start_time: float,
         mode: str = "home",
-        tap_threshold: float = None,
+        tap_threshold: Optional[float] = None,
         max_errors: int = 0,
     ):
         MODES = {

@@ -1,6 +1,8 @@
 # EDDY-ng
 #
 # Copyright (C) 2025  Vladimir Vukicevic <vladimir@pobox.com>
+#
+# Based on original probe_eddy_current code by:
 # Copyright (C) 2020-2024  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
@@ -58,11 +60,14 @@ except ImportError:
 from . import ldc1612_ng
 
 try:
-    import scipy  # noqa
-
-    HAS_SCIPY = True
+    import plotly  # noqa
 except ImportError:
-    HAS_SCIPY = False
+    plotly = None
+
+try:
+    import scipy  # noqa
+except ImportError:
+    scipy = None
 
 # In this file, a couple of conventions are used (for sanity).
 # Variables are named according to:
@@ -357,7 +362,7 @@ class ProbeEddyParams:
         if self.tap_mode == "butter" and not self.is_default_butter_config():
             need_scipy = True
 
-        if need_scipy and not HAS_SCIPY:
+        if need_scipy and not scipy:
             raise printer.config_error(
                 "ProbeEddy: butter mode with custom filter parameters requires scipy, which is not available; please install scipy, use the defaults, or use wma mode"
             )
@@ -1612,7 +1617,7 @@ class ProbeEddy:
 
     @dataclass
     class TapResult:
-        error: Exception
+        error: Optional[Exception]
         probe_z: float
         toolhead_z: float
         overshoot: float
@@ -1624,7 +1629,7 @@ class ProbeEddy:
     class TapConfig:
         mode: str
         threshold: float
-        sos: List[List[float]] = None
+        sos: Optional[List[List[float]]] = None
 
     def do_one_tap(
         self,
@@ -1654,13 +1659,19 @@ class ProbeEddy:
             endstops = [(self._endstop_wrapper, "probe")]
             hmove = HomingMove(self._printer, endstops)
 
+            now_z = None
             try:
                 probe_position = hmove.homing_move(target_position, tap_speed, probe_pos=True)
+
+                # raise toolhead as soon as tap ends
+                now_z = th.get_position()[2]
+                if now_z < 1.0:
+                    th.manual_move([None, None, start_z], lift_speed)
+                    now_z = start_z
 
                 if hmove.check_no_movement() is not None:
                     raise self._printer.command_error("Probe triggered prior to movement")
 
-                now_z = th.get_position()[2]
                 probe_z = probe_position[2]
 
                 if probe_z - target_z < 0.050:
@@ -1682,12 +1693,13 @@ class ProbeEddy:
                     raise self._printer.command_error("Probing failed due to printer shutdown")
 
                 # in case of failure don't leave the toolhead in a bad spot (i.e. in bed)
-                now_z = th.get_position()[2]
+                now_z = now_z or th.get_position()[2]
                 if now_z < 1.0:
                     th.manual_move([None, None, start_z], lift_speed)
 
                 # If just sensor errors, let the caller handle it
-                if "Sensor error" or "Probe completed movement" in str(err):
+                self._log_error(f"Tap failed with Z at {now_z:.3f}")
+                if "Sensor error" or "Probe completed movement" or "Probe triggered prior" in str(err):
                     return ProbeEddy.TapResult(
                         error=err,
                         toolhead_z=now_z,
@@ -1698,7 +1710,6 @@ class ProbeEddy:
                         tap_end_time=0.0,
                     )
                 else:
-                    self._log_error(f"Tap failed at {now_z:.3f}")
                     raise
         finally:
             self._endstop_wrapper.tap_config = None
@@ -1730,7 +1741,7 @@ class ProbeEddy:
         )
 
     def _compute_butter_tap(self, sampler):
-        if not HAS_SCIPY:
+        if not scipy:
             return None, None
 
         trigger_freq = self.height_to_freq(self.params.home_trigger_height)
@@ -1772,8 +1783,7 @@ class ProbeEddy:
         lift_speed: float = gcmd.get_float("RETRACT_SPEED", self.params.lift_speed, above=0.0)
         tap_start_z: float = gcmd.get_float("START_Z", self.params.tap_start_z, above=2.0)
         target_z: float = gcmd.get_float("TARGET_Z", self.params.tap_target_z)
-        tap_threshold: int = gcmd.get_float("THRESHOLD", None)  # None so we have a sentinel value
-        # tap_threshold = gcmd.get_int('TT', tap_threshold, minval=0) # alias for THRESHOLD
+        tap_threshold: float = gcmd.get_float("THRESHOLD", None)  # None so we have a sentinel value
         tap_threshold = gcmd.get_float("TT", tap_threshold)  # alias for THRESHOLD
         tap_adjust_z = gcmd.get_float("ADJUST_Z", self._tap_adjust_z)
         do_retract = gcmd.get_int("RETRACT", 1) == 1
@@ -1781,7 +1791,7 @@ class ProbeEddy:
         max_samples = gcmd.get_int("MAX_SAMPLES", self.params.tap_max_samples, minval=samples)
         samples_stddev = gcmd.get_float("SAMPLES_STDDEV", self.params.tap_samples_stddev, above=0.0)
         home_z: bool = gcmd.get_int("HOME_Z", 1) == 1
-        write_plot_arg = gcmd.get_int("PLOT", None)
+        write_plot_arg: int = gcmd.get_int("PLOT", None)
 
         mode = gcmd.get("MODE", self.params.tap_mode).lower()
         if mode not in ("wma", "butter"):
@@ -1806,52 +1816,22 @@ class ProbeEddy:
             write_every_tap_plot = write_plot_arg > 1
 
         tapcfg = ProbeEddy.TapConfig(mode=mode, threshold=tap_threshold)
+        # fmt: off
         if mode == "butter":
             if self.params.is_default_butter_config() and self._sensor._data_rate == 250:
                 sos = [
-                    [
-                        0.046131802093312926,
-                        0.09226360418662585,
-                        0.046131802093312926,
-                        1.0,
-                        -1.3297767184682712,
-                        0.5693902189294331,
-                    ],
-                    [
-                        1.0,
-                        -2.0,
-                        1.0,
-                        1.0,
-                        -1.845000600983779,
-                        0.8637525213328747,
-                    ],
+                    [ 0.046131802093312926, 0.09226360418662585, 0.046131802093312926, 1.0, -1.3297767184682712, 0.5693902189294331, ],
+                    [ 1.0, -2.0, 1.0, 1.0, -1.845000600983779, 0.8637525213328747, ],
                 ]
             elif self.params.is_default_butter_config() and self._sensor._data_rate == 500:
                 sos = [
-                    [
-                        0.013359200027856505,
-                        0.02671840005571301,
-                        0.013359200027856505,
-                        1.0,
-                        -1.686278256753083,
-                        0.753714473246724,
-                    ],
-                    [
-                        1.0,
-                        -2.0,
-                        1.0,
-                        1.0,
-                        -1.9250515947328444,
-                        0.9299234737648037,
-                    ],
+                    [ 0.013359200027856505, 0.02671840005571301, 0.013359200027856505, 1.0, -1.686278256753083, 0.753714473246724, ],
+                    [ 1.0, -2.0, 1.0, 1.0, -1.9250515947328444, 0.9299234737648037, ],
                 ]
-            elif HAS_SCIPY:
+            elif scipy:
                 sos = scipy.signal.butter(
                     self.params.tap_butter_order,
-                    [
-                        self.params.tap_butter_lowcut,
-                        self.params.tap_butter_highcut,
-                    ],
+                    [ self.params.tap_butter_lowcut, self.params.tap_butter_highcut, ],
                     btype="bandpass",
                     fs=self._sensor._data_rate,
                     output="sos",
@@ -1859,6 +1839,7 @@ class ProbeEddy:
             else:
                 raise self._printer.command_error("Scipy is not available, cannot use custom filter, or data rate is not 250 or 500")
             tapcfg.sos = sos
+        # fmt: on
 
         results = []
         tap_z = None
@@ -1888,9 +1869,7 @@ class ProbeEddy:
 
                 if write_every_tap_plot:
                     try:
-                        t0 = time.time()
                         self._write_tap_plot(tap, sample_i)
-                        self._log_msg(f"Tap plot: {time.time()-t0}")
                     except Exception as e:
                         self._log_error(f"Failed to write tap plot: {e}")
 
@@ -1923,7 +1902,7 @@ class ProbeEddy:
                         break
         finally:
             self.reset_drive_current()
-            if write_tap_plot and not write_every_tap_plot:
+            if write_tap_plot and not write_every_tap_plot and tap:
                 try:
                     self._write_tap_plot(tap)
                 except Exception as e:
@@ -1983,7 +1962,9 @@ class ProbeEddy:
         # is not likely to be exactly the same as the Z position, but all we care about is
         # variance from that position so this should be fine.
         self._sensor.set_drive_current(orig_drive_current)
+        th_now = th.get_position()
         th.manual_move([None, None, self.params.home_trigger_height + 1.0], lift_speed)
+        th.manual_move([th_now[0] - self.params.x_offset, th_now[1] - self.params.y_offset, None], lift_speed)
         th.manual_move([None, None, self.params.home_trigger_height], tap_speed)
         th.dwell(0.500)
         th.wait_moves()
@@ -2032,21 +2013,21 @@ class ProbeEddy:
     # and the filter mostly-exactly how it's done on the probe MCU itself
     # (vs using numpy or similar) to make these graphs more reprensetative
     def _write_tap_plot(self, tap: ProbeEddy.TapResult, tapnum: int = -1):
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            logging.warning("write_tap_plot: matplotlib not installed")
+        if not plotly:
             return
 
         if tapnum == -1:
-            filename = "tap.png"
+            filename_base = "tap"
         else:
-            filename = f"tap-{tapnum+1}.png"
-        tapplot_path = f"/tmp/{filename}"
+            filename_base = f"tap-{tapnum+1}"
+        tapplot_path_png = f"/tmp/{filename_base}.png"
+        tapplot_path_html = f"/tmp/{filename_base}.html"
 
         # delete any old plots to avoid confusion
-        if os.path.exists(tapplot_path):
-            os.remove(tapplot_path)
+        if tapplot_path_html and os.path.exists(tapplot_path_html):
+            os.remove(tapplot_path_html)
+        if tapplot_path_png and os.path.exists(tapplot_path_png):
+            os.remove(tapplot_path_png)
 
         if not self._last_sampler or not self._last_sampler.times:
             return
@@ -2057,7 +2038,7 @@ class ProbeEddy:
         s_kinz = np.vectorize(lambda t: self._get_trapq_height(t) or -10)(s_t)
 
         # Any values below 0.0 are suspect because they were not calibrated,
-        # and so are just extrapolated from the fit. So just don't show them.
+        # and so are just extrapolated from the fit. Show them differently.
         s_lowz = np.ma.masked_where(s_z >= 0, s_z)
         s_z = np.ma.masked_where(s_z < 0, s_z)
 
@@ -2073,7 +2054,7 @@ class ProbeEddy:
         time_len = s_t.max()
 
         # compute the butterworth filter, if we have scipy
-        if tap is not None and HAS_SCIPY:
+        if tap is not None and scipy:
             butter_s_t, butter_s_v = self._compute_butter_tap(self._last_sampler)
             butter_s_t = butter_s_t - time_start
         else:
@@ -2099,15 +2080,7 @@ class ProbeEddy:
                 butter_accum[bi] = accum_val
                 last_value = bv
 
-        fig, ax_freq = plt.subplots(figsize=(10, 8))
-        ax_z = ax_freq.twinx()
-        ax_signal = ax_freq.twinx()
-        ax_threshold = ax_freq.twinx()
-
-        ax_z.yaxis.grid(True)
-        ax_signal.yaxis.grid(True, linestyle='--', color='blue', alpha=0.2)
-        ax_signal.spines["right"].set_position(("outward", 30))
-        ax_threshold.spines["right"].set_position(("outward", 60))
+        import plotly.graph_objects as go
 
         (c_red, c_lt_red) = ('#9e4058', '#C2697F')
         (c_orange, c_lt_orange) = ('#d0641e', '#E68E54')
@@ -2116,39 +2089,60 @@ class ProbeEddy:
         (c_blue, c_lt_blue) = ('#2c3778', '#4151B0')
         (c_purple, c_lt_purple) = ('#513965', '#785596')
 
-        ax_freq.plot(s_t, s_f, label="Freq", color=c_orange)
-        ax_z.plot(s_t, s_z, label="Z", color=c_blue)
-        ax_z.plot(s_t, s_lowz, label="Z (interp)", color=c_lt_blue, linestyle='--', alpha=0.3)
-        ax_z.plot(s_t, s_kinz, label="KinZ", color=c_lt_red)
-        ax_signal.plot(butter_s_t, butter_s_v, label="Filter", color=c_green)
-        ax_threshold.plot(butter_s_t, butter_accum, label="Threshold", color='#666666')
+        fig = go.Figure()
 
+        # fmt: off
         if tap_start_time > 0:
-            ax_z.axvline(tap_start_time, color=c_orange, linestyle="--", linewidth=1)
+            fig.add_shape(type="line", x0=tap_start_time, x1=tap_start_time, y0=0, y1=1,
+                          xref="x", yref="paper", line=dict(color=c_purple, width=2),)
         if trigger_time > 0:
-            ax_z.axvline(trigger_time, color="violet", linestyle="--", linewidth=1)
+            fig.add_shape(type="line", x0=trigger_time, x1=trigger_time, y0=0, y1=1,
+                          xref="x", yref="paper", line=dict(color=c_lt_orange, width=2),)
         if tap_end_time > 0:
-            ax_z.axvline(tap_end_time, color=c_orange, linestyle="--", linewidth=1)
+            fig.add_shape(type="line", x0=tap_end_time, x1=tap_end_time, y0=0, y1=1,
+                          xref="x", yref="paper", line=dict(color=c_purple, width=2),)
         if tap_threshold > 0:
-            ax_threshold.axhline(tap_threshold, color="gray", linestyle="--", linewidth=1)
+            fig.add_shape(type="line", x0=0, x1=1, y0=tap_threshold, y1=tap_threshold,
+                          xref="paper", yref="y3", line=dict(color="gray", width=1, dash="dash"),)
 
-        ax_z.set_xlim(max(0.0, time_len - 0.60), time_len)
+        fig.add_shape(type="line", x0=0, x1=1, y0=tap.probe_z, y1=tap.probe_z,
+                      xref="paper", yref="y", line=dict(color=c_lt_orange, width=1),)
 
-        ax_z.set_ylabel("Z")
-        ax_freq.set_ylabel("Freq")
-        ax_signal.set_ylabel("Signal")
-        ax_threshold.set_ylabel("Threshold")
+        # Computed Z, Toolhead Z, Sensor F
+        fig.add_trace(go.Scatter(x=s_t, y=s_z, mode="lines", name="Z", line=dict(color=c_blue)))
+        fig.add_trace(go.Scatter(x=s_t, y=s_lowz, mode="lines", name="Z (low)", line=dict(color=c_lt_blue, dash="dash")))
+        fig.add_trace(go.Scatter(x=s_t, y=s_kinz, mode="lines", name="KinZ", line=dict(color=c_lt_red)))
+        fig.add_trace(go.Scatter(x=s_t, y=s_f, mode="lines", name="Freq", yaxis="y2", line=dict(color=c_orange)))
 
-        ax_freq.set_title(f"Tap {tapnum+1}")
+        # the butter tap if we have the data
+        if butter_s_t is not None:
+            fig.add_trace(go.Scatter(x=butter_s_t, y=butter_s_v, mode="lines", name="signal", yaxis="y4", line=dict(color=c_green)))
+            fig.add_trace(go.Scatter(x=butter_s_t, y=butter_accum, mode="lines", name="threshold", yaxis="y3", line=dict(color="#626b73")))
 
-        lines = ax_z.get_lines() + ax_freq.get_lines() + ax_signal.get_lines() + ax_threshold.get_lines()
-        labels = [line.get_label() for line in lines]
-        fig.legend(lines, labels, loc="upper right")
+        fig.update_xaxes(range=[max(0.0, time_len - 0.60), time_len], autorange=False)
 
-        plt.savefig(tapplot_path, dpi=150)
-        plt.close(fig)
+        fig.update_layout(
+            hovermode="x unified",
+            title=dict(text=f"Tap {tapnum}: {tap.probe_z:.3f}"),
+            yaxis=dict(title="Z", side="right"),  # Z axis
+            yaxis2=dict(overlaying="y", title="Freq", tickformat="d", side="left"),  # Freq + WMA
+            yaxis3=dict(overlaying="y", side="left", tickformat="d", position=0.2),  # derivatives, tap accum
+            yaxis4=dict(overlaying="y", side="right", showticklabels=False),  # filter
+            height=800,
+        )
+        # fmt: on
 
-        logging.info(f"Wrote tap plot to {tapplot_path}")
+        timg = 0.0
+        thtml = 0.0
+        if tapplot_path_png:
+            t0 = time.time()
+            fig.write_image(tapplot_path_png)
+            timg = time.time() - t0
+        if tapplot_path_html:
+            t0 = time.time()
+            fig.write_html(tapplot_path_html, include_plotlyjs="cdn")
+            thtml = time.time() - t0
+        self._log_info(f"Wrote tap plot to {tapplot_path_png or ''} {tapplot_path_html or ''}  [took {timg:.1f}, {thtml:.1f}]")
 
     def cmd_START_STREAM(self, gcmd):
         self.save_samples_path = "/tmp/stream.csv"
@@ -2437,6 +2431,7 @@ class ProbeEddyEndstopWrapper:
         if self.tap_config is not None:
             if self.tap_config.mode == "butter":
                 sos = self.tap_config.sos
+                assert sos
                 for i in range(len(sos)):
                     self.eddy._sensor.set_sos_section(i, sos[i])
                 mode = "sos"
@@ -2771,6 +2766,9 @@ class ProbeEddySampler:
         if len(self.times) == 0:
             raise self._printer.command_error("No samples at all, so none in time range")
 
+        if not self.heights:
+            raise self._printer.command_error("Update samples didn't compute heights")
+
         self.eddy._log_debug(
             f"find_height_at_time: {len(self.times)} samples, time range {self.times[0][0]:.3f} to {self.times[-1][0]:.3f}"
         )
@@ -3021,15 +3019,14 @@ class ProbeEddyFrequencyMap:
         rmse_htf,
         vels=None,
     ):
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            logging.warning("write_calibration_plot: matplotlib not installed")
+        if not plotly:
             return
 
         if self._ftoh is None or self._htof is None:
-            logging.warning("write_calibration_plot: null calibration?")
+            logging.warning(f"write_calibration_plot: null calibration?")
             return
+
+        import plotly.graph_objects as go
 
         low_samples = heights <= ProbeEddyFrequencyMap.low_z_threshold
         high_samples = heights >= ProbeEddyFrequencyMap.low_z_threshold - 0.5
@@ -3041,54 +3038,71 @@ class ProbeEddyFrequencyMap:
         else:
             f_to_z_high_err = None
 
-        fig, ax1 = plt.subplots(figsize=(12, 6))
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=times, y=heights, mode="lines", name="Z"))
 
-        # Plot heights
-        ax1.plot(times, heights, label="Z", color="blue")
-        ax1.plot(times[low_samples], self._ftoh(1.0 / freqs[low_samples]),
-                label=f"Z {rmse_fth:.4f}", color="cyan")
+        fig.add_trace(
+            go.Scatter(
+                x=times[low_samples],
+                y=self._ftoh(1.0 / freqs[low_samples]),
+                mode="lines",
+                name=f"Z {rmse_fth:.4f}",
+            )
+        )
 
         if self._ftoh_high is not None:
-            ax1.plot(times[high_samples], self._ftoh_high(1.0 / freqs[high_samples]),
-                    label="Z (high)", color="deepskyblue")
+            fig.add_trace(
+                go.Scatter(
+                    x=times[high_samples],
+                    y=self._ftoh_high(1.0 / freqs[high_samples]),
+                    mode="lines",
+                    name=f"Z (high)",
+                )
+            )
 
-        ax1.set_ylabel("Height (Z)")
-        ax1.set_xlabel("Time")
+        fig.add_trace(go.Scatter(x=times, y=freqs, mode="lines", name="F", yaxis="y2"))
 
-        # Freq axis (y2)
-        ax2 = ax1.twinx()
-        ax2.plot(times, freqs, label="F", color="orange", alpha=0.7)
-        ax2.plot(times[low_samples], 1.0 / self._htof(heights[low_samples]),
-                label=f"F ({rmse_htf:.2f})", color="darkorange", linestyle="--")
-        ax2.set_ylabel("Frequency (F)")
+        fig.add_trace(
+            go.Scatter(
+                x=times[low_samples],
+                y=1.0 / self._htof(heights[low_samples]),
+                mode="lines",
+                name=f"F ({rmse_htf:.2f})",
+                yaxis="y2",
+            )
+        )
 
-        # Error axis (y3)
-        ax3 = ax1.twinx()
-        ax3.spines["right"].set_position(("axes", 1.1))
-        ax3.plot(times[low_samples], f_to_z_low_err, label="Err", color="red")
+        fig.add_trace(
+            go.Scatter(
+                x=times[low_samples],
+                y=f_to_z_low_err,
+                mode="lines",
+                name="Err",
+                yaxis="y3",
+            )
+        )
         if f_to_z_high_err is not None:
-            ax3.plot(times[high_samples], f_to_z_high_err, label="Err (high)", color="salmon")
-        ax3.set_ylabel("Error")
+            fig.add_trace(
+                go.Scatter(
+                    x=times[high_samples],
+                    y=f_to_z_high_err,
+                    mode="lines",
+                    name="Err (high)",
+                    yaxis="y3",
+                )
+            )
 
-        # Velocity axis (y4), if applicable
         if vels is not None:
-            ax4 = ax1.twinx()
-            ax4.spines["right"].set_position(("axes", 1.2))
-            ax4.plot(times, vels, label="V", color="green")
-            ax4.set_ylabel("Velocity (V)")
+            fig.add_trace(go.Scatter(x=times, y=vels, mode="lines", name="V", yaxis="y4"))
 
-        # Combine all legends
-        lines, labels = [], []
-        for ax in [ax1, ax2, ax3] + ([ax4] if vels is not None else []):
-            l, lab = ax.get_legend_handles_labels()
-            lines += l
-            labels += lab
-        ax1.legend(lines, labels, loc="upper left")
-
-        plt.title(f"Calibration for drive current {self.drive_current}")
-        plt.tight_layout()
-        plt.savefig("/tmp/eddy-calibration.png", dpi=300)
-        plt.close()
+        fig.update_layout(
+            hovermode="x unified",
+            title=f"Calibration for drive current {self.drive_current}",
+            yaxis2=dict(title="Freq", overlaying="y", tickformat="d", side="right"),
+            yaxis3=dict(overlaying="y", side="right", position=0.1),
+            yaxis4=dict(overlaying="y", side="right", position=0.2),
+        )
+        fig.write_html("/tmp/eddy-calibration.html")
 
     def freq_to_height(self, freq: float) -> float:
         if self._ftoh is None:
