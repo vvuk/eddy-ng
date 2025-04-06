@@ -56,6 +56,13 @@ except ImportError:
 from . import ldc1612_ng
 
 try:
+    import plotly  # noqa
+
+    HAS_PLOTLY = True
+except ImportError:
+    HAS_PLOTLY = False
+
+try:
     import scipy  # noqa
 
     HAS_SCIPY = True
@@ -2014,16 +2021,13 @@ class ProbeEddy:
     # and the filter mostly-exactly how it's done on the probe MCU itself
     # (vs using numpy or similar) to make these graphs more reprensetative
     def _write_tap_plot(self, tap: ProbeEddy.TapResult, tapnum: int = -1):
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            logging.warning("write_tap_plot: matplotlib not installed")
+        if not HAS_PLOTLY:
             return
 
         if tapnum == -1:
-            filename = "tap.png"
+            filename = "tap.html"
         else:
-            filename = f"tap-{tapnum+1}.png"
+            filename = f"tap-{tapnum}.html"
         tapplot_path = f"/tmp/{filename}"
 
         samples = self._last_sampler_samples
@@ -2036,7 +2040,8 @@ class ProbeEddy:
             return
 
         s_t = np.asarray([s[0] for s in samples])
-        s_f = np.asarray([s[1] for s in raw_samples])
+        s_rf = s_f = np.asarray([s[1] for s in raw_samples])
+        s_true_f = np.asarray([s[1] for s in samples])
         s_z = np.asarray([s[2] for s in samples])
         s_kinz = np.asarray([(self._get_trapq_position(s[0]) or [[0,0,-10]])[0][2] for s in samples])
 
@@ -2062,6 +2067,71 @@ class ProbeEddy:
         else:
             butter_s_t = butter_s_v = None
 
+        # Compute exactly (mostly) how the C code does it, so that the accum
+        # values are identical
+        FREQ_WINDOW_SIZE = 16
+        WMA_D_WINDOW_SIZE = 4
+        s_freq_weight_sum = (FREQ_WINDOW_SIZE * (FREQ_WINDOW_SIZE + 1)) / 2
+
+        c_freq_buffer = np.zeros(FREQ_WINDOW_SIZE, np.uint32)
+        c_wma_d_buf = np.zeros(WMA_D_WINDOW_SIZE, np.int32)
+        c_freq_i = 0
+        c_wma_d_i = 0
+
+        c_last_wma = np.uint32(0)
+        c_last_wma_d_avg = np.int32(0)
+
+        c_tap_accum = np.int32(0)
+
+        c_wmas = np.zeros(len(s_rf), np.uint32)
+        c_wma_ds = np.zeros(len(s_rf), np.int32)
+        c_wma_d_avgs = np.zeros(len(s_rf), np.int32)
+        c_tap_accums = np.zeros(len(s_rf), np.int32)
+
+        # pre-fill so that the values don't blow up
+        for i in range(FREQ_WINDOW_SIZE):
+            c_freq_buffer[i] = s_rf[0]
+
+        for sample_i, rawf in enumerate(np.array(s_rf)):
+            c_freq_buffer[c_freq_i] = rawf
+            c_freq_i = (c_freq_i + 1) % FREQ_WINDOW_SIZE
+
+            c_wma_numerator = np.uint64(0)
+            for i in range(FREQ_WINDOW_SIZE):
+                j = (c_freq_i + i) % FREQ_WINDOW_SIZE
+                weight = np.uint64(i + 1)
+                val = c_freq_buffer[j]
+                c_wma_numerator += val * weight
+
+            c_wma = np.uint32(c_wma_numerator // s_freq_weight_sum)
+            c_wma_d = np.int32(c_wma) - np.int32(c_last_wma)
+
+            c_wma_d_buf[c_wma_d_i] = c_wma_d
+            c_wma_d_i = (c_wma_d_i + 1) % WMA_D_WINDOW_SIZE
+            c_wma_d_avg = np.int32(0)
+            for i in range(WMA_D_WINDOW_SIZE):
+                c_wma_d_avg += c_wma_d_buf[i]
+            c_wma_d_avg = c_wma_d_avg // WMA_D_WINDOW_SIZE
+
+            if c_wma_d_avg < c_last_wma_d_avg:
+                c_tap_accum += c_last_wma_d_avg - c_wma_d_avg
+            else:
+                c_tap_accum = 0
+
+            c_last_wma = c_wma
+            c_last_wma_d_avg = c_wma_d_avg
+
+            c_wmas[sample_i] = c_wma
+            # the first few blow up because they
+            # start at 0 and go up to the large int freqval
+            if sample_i < 32:
+                c_tap_accum = 0
+                c_wma_d_avg = 0
+                c_wma_d = 0
+            c_wma_ds[sample_i] = c_wma_d
+            c_wma_d_avgs[sample_i] = c_wma_d_avg
+            c_tap_accums[sample_i] = c_tap_accum
+
         butter_accum = None
         if butter_s_v is not None:
             # Note: we don't handle freq offset or
@@ -2080,47 +2150,157 @@ class ProbeEddy:
                 butter_accum[bi] = accum_val
                 last_value = bv
 
-        fig, ax_freq = plt.subplots(figsize=(10, 8))
-        ax_z = ax_freq.twinx()
-        ax_signal = ax_freq.twinx()
-        ax_threshold = ax_freq.twinx()
+        import plotly.graph_objects as go
 
-        ax_z.yaxis.grid(True)
-        ax_signal.yaxis.grid(True, linestyle='--', color='blue', alpha=0.2)
-        ax_signal.spines["right"].set_position(("outward", 60))
-        ax_threshold.spines["right"].set_position(("outward", 90))
-
-        ax_freq.plot(s_t, s_f, label="Freq")
-        ax_z.plot(s_t, s_z, label="Z")
-        ax_z.plot(s_t, s_kinz, label="KinZ")
-        ax_signal.plot(butter_s_t, butter_s_v, label="Filter")
-        ax_threshold.plot(butter_s_t, butter_accum, label="Threshold")
+        fig = go.Figure()
 
         if tap_start_time > 0:
-            ax_z.axvline(tap_start_time, color="#0080c0", linestyle="--", linewidth=2)
+            fig.add_shape(
+                type="line",
+                x0=tap_start_time,
+                x1=tap_start_time,
+                y0=0,
+                y1=1,
+                xref="x",
+                yref="paper",
+                line=dict(color="#0080c0", width=2),
+            )
         if trigger_time > 0:
-            ax_z.axvline(trigger_time, color="violet", linestyle="--", linewidth=2)
+            fig.add_shape(
+                type="line",
+                x0=trigger_time,
+                x1=trigger_time,
+                y0=0,
+                y1=1,
+                xref="x",
+                yref="paper",
+                line=dict(color="violet", width=2),
+            )
         if tap_end_time > 0:
-            ax_z.axvline(tap_end_time, color="#0080c0", linestyle="--", linewidth=2)
+            fig.add_shape(
+                type="line",
+                x0=tap_end_time,
+                x1=tap_end_time,
+                y0=0,
+                y1=1,
+                xref="x",
+                yref="paper",
+                line=dict(color="#0080c0", width=2),
+            )
         if tap_threshold > 0:
-            ax_threshold.axhline(tap_threshold, color="gray", linestyle="--", linewidth=1)
+            fig.add_shape(
+                type="line",
+                x0=0,
+                x1=1,
+                y0=tap_threshold,
+                y1=tap_threshold,
+                xref="paper",
+                yref="y3",
+                line=dict(color="gray", width=1, dash="dash"),
+            )
 
-        ax_z.set_xlim(max(0.0, time_len - 0.60), time_len)
+        fig.add_shape(
+            type="line",
+            x0=0,
+            x1=1,
+            y0=tap.probe_z,
+            y1=tap.probe_z,
+            xref="paper",
+            yref="y",
+            line=dict(color="orange", width=1),
+        )
 
-        ax_z.set_ylabel("Z")
-        ax_freq.set_ylabel("Freq")
-        ax_signal.set_ylabel("Signal")
-        ax_threshold.set_ylabel("Threshold")
+        # toolhead and sensor Z
+        fig.add_trace(go.Scatter(x=s_t, y=s_z, mode="lines", name="Z"))
+        fig.add_trace(go.Scatter(x=s_t, y=s_kinz, mode="lines", name="KinZ"))
 
-        ax_freq.set_title(f"Tap {tapnum+1}")
+        # the butter tap if we have the data
+        if butter_s_t is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=butter_s_t,
+                    y=butter_s_v,
+                    mode="lines",
+                    name="signal",
+                    yaxis="y4",
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=butter_s_t,
+                    y=butter_accum,
+                    mode="lines",
+                    line=dict(color="#626b73"),
+                    name="threshold",
+                    yaxis="y3",
+                )
+            )
 
-        lines = ax_z.get_lines() + ax_freq.get_lines() + ax_signal.get_lines() + ax_threshold.get_lines()
-        labels = [line.get_label() for line in lines]
-        fig.legend(lines, labels, loc="upper right")
+        # the frequency value from the sensor, and their WMA
+        fig.add_trace(
+            go.Scatter(
+                x=s_t,
+                y=s_true_f,
+                mode="lines",
+                name="Freq",
+                yaxis="y2",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=s_t,
+                y=c_wmas,
+                mode="lines",
+                name="wma",
+                yaxis="y2",
+                visible="legendonly",
+            )
+        )
 
-        plt.savefig(tapplot_path)
-        plt.close(fig)
+        # the derivative and deriv averages
+        fig.add_trace(
+            go.Scatter(
+                x=s_t,
+                y=c_wma_ds,
+                mode="lines",
+                name="wma_d",
+                yaxis="y3",
+                visible="legendonly",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=s_t,
+                y=c_wma_d_avgs,
+                mode="lines",
+                name="wma_d_avg",
+                yaxis="y3",
+                visible="legendonly",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=s_t,
+                y=c_tap_accums,
+                mode="lines",
+                name="wma_threshold",
+                yaxis="y3",
+                visible="legendonly",
+            )
+        )
 
+        fig.update_xaxes(range=[max(0.0, time_len - 0.60), time_len], autorange=False)
+
+        fig.update_layout(
+            hovermode="x unified",
+            title=dict(text=f"Tap {tapnum}: {tap.probe_z:.3f}"),
+            yaxis=dict(title="Z", side="right"),  # Z axis
+            yaxis2=dict(overlaying="y", title="Freq", tickformat="d", side="left"),  # Freq + WMA
+            yaxis3=dict(overlaying="y", side="left", tickformat="d", position=0.2),  # derivatives, tap accum
+            yaxis4=dict(overlaying="y", side="right", showticklabels=False),  # alt
+            height=800,
+        )
+        fig.write_html(tapplot_path, include_plotlyjs="cdn")
         logging.info(f"Wrote tap plot to {tapplot_path}")
 
 
@@ -2957,15 +3137,14 @@ class ProbeEddyFrequencyMap:
         rmse_htf,
         vels=None,
     ):
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            logging.warning("write_calibration_plot: matplotlib not installed")
+        if not HAS_PLOTLY:
             return
 
         if self._ftoh is None or self._htof is None:
-            logging.warning("write_calibration_plot: null calibration?")
+            logging.warning(f"write_calibration_plot: null calibration?")
             return
+
+        import plotly.graph_objects as go
 
         low_samples = heights <= ProbeEddyFrequencyMap.low_z_threshold
         high_samples = heights >= ProbeEddyFrequencyMap.low_z_threshold - 0.5
@@ -2977,54 +3156,71 @@ class ProbeEddyFrequencyMap:
         else:
             f_to_z_high_err = None
 
-        fig, ax1 = plt.subplots(figsize=(12, 6))
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=times, y=heights, mode="lines", name="Z"))
 
-        # Plot heights
-        ax1.plot(times, heights, label="Z", color="blue")
-        ax1.plot(times[low_samples], self._ftoh(1.0 / freqs[low_samples]),
-                label=f"Z {rmse_fth:.4f}", color="cyan")
+        fig.add_trace(
+            go.Scatter(
+                x=times[low_samples],
+                y=self._ftoh(1.0 / freqs[low_samples]),
+                mode="lines",
+                name=f"Z {rmse_fth:.4f}",
+            )
+        )
 
         if self._ftoh_high is not None:
-            ax1.plot(times[high_samples], self._ftoh_high(1.0 / freqs[high_samples]),
-                    label="Z (high)", color="deepskyblue")
+            fig.add_trace(
+                go.Scatter(
+                    x=times[high_samples],
+                    y=self._ftoh_high(1.0 / freqs[high_samples]),
+                    mode="lines",
+                    name=f"Z (high)",
+                )
+            )
 
-        ax1.set_ylabel("Height (Z)")
-        ax1.set_xlabel("Time")
+        fig.add_trace(go.Scatter(x=times, y=freqs, mode="lines", name="F", yaxis="y2"))
 
-        # Freq axis (y2)
-        ax2 = ax1.twinx()
-        ax2.plot(times, freqs, label="F", color="orange", alpha=0.7)
-        ax2.plot(times[low_samples], 1.0 / self._htof(heights[low_samples]),
-                label=f"F ({rmse_htf:.2f})", color="darkorange", linestyle="--")
-        ax2.set_ylabel("Frequency (F)")
+        fig.add_trace(
+            go.Scatter(
+                x=times[low_samples],
+                y=1.0 / self._htof(heights[low_samples]),
+                mode="lines",
+                name=f"F ({rmse_htf:.2f})",
+                yaxis="y2",
+            )
+        )
 
-        # Error axis (y3)
-        ax3 = ax1.twinx()
-        ax3.spines["right"].set_position(("axes", 1.1))
-        ax3.plot(times[low_samples], f_to_z_low_err, label="Err", color="red")
+        fig.add_trace(
+            go.Scatter(
+                x=times[low_samples],
+                y=f_to_z_low_err,
+                mode="lines",
+                name="Err",
+                yaxis="y3",
+            )
+        )
         if f_to_z_high_err is not None:
-            ax3.plot(times[high_samples], f_to_z_high_err, label="Err (high)", color="salmon")
-        ax3.set_ylabel("Error")
+            fig.add_trace(
+                go.Scatter(
+                    x=times[high_samples],
+                    y=f_to_z_high_err,
+                    mode="lines",
+                    name="Err (high)",
+                    yaxis="y3",
+                )
+            )
 
-        # Velocity axis (y4), if applicable
         if vels is not None:
-            ax4 = ax1.twinx()
-            ax4.spines["right"].set_position(("axes", 1.2))
-            ax4.plot(times, vels, label="V", color="green")
-            ax4.set_ylabel("Velocity (V)")
+            fig.add_trace(go.Scatter(x=times, y=vels, mode="lines", name="V", yaxis="y4"))
 
-        # Combine all legends
-        lines, labels = [], []
-        for ax in [ax1, ax2, ax3] + ([ax4] if vels is not None else []):
-            l, lab = ax.get_legend_handles_labels()
-            lines += l
-            labels += lab
-        ax1.legend(lines, labels, loc="upper left")
-
-        plt.title(f"Calibration for drive current {self.drive_current}")
-        plt.tight_layout()
-        plt.savefig("/tmp/eddy-calibration.png", dpi=300)
-        plt.close()
+        fig.update_layout(
+            hovermode="x unified",
+            title=f"Calibration for drive current {self.drive_current}",
+            yaxis2=dict(title="Freq", overlaying="y", tickformat="d", side="right"),
+            yaxis3=dict(overlaying="y", side="right", position=0.1),
+            yaxis4=dict(overlaying="y", side="right", position=0.2),
+        )
+        fig.write_html("/tmp/eddy-calibration.html")
 
     def freq_to_height(self, freq: float) -> float:
         if self._ftoh is None:
