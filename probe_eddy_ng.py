@@ -14,6 +14,7 @@ import re
 import traceback
 import pickle
 import base64
+import time
 import numpy as np
 import numpy.polynomial as npp
 from itertools import combinations
@@ -1874,7 +1875,7 @@ class ProbeEddy:
 
             while sample_i < max_samples:
                 if self.params.debug:
-                    self.save_samples_path = f"/tmp/tap-samples-{sample_i}.csv"
+                    self.save_samples_path = f"/tmp/tap-samples-{sample_i+1}.csv"
 
                 tap = self.do_one_tap(
                     start_z=tap_start_z,
@@ -1886,7 +1887,12 @@ class ProbeEddy:
                 sample_i += 1
 
                 if write_every_tap_plot:
-                    self._write_tap_plot(tap, sample_i)
+                    try:
+                        t0 = time.time()
+                        self._write_tap_plot(tap, sample_i)
+                        self._log_msg(f"Tap plot: {time.time()-t0}")
+                    except Exception as e:
+                        self._log_error(f"Failed to write tap plot: {e}")
 
                 if tap.error:
                     if "too close to target z" in str(tap.error):
@@ -1918,7 +1924,10 @@ class ProbeEddy:
         finally:
             self.reset_drive_current()
             if write_tap_plot and not write_every_tap_plot:
-                self._write_tap_plot(tap)
+                try:
+                    self._write_tap_plot(tap)
+                except Exception as e:
+                    self._log_error(f"Failed to write tap plot: {e}")
 
         th = self._toolhead
 
@@ -2049,7 +2058,8 @@ class ProbeEddy:
 
         # Any values below 0.0 are suspect because they were not calibrated,
         # and so are just extrapolated from the fit. So just don't show them.
-        s_z = s_z[s_z >= 0.0]
+        s_lowz = np.ma.masked_where(s_z >= 0, s_z)
+        s_z = np.ma.masked_where(s_z < 0, s_z)
 
         time_start = s_t.min()
 
@@ -2096,21 +2106,29 @@ class ProbeEddy:
 
         ax_z.yaxis.grid(True)
         ax_signal.yaxis.grid(True, linestyle='--', color='blue', alpha=0.2)
-        ax_signal.spines["right"].set_position(("outward", 60))
-        ax_threshold.spines["right"].set_position(("outward", 90))
+        ax_signal.spines["right"].set_position(("outward", 30))
+        ax_threshold.spines["right"].set_position(("outward", 60))
 
-        ax_freq.plot(s_t, s_f, label="Freq")
-        ax_z.plot(s_t, s_z, label="Z")
-        ax_z.plot(s_t, s_kinz, label="KinZ")
-        ax_signal.plot(butter_s_t, butter_s_v, label="Filter")
-        ax_threshold.plot(butter_s_t, butter_accum, label="Threshold")
+        (c_red, c_lt_red) = ('#9e4058', '#C2697F')
+        (c_orange, c_lt_orange) = ('#d0641e', '#E68E54')
+        (c_yellow, c_lt_yellow) = ('#f9ab0e', '"#FBC559')
+        (c_green, c_lt_green) = ('#589e40', '#7FC269')
+        (c_blue, c_lt_blue) = ('#2c3778', '#4151B0')
+        (c_purple, c_lt_purple) = ('#513965', '#785596')
+
+        ax_freq.plot(s_t, s_f, label="Freq", color=c_orange)
+        ax_z.plot(s_t, s_z, label="Z", color=c_blue)
+        ax_z.plot(s_t, s_lowz, label="Z (interp)", color=c_lt_blue, linestyle='--', alpha=0.3)
+        ax_z.plot(s_t, s_kinz, label="KinZ", color=c_lt_red)
+        ax_signal.plot(butter_s_t, butter_s_v, label="Filter", color=c_green)
+        ax_threshold.plot(butter_s_t, butter_accum, label="Threshold", color='#666666')
 
         if tap_start_time > 0:
-            ax_z.axvline(tap_start_time, color="#0080c0", linestyle="--", linewidth=2)
+            ax_z.axvline(tap_start_time, color=c_orange, linestyle="--", linewidth=1)
         if trigger_time > 0:
-            ax_z.axvline(trigger_time, color="violet", linestyle="--", linewidth=2)
+            ax_z.axvline(trigger_time, color="violet", linestyle="--", linewidth=1)
         if tap_end_time > 0:
-            ax_z.axvline(tap_end_time, color="#0080c0", linestyle="--", linewidth=2)
+            ax_z.axvline(tap_end_time, color=c_orange, linestyle="--", linewidth=1)
         if tap_threshold > 0:
             ax_threshold.axhline(tap_threshold, color="gray", linestyle="--", linewidth=1)
 
@@ -2127,7 +2145,7 @@ class ProbeEddy:
         labels = [line.get_label() for line in lines]
         fig.legend(lines, labels, loc="upper right")
 
-        plt.savefig(tapplot_path)
+        plt.savefig(tapplot_path, dpi=150)
         plt.close(fig)
 
         logging.info(f"Wrote tap plot to {tapplot_path}")
