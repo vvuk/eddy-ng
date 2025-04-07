@@ -2771,7 +2771,7 @@ class ProbeEddySampler:
             raise self._printer.command_error("Update samples didn't compute heights")
 
         self.eddy._log_debug(
-            f"find_height_at_time: {len(self.times)} samples, time range {self.times[0][0]:.3f} to {self.times[-1][0]:.3f}"
+                f"find_height_at_time: looking between {start_time:.3f}s-{end_time:.3f}s, inside {len(self.times)} samples, time range {self.times[0]:.3f}s to {self.times[-1]:.3f}s"
         )
 
         # find the first sample that is >= start_time
