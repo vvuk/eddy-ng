@@ -996,7 +996,7 @@ class ProbeEddy:
             sampler.wait_for_sample_at_time(now + (duration + self._sensor._ldc_settle_time))
             sampler.finish()
 
-        if sampler.count == 0:
+        if sampler.height_count == 0:
             return ProbeEddyProbeResult([])
 
         etime = sampler.times[-1]
@@ -1095,6 +1095,9 @@ class ProbeEddy:
             self._z_not_homed()
             return
 
+        debug = 1 if self.params.debug else 0
+        debug = gcmd.get_int("DEBUG", debug) == 1
+
         # We just did a ManualProbeHelper, so we're going to zero the z-axis
         # to make the following code easier, so it can assume z=0 is actually real zero.
         th = self._printer.lookup_object("toolhead")
@@ -1150,8 +1153,8 @@ class ProbeEddy:
                 self.params.probe_speed,
                 self.params.lift_speed,
                 drive_current,
-                report_errors=False,
-                write_debug_files=False,
+                report_errors=debug,
+                write_debug_files=debug,
             )
 
             homing_req_min = 0.5
@@ -1332,6 +1335,8 @@ class ProbeEddy:
         if times is None:
             if report_errors:
                 self._log_error("No samples collected. This could be a hardware issue or an incorrect drive current.")
+            else:
+                self._log_warning("Warning: no samples collected.")
             return None, None, None
 
         # and build a map
@@ -1367,7 +1372,7 @@ class ProbeEddy:
             sampler.finish()
 
         # the samples are a list of [print_time, freq, dummy_height] tuples
-        if sampler.count == 0:
+        if sampler.raw_count == 0:
             return None, None, None, None
 
         freqs = []
@@ -1375,7 +1380,9 @@ class ProbeEddy:
         times = []
         vels = []
 
-        for s_t, s_freq, _ in samples:
+        for i in range(sampler.raw_count):
+            s_t = sampler.times[i]
+            s_freq = sampler.freqs[i]
             s_pos, s_v = self._get_trapq_position(s_t)
             s_z = s_pos[2]
             if first_sample_time < s_t < last_sample_time and s_z >= z_target:
@@ -2567,7 +2574,7 @@ class ProbeEddySampler:
         return len(self.times)
 
     @property
-    def count(self):
+    def height_count(self):
         return len(self.heights) if self.heights else 0
 
     # this is just a handy way to communicate values between different parts of the system,
