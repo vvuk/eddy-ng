@@ -1702,7 +1702,10 @@ class ProbeEddy:
                     th.manual_move([None, None, start_z], lift_speed)
 
                 # If just sensor errors, let the caller handle it
-                self._log_error(f"Tap failed with Z at {finish_z:.3f}")
+                if finish_z is None:
+                    self._log_error(f"Tap failed: {err}")
+                else:
+                    self._log_error(f"Tap failed with Z at {finish_z:.3f}: {err}")
                 if "Sensor error" or "Probe completed movement" or "Probe triggered prior" in str(err):
                     return ProbeEddy.TapResult(
                         error=err,
