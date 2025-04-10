@@ -1655,9 +1655,6 @@ class ProbeEddy:
 
         error = None
 
-        probe_z = None
-        finish_z = None
-
         try:
             # configure the endstop for tap (gets reset at the end of a tap sequence,
             # also in finally just in case
@@ -1698,14 +1695,12 @@ class ProbeEddy:
                     raise self._printer.command_error("Probing failed due to printer shutdown")
 
                 # in case of failure don't leave the toolhead in a bad spot (i.e. in bed)
-                if th.get_position()[2] < 1.0:
+                finish_z = th.get_position()[2]
+                if finish_z < 1.0:
                     th.manual_move([None, None, start_z], lift_speed)
 
                 # If just sensor errors, let the caller handle it
-                if finish_z is None:
-                    self._log_error(f"Tap failed: {err}")
-                else:
-                    self._log_error(f"Tap failed with Z at {finish_z:.3f}: {err}")
+                self._log_error(f"Tap failed with Z at {finish_z:.3f}: {err}")
                 if "Sensor error" or "Probe completed movement" or "Probe triggered prior" in str(err):
                     return ProbeEddy.TapResult(
                         error=err,
