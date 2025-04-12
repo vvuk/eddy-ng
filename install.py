@@ -8,16 +8,52 @@ from pathlib import Path
 
 IS_MAC = os.path.isdir("/System/Library")
 
+SED_IN_PLACE_ARG = "-i ''" if IS_MAC else "-i"
+FILES_TO_COPY = {
+    "eddy-ng/sensor_ldc1612_ng.c": "src",
+    "probe_eddy_ng.py": "klippy/extras",
+    "ldc1612_ng.py": "klippy/extras"
+}
+
 
 def get_script_dir():
     return os.path.dirname(os.path.realpath(__file__))
 
 
+def uninstall_klipper(target_dir: str):
+    for src_file, dest_dir in FILES_TO_COPY.items():
+        dest_path = os.path.join(target_dir, dest_dir)
+        dest_file = os.path.join(dest_path, os.path.basename(src_file))
+        if os.path.islink(dest_file) or os.path.isfile(dest_file):
+            print(f"Removing {dest_file}")
+            os.remove(dest_file)
+        else:
+            print(f"File {dest_file} does not exist. Skipping.")
+
+    print("Unpatching src/Makefile...")
+    makefile_path = os.path.join(target_dir, "src/Makefile")
+    os.system(f"sed {SED_IN_PLACE_ARG} 's, sensor_ldc1612_ng.c,,' '{makefile_path}'")
+
+    print("Unpatching klippy/extras/bed-mesh.py...")
+    bed_mesh_path = os.path.join(target_dir, "klippy/extras/bed_mesh.py")
+    os.system(
+        f"sed {SED_IN_PLACE_ARG} 's,\"eddy\" in probe_name #eddy-ng,probe_name.startswith(\"probe_eddy_current\"),' '{bed_mesh_path}'"
+    )
+    return
+
+
 def install_kalico(target_dir: str, uninstall: bool, copy: bool):
-    print("Congrats, you're running Kalico!")
+    if not uninstall:
+        print("Congrats, you're running Kalico!")
+        print("================================")
 
     python_module_path = os.path.join(target_dir, "klippy/plugins/probe_eddy_ng")
     firmware_module_path = os.path.join(target_dir, "src/extras/eddy-ng")
+
+    old_module_path = os.path.join(target_dir, "klippy/extras/probe_eddy_ng.py")
+    if os.path.islink(old_module_path) or os.path.isfile(old_module_path):
+        print("Uninstalling old installation...")
+        uninstall_klipper(target_dir)
 
     if os.path.exists(python_module_path) or os.path.islink(python_module_path):
         if not os.path.islink(python_module_path):
@@ -47,36 +83,10 @@ def install_kalico(target_dir: str, uninstall: bool, copy: bool):
     print("from the firmware extras in menuconfig.")
     print("(There's no need to run install again after eddy-ng updates.)")
 
-
 def install_klipper(target_dir: str, uninstall: bool, copy: bool):
-    FILES_TO_COPY = {
-        "eddy-ng/sensor_ldc1612_ng.c": "src",
-        "probe_eddy_ng.py": "klippy/extras",
-        "ldc1612_ng.py": "klippy/extras"
-    }
-
-    sed_in_place_arg = "-i ''" if IS_MAC else "-i"
-
     if uninstall:
         print("Uninstalling files...")
-        for src_file, dest_dir in FILES_TO_COPY.items():
-            dest_path = os.path.join(target_dir, dest_dir)
-            dest_file = os.path.join(dest_path, os.path.basename(src_file))
-            if os.path.isfile(dest_file):
-                print(f"Removing {dest_file}")
-                os.remove(dest_file)
-            else:
-                print(f"File {dest_file} does not exist. Skipping.")
-
-        print("Unpatching src/Makefile...")
-        makefile_path = os.path.join(target_dir, "src/Makefile")
-        os.system(f"sed {sed_in_place_arg} 's, sensor_ldc1612_ng.c,,' '{makefile_path}'")
-
-        print("Unpatching klippy/extras/bed-mesh.py...")
-        bed_mesh_path = os.path.join(target_dir, "klippy/extras/bed_mesh.py")
-        os.system(
-            f"sed {sed_in_place_arg} 's,\"eddy\" in probe_name #eddy-ng,probe_name.startswith(\"probe_eddy_current\"),' '{bed_mesh_path}'"
-        )
+        uninstall_klipper(target_dir)
         return
 
     print("Installing files...")
@@ -97,12 +107,12 @@ def install_klipper(target_dir: str, uninstall: bool, copy: bool):
 
     print("Patching src/Makefile...")
     makefile_path = os.path.join(target_dir, "src/Makefile")
-    os.system(f"sed {sed_in_place_arg} 's,sensor_ldc1612.c$,sensor_ldc1612.c sensor_ldc1612_ng.c,' '{makefile_path}'")
+    os.system(f"sed {SED_IN_PLACE_ARG} 's,sensor_ldc1612.c$,sensor_ldc1612.c sensor_ldc1612_ng.c,' '{makefile_path}'")
 
     print("Patching klippy/extras/bed-mesh.py...")
     bed_mesh_path = os.path.join(target_dir, "klippy/extras/bed_mesh.py")
     os.system(
-        f"sed {sed_in_place_arg} 's,probe_name.startswith(\"probe_eddy_current\"),\"eddy\" in probe_name #eddy-ng,' '{bed_mesh_path}'"
+        f"sed {SED_IN_PLACE_ARG} 's,probe_name.startswith(\"probe_eddy_current\"),\"eddy\" in probe_name #eddy-ng,' '{bed_mesh_path}'"
     )
 
 
