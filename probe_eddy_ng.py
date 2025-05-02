@@ -392,7 +392,7 @@ class ProbeEddyProbeResult:
     @property
     def stddev(self):
         stddev_sum = np.sum([(s - self.value) ** 2.0 for s in self.samples])
-        return (stddev_sum / len(self.samples)) ** 0.5
+        return float((stddev_sum / len(self.samples)) ** 0.5)
 
     @classmethod
     def make(cls, times: List[float], heights: List[float], errors: int = 0) -> ProbeEddyProbeResult:
@@ -2747,16 +2747,17 @@ class ProbeEddySampler:
         interval_heights = []
         i = 0
         for iv_start, iv_end in intervals:
-            # find start time of interval
             while i < num_samples and times[i] < iv_start:
                 i += 1
-            if i == num_samples:
-                raise self._printer.command_error(f"No samples in time range {iv_start}-{iv_end}")
-
             istart = i
+
             while i < num_samples and times[i] < iv_end:
                 i += 1
-            iend = i-1
+            iend = i
+
+            if istart == iend:
+                # no samples in this range
+                raise self._printer.command_error(f"No samples in time range {iv_start}-{iv_end}")
 
             median = np.median(heights[istart:iend])
             interval_heights.append(float(median))
