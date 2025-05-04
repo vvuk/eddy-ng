@@ -1549,9 +1549,30 @@ class ProbeEddy:
         # This is where the probe thinks we are
         now_height = self._sampler.get_height_now()
 
-        # If we can't get a value at all for right now, for safety, just abort.
+        # If we can't get a value at all for right now, make sure the errors
+        # are not "low amplitude"
         if now_height is None:
-            raise self._printer.command_error("Couldn't get any valid samples from sensor.")
+            ale_count = ahe_count = 0
+            status = self._sensor.latched_status_str()
+            for i in range(5):
+                status = self._sensor.latched_status_str()
+                if "ALE" in status:
+                    ale_count += 1
+                elif "AHE" in status:
+                    ahe_count += 1
+
+            if ale_count == 0 and ahe_count == 0:
+                raise self._printer.command_error(f"Got errors from sensor during homing, last status: {status}")
+
+            if ale_count > 0 and ahe_count > 0:
+                raise self._printer.command_error(f"Got mixed amplitude errors from sensor during homing, last status: {status}")
+
+            if ahe_count > 0:
+                self._log_info(f"probe_to_start_position_unhomed: AHE in status ({status}), assuming high and ignoring")
+                return
+
+            self._log_info(f"probe_to_start_position_unhomed: ALE in status ({status}), assuming too low")
+            now_height = 0.0
 
         self._log_debug(f"probe_to_start_position_unhomed: now: {now_height} (start {start_height})")
         if abs(now_height - start_height) <= start_height_ok_factor:

@@ -335,17 +335,19 @@ class LDC1612_ng:
 
     def data_error_to_str(self, d: int):
         err_bits = [
-            "Under-range Error",
-            "Over-range Error",
-            "Watchdog Error",
-            "Amplitude Error",
+            "Under-range",
+            "Over-range",
+            "Watchdog",
+            "Amplitude",
         ]
         d = d >> 12  # shift out the data bits
+        if d == 0:
+            return ""
         errors = []
         for bit, err in enumerate(err_bits):
             if d & (1 << bit):
                 errors.append(err)
-        return " ".join(errors)
+        return "Errors: " + " ".join(errors)
 
     def read_one_value(self):
         self._init_chip()
