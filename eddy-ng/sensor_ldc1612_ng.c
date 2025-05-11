@@ -219,6 +219,16 @@ static void check_sos_tap(struct ldc1612_ng* ld, uint32_t data, uint32_t time);
 //
 static struct task_wake ldc1612_ng_wake;
 
+static void
+spin_us(uint32_t us)
+{
+    uint32_t timeout = timer_read_time() + timer_from_us(us);
+    for (;;) {
+        if (!timer_is_before(timer_read_time(), timeout))
+            break;
+    }
+}
+
 static int
 check_intb_asserted(struct ldc1612_ng *ld)
 {
@@ -328,9 +338,6 @@ config_ldc1612_ng(uint32_t oid, uint32_t i2c_oid, uint8_t product, int32_t intb_
     case PRODUCT_CARTOGRAPHER:
         ld->sensor_cvt = 24000000.0f / (float)(1<<28);
 
-        // This enables the ldc1612 (CS?)
-        gpio_out_setup(GPIO('A', 15), 0);
-
         // The Cartographer hardware uses a timer in the STM32F0
         // to generate a 24MHz reference clock for the ldc1612.
         // Uses a new _with_max setup here because otherwise we
@@ -338,6 +345,14 @@ config_ldc1612_ng(uint32_t oid, uint32_t i2c_oid, uint8_t product, int32_t intb_
         // configured from the python side but that requires
         // adding a bunch of new commands.
         gpio_pwm_setup_with_max(GPIO('B', 4), 1, 1, 2);
+
+        spin_us(10000);
+
+        // This enables the ldc1612; could be tied to the
+        // shutdown pin?
+        gpio_out_setup(GPIO('A', 15), 0);
+
+        spin_us(50000);
 
         // There's a LED -- do something with it in the future,
         // showing homing progress
