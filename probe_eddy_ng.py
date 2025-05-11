@@ -3350,7 +3350,7 @@ class BigfootProbe:
         th.wait_moves()
 
         def scan_between(start, end):
-            th.manual_move([start[0], start[1], z], speed)
+            th.manual_move([start[0], start[1], z], move_speed)
             th.dwell(0.250)
             tstart = th.get_last_move_time()
             th.manual_move([end[0], end[1], z], speed)

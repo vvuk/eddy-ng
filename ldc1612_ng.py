@@ -124,6 +124,8 @@ class LDC1612_ng:
         self._deglitch: str = config.get("ldc_deglitch", "default").lower()
         self._data_rate: int = config.getint("samples_per_second", 250, minval=50)
         self._ldc_settle_time = min(self._ldc_settle_time, 1.0 / self._data_rate)
+        self._ldc_settle_time = config.getfloat("ldc_settle_time", self._ldc_settle_time)
+        self._ldc_offset: int = config.getint("ldc_offset", 0)
 
         # Setup mcu sensor_ldc1612 bulk query code
         self._i2c = bus.MCU_I2C_from_config(config, default_addr=LDC1612_ADDR, default_speed=400000)
@@ -460,8 +462,9 @@ class LDC1612_ng:
         # This is the TI-recommended register configuration order
         # Setup chip in requested query rate
         rcount0 = self._ldc_freq_ref / (16.0 * (self._data_rate - 4))
+        offset = int(self._ldc_offset * (2**16 / self._ldc_freq_ref))
         self.set_reg(REG_RCOUNT0, int(rcount0 + 0.5))
-        self.set_reg(REG_OFFSET0, 0)
+        self.set_reg(REG_OFFSET0, offset)
         self.set_reg(
             REG_SETTLECOUNT0,
             int(self._ldc_settle_time * self._ldc_freq_ref / 16.0 + 0.5),
