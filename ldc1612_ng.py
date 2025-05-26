@@ -126,6 +126,7 @@ class LDC1612_ng:
         self._ldc_settle_time = min(self._ldc_settle_time, 1.0 / self._data_rate)
         self._ldc_settle_time = config.getfloat("ldc_settle_time", self._ldc_settle_time)
         self._ldc_offset: int = config.getint("ldc_offset", 0)
+        self._ldc_offset_ref: int = 0
 
         # Setup mcu sensor_ldc1612 bulk query code
         self._i2c = bus.MCU_I2C_from_config(config, default_addr=LDC1612_ADDR, default_speed=400000)
@@ -193,6 +194,14 @@ class LDC1612_ng:
             self.cmd_LDC_SET_DC,
             desc=self.cmd_LDC_SET_DC_help,
         )
+        gcode.register_mux_command(
+            "LDC_NG_SET",
+            "CHIP",
+            self._name,
+            self.cmd_LDC_SET,
+            desc="Set various LDC config values"
+        )
+
 
     cmd_LDC_SET_DC_help = "Set LDC1612 DRIVE_CURRENT register (idrive value only)"
 
@@ -280,6 +289,7 @@ class LDC1612_ng:
         return (response[0] << 8) | response[1]
 
     def set_reg(self, reg, val, minclock=0):
+        logging.info(f"set_reg: {reg:2x} {val:8x}")
         self._i2c.i2c_write([reg, (val >> 8) & 0xFF, val & 0xFF], minclock=minclock)
 
     def add_bulk_sensor_data_client(self, cb):
@@ -345,13 +355,15 @@ class LDC1612_ng:
             freq=self.from_ldc_freqval(lastval, ignore_err=True),
         )
 
-    def to_ldc_freqval(self, freq):
-        return int(freq * (1 << 28) / float(self._ldc_freq_ref) + 0.5)
+    def to_ldc_freqval(self, freq, offset=None):
+        if offset is None:
+            offset = self._ldc_offset
+        return int((freq - offset) * (1 << 28) / float(self._ldc_freq_ref) + 0.5)
 
     def from_ldc_freqval(self, val, ignore_err=False):
         if val >= 0x0FFFFFFF and not ignore_err:
             raise self.printer.command_error(f"LDC1612 frequency value has error bits: {hex(val)}")
-        return round(val * (float(self._ldc_freq_ref) / (1 << 28)), 3)
+        return round((val + (self._ldc_offset_ref << 12)) * (float(self._ldc_freq_ref) / (1 << 28)), 3)
 
     #
     # Homing
@@ -425,9 +437,10 @@ class LDC1612_ng:
         sect_bytes = [b for b in struct.pack("<6f", *sect_vals)]
         self._ldc1612_ng_set_sos_section.send([self._oid, sect_num, sect_bytes])
 
-    # The value that freqvals are multiplied by to get a float frequency
-    def freqval_conversion_value(self):
-        return float(self._ldc_freq_ref) / (1 << 28)
+    # The value that should be added to freqvals and multiplied by
+    # to get an actual frequency
+    def freqval_conversion_values(self):
+        return self._ldc_offset_ref << 12, float(self._ldc_freq_ref) / (1 << 28)
 
     def _verify_chip(self):
         # In case of miswiring, testing LDC1612 device ID prevents treating
@@ -440,6 +453,53 @@ class LDC1612_ng:
                 "This is generally indicative of connection problems\n"
                 "(e.g. faulty wiring) or a faulty ldc1612 chip." % (manuf_id, dev_id, LDC1612_MANUF_ID, LDC1612_DEV_ID)
             )
+
+    def cmd_LDC_SET(self, gcmd):
+        offset = gcmd.get_float("OFFSET", None)
+        rcount = gcmd.get_float("RCOUNT", None, above=0.0)
+        deglitch = gcmd.get("DEGLITCH", None)
+        settle = gcmd.get_float("SETTLE", None, above=0.0)
+
+        if deglitch is not None:
+            if deglitch == "1mhz":
+                deglitch = DEGLITCH_1_0MHZ
+            elif deglitch == "3.3mhz":
+                deglitch = DEGLITCH_3_3MHZ
+            elif deglitch == "10mhz":
+                deglitch = DEGLITCH_10MHZ
+            elif deglitch == "33mhz":
+                deglitch = DEGLITCH_33MHZ
+            else:
+                raise self.printer.command_error(f"Invalid deglitch value: {deglitch}")
+            self.set_reg(REG_MUX_CONFIG, 0x0208 | deglitch)
+
+        if offset is not None:
+            self._ldc_offset = offset
+            offset = int(offset / self._ldc_freq_ref * (2 ** 16) + 0.5)
+            self._ldc_offset_ref = offset
+            self.set_reg(REG_OFFSET0, offset)
+
+        if settle is not None:
+            self.set_reg(REG_SETTLECOUNT0, int((settle / 1000.0) * self._ldc_freq_ref / 16.0 + 0.5))
+
+        if rcount is not None:
+            self.set_reg(REG_RCOUNT0, int((rcount / 1000.0) * self._ldc_freq_ref / 16.0 + 0.5))
+
+        deglitch_now = self.get_deglitch()
+        if deglitch_now == DEGLITCH_1_0MHZ:
+            deglitch_now = "1mhz"
+        if deglitch_now == DEGLITCH_3_3MHZ:
+            deglitch_now = "3.3mhz"
+        if deglitch_now == DEGLITCH_10MHZ:
+            deglitch_now = "10mhz"
+        if deglitch_now == DEGLITCH_33MHZ:
+            deglitch_now = "33mhz"
+
+        offset_now = round(self.read_reg(REG_OFFSET0) / (2 ** 16) * self._ldc_freq_ref)
+        settle_now = self.read_reg(REG_SETTLECOUNT0) * 16.0 / self._ldc_freq_ref * 1000.0
+        rcount_now = self.read_reg(REG_RCOUNT0) * 16.0 / self._ldc_freq_ref * 1000.0
+
+        gcmd.respond_info(f"Offset: {offset_now} settle time: {settle_now:.6f}ms rcount: {rcount_now:.6f}ms deglitch: {deglitch_now}")
 
     def _init_chip(self):
         if self._chip_initialized:
@@ -462,7 +522,9 @@ class LDC1612_ng:
         # This is the TI-recommended register configuration order
         # Setup chip in requested query rate
         rcount0 = self._ldc_freq_ref / (16.0 * (self._data_rate - 4))
-        offset = int(self._ldc_offset * (2**16 / self._ldc_freq_ref))
+        offset = int(self._ldc_offset * (2 ** 16) / self._ldc_freq_ref + 0.5)
+        self._ldc_offset_ref = offset
+
         self.set_reg(REG_RCOUNT0, int(rcount0 + 0.5))
         self.set_reg(REG_OFFSET0, offset)
         self.set_reg(

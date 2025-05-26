@@ -264,6 +264,7 @@ class ProbeEddyParams:
     # whether to print lots of verbose debug info to the log
     debug: bool = True
     bigfoot: bool = False
+    bigfoot_scan_position: list[float] | None = None
 
     tap_trigger_safe_start_height: float = 1.5
 
@@ -340,6 +341,8 @@ class ProbeEddyParams:
         self.write_every_tap_plot = config.getboolean("write_every_tap_plot", self.write_every_tap_plot)
         self.debug = config.getboolean("debug", self.debug)
         self.bigfoot = config.getboolean("bigfoot", self.bigfoot)
+        if self.bigfoot:
+            self.bigfoot_scan_position = config.getfloatlist("bigfoot_scan_position", count=3, default=None)
 
         self.max_errors = config.getint("max_errors", self.max_errors)
 
@@ -2649,10 +2652,10 @@ class ProbeEddySampler:
         if len(self.freqs) == len(self.raw_freqs):
             return
 
-        conv_ratio = self._sensor.freqval_conversion_value()
+        conv_add, conv_mul = self._sensor.freqval_conversion_values()
 
         start_idx = len(self.freqs)
-        freqs_np = np.asarray(self.raw_freqs[start_idx:]) * conv_ratio
+        freqs_np = (np.asarray(self.raw_freqs[start_idx:]) + conv_add) * conv_mul
         self.freqs.extend(freqs_np.tolist())
 
         if self._fmap is not None:
@@ -3329,16 +3332,20 @@ class BigfootProbe:
             self.eddy._log_error(f"BIGFOOT_SCAN error: {e}")
 
     def cmd_BIGFOOT_SCAN_actual(self, gcmd):
-        x: float | None = gcmd.get_float("X", None)
-        y: float | None = gcmd.get_float("Y", None)
-        z: float | None = gcmd.get_float("Z", None)
+        if self.eddy.params.bigfoot_scan_position:
+            x, y, z = self.eddy.params.bigfoot_scan_position
+        else:
+            x, y, z = None, None, None
+        x = gcmd.get_float("X", x)
+        y = gcmd.get_float("Y", y)
+        z = gcmd.get_float("Z", z)
         if x is None or y is None or z is None:
             raise self._printer.command_error("BIGFOOT_SCAN requires X, Y, and Z")
 
         radius = gcmd.get_float("RADIUS", 5.0)
 
         move_speed = gcmd.get_float("MOVE_SPEED", 100.0)
-        speed = gcmd.get_float("SPEED", 10.0)
+        speed = gcmd.get_float("SPEED", self.eddy.params.probe_speed)
 
         th: ToolHead = cast(ToolHead, self._printer.lookup_object("toolhead"))
         kin = th.get_kinematics()
@@ -3436,7 +3443,7 @@ class BigfootProbe:
 
         x_result, x_range, x_sample_count, x_run_count = compute_closest_point('x', tstart, tend)
         write_debug('x', tstart, tend)
-        self.eddy._log_msg(f"BIGFOOT_SCAN: x range {x_range[0]:.3f} to {x_range[1]:.3f}, {x_run_count} samples")
+        self.eddy._log_msg(f"BIGFOOT_SCAN: x range {x_range[0]:.3f} to {x_range[1]:.3f} over {tend-tstart:.3f}s, {x_sample_count} samples, {x_run_count} best run")
 
         with self.eddy.start_sampler(calculate_heights=False) as sampler:
             tstart, tend = scan_between([x_result, y - radius], [x_result, y + radius])
@@ -3445,7 +3452,7 @@ class BigfootProbe:
 
         y_result, y_range, y_sample_count, y_run_count = compute_closest_point('y', tstart, tend)
         write_debug('y', tstart, tend)
-        self.eddy._log_msg(f"BIGFOOT_SCAN: y range {y_range[0]:.3f} to {y_range[1]:.3f}, {y_run_count} samples")
+        self.eddy._log_msg(f"BIGFOOT_SCAN: y range {y_range[0]:.3f} to {y_range[1]:.3f} over {tend-tstart:.3f}s, {y_sample_count} samples, {y_run_count} best run")
 
         self.eddy._log_msg(f"BIGFOOT_SCAN: center: {x_result:.3f}, {y_result:.3f}")
 
