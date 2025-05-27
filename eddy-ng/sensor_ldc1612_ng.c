@@ -15,7 +15,6 @@
 #include "command.h" // DECL_COMMAND
 #include "i2ccmds.h" // i2cdev_oid_lookup
 #include "sched.h" // DECL_TASK
-#include "sensor_bulk.h" // sensor_bulk_report
 #include "trsync.h" // trsync_do_trigger
 
 #if !defined(LDC_DEBUG)
@@ -45,9 +44,6 @@ enum {
     // vs. just polling
     LDC_HAVE_INTB = 1<<1,
 };
-
-// Number of bytes in each ldc1612 sample. Always 4.
-#define BYTES_PER_SAMPLE 4
 
 // should match ldc1612_ng.py
 #define HOME_MODE_NONE 0
@@ -91,39 +87,12 @@ enum {
 
 // Homing configuration
 #define FREQ_WINDOW_SIZE 16
-#define WMA_D_WINDOW_SIZE 4
 
 #define MAX_SOS_SECTIONS 4
 
 struct sosfilter_sos {
     uint8_t num_sections;
     float sos[MAX_SOS_SECTIONS*6];
-};
-
-struct ldc1612_ng_homing_wma_tap {
-    // the tap detection threshold: specifically, the total downward
-    // change in the frequency derivative before we see a direction
-    // reveral (the windowed moving average of the derivative of the wmd
-    // to be exact)
-    int32_t tap_threshold;
-
-    // number of samples to ignore for detection (to avoid spikes before
-    // we fill buffers)
-    uint8_t init_sample_count;
-
-    // frequencies are always positive, as is their average
-    // the derivative however is signed
-    uint32_t freq_buffer[FREQ_WINDOW_SIZE];
-    int32_t wma_d_buf[WMA_D_WINDOW_SIZE];
-    // current index in freq/deriv buffers
-    uint8_t freq_i;
-    uint8_t wma_d_i;
-
-    uint32_t wma; // last computed weighted moving average
-    int32_t wma_d_avg; // last computed wma derivative average
-
-    // the wema_d_avg at the start
-    int32_t tap_start_value;
 };
 
 struct ldc1612_ng_homing_sos_tap {
@@ -163,7 +132,6 @@ struct ldc1612_ng_homing {
     uint32_t error;
 
     union {
-        struct ldc1612_ng_homing_wma_tap wma_tap;
         struct ldc1612_ng_homing_sos_tap sos_tap;
     };
 };
@@ -171,7 +139,6 @@ struct ldc1612_ng_homing {
 struct ldc1612_ng {
     struct timer timer;
     struct i2cdev_s *i2c;
-    struct sensor_bulk sb;
     struct gpio_in intb_pin;
 
     uint8_t product;
@@ -199,6 +166,11 @@ struct ldc1612_ng {
 #if SUPPORT_CARTOGRAPHER
     struct gpio_out led_gpio;
 #endif
+
+    #define BUF_COUNT32_MAX ((MESSAGE_PAYLOAD_MAX - 2) / 4)
+    uint8_t buf_next;
+    uint8_t seq_next;
+    uint32_t buffer[BUF_COUNT32_MAX];
 };
 
 void command_config_ldc1612_ng(uint32_t *args);
@@ -211,7 +183,6 @@ static uint_fast8_t ldc1612_ng_timer_event(struct timer* timer);
 static void ldc1612_ng_update(struct ldc1612_ng* ld, uint8_t oid);
 
 static void check_homing(struct ldc1612_ng* ld, uint32_t data, uint32_t time);
-static void check_wma_tap(struct ldc1612_ng* ld, uint32_t data, uint32_t time);
 static void check_sos_tap(struct ldc1612_ng* ld, uint32_t data, uint32_t time);
 
 //
@@ -310,6 +281,19 @@ ldc1612_ng_shutdown(void)
     }
 }
 DECL_SHUTDOWN(ldc1612_ng_shutdown);
+
+static void
+flush_buffer(struct ldc1612_ng *ld, uint8_t oid)
+{
+    if (ld->buf_next == 0)
+        return;
+
+    // Send the buffer
+    sendf("ldc1612_ng_data oid=%c seq=%u data=%*s"
+          , oid, ld->seq_next, ld->buf_next * 4, ld->buffer);
+    ld->seq_next++;
+    ld->buf_next = 0;
+}
 
 static void
 config_ldc1612_ng(uint32_t oid, uint32_t i2c_oid, uint8_t product, int32_t intb_pin)
@@ -434,14 +418,17 @@ command_ldc1612_ng_start_stop(uint32_t *args)
 
     if (ld->rest_ticks == 0) {
         // End measurements
+        flush_buffer(ld, args[0]);
         dprint("ZZZ stop");
         return;
     }
 
     dprint("ZZZ start");
 
-    // Start new measurements query
-    sensor_bulk_reset(&ld->sb);
+    ld->buf_next = 0;
+    ld->seq_next = 0;
+    memset(ld->buffer, 0, sizeof(ld->buffer));
+
     irq_disable();
     ld->timer.waketime = timer_read_time() + ld->rest_ticks;
     sched_add_timer(&ld->timer);
@@ -545,15 +532,11 @@ command_ldc1612_ng_setup_home(uint32_t *args)
     case HOME_MODE_HOME:
         dprint("ZZZ setup home sf=%u tf=%u", start_freq, trigger_freq);
         break;
-    case HOME_MODE_WMA:
-        lh->wma_tap.tap_threshold = tap_threshold >> 16;
-        lh->wma_tap.init_sample_count = FREQ_WINDOW_SIZE * 2;
-        dprint("ZZZ setup wma sf=%u tf=%u tap=%u", start_freq, trigger_freq, tap_threshold);
-        break;
     case HOME_MODE_SOS:
         lh->sos_tap.tap_threshold = tap_threshold / 65536.0f;
         dprint("ZZZ setup sos sf=%u tf=%u tap=%f", start_freq, trigger_freq, lh->sos_tap.tap_threshold);
         break;
+    case HOME_MODE_WMA:
     default:
         shutdown("bad homing mode");
     }
@@ -618,46 +601,12 @@ ldc1612_ng_update(struct ldc1612_ng *ld, uint8_t oid)
 
     switch (ld->homing.mode) {
     case HOME_MODE_HOME: check_homing(ld, data, time); break;
-    case HOME_MODE_WMA: check_wma_tap(ld, data, time); break;
     case HOME_MODE_SOS: check_sos_tap(ld, data, time); break;
     }
 
     // Flush local buffer if needed
     if (ld->sb.data_count + BYTES_PER_SAMPLE > ARRAY_SIZE(ld->sb.data))
         sensor_bulk_report(&ld->sb, oid);
-}
-
-static inline uint32_t
-windowed_moving_average_u32(uint32_t* buf, uint8_t buf_size, uint8_t start_i)
-{
-    // TODO: We can avoid 64-bit integers here by just offseting
-    // the input numbers to ensure that we can always add buf_size values
-    // without overflow into an uint32_t. For frequencies, it should be safe
-    // to subtract the safe_start_freq and just deal with offsets above that,
-    // because ultimately we only care about the derivative.
-    // But this 64-bit math is here for now to keep the logic simple
-    // during development.
-    uint64_t wma_sum = 0;
-    for (uint8_t i = 0; i < buf_size; i++) {
-        uint8_t j = (start_i + i) % buf_size;
-        wma_sum += buf[j] * (i+1);
-    }
-
-    uint32_t freq_weight_sum = (buf_size * (buf_size + 1)) / 2;
-
-    return (uint32_t)(wma_sum / freq_weight_sum);
-}
-
-static inline int32_t
-simple_average_i32(int32_t* buf, uint8_t buf_size)
-{
-    // This assumes that the sum can fit in an i32.
-    int32_t sum = 0;
-    for (uint8_t i = 0; i < buf_size; i++) {
-        sum += buf[i];
-    }
-
-    return sum / buf_size;
 }
 
 static float
@@ -782,91 +731,6 @@ check_homing(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
         notify_trigger(ld, time, ld->success_reason);
         lh->trigger_time = time;
         dprint("ZZZ home t=%u f=%u", time, data);
-    }
-}
-
-//
-// Tap detection using a windowed moving average of the frequency derivative
-//
-void
-check_wma_tap(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
-{
-    struct ldc1612_ng_homing *lh = &ld->homing;
-    struct ldc1612_ng_homing_wma_tap *wma_tap = &lh->wma_tap;
-
-    if (!check_error(ld, data, time))
-        return;
-
-    if (!check_safe_start(ld, data, time))
-        return;
-    
-    //
-    // Update the sensor averages and derivatives
-    //
-    // We use a windowed moving average for the frequencies. This seems to give a
-    // better signal after staring at a jupyter notebook with plotly plots
-    // for far too long. Because the values are always increasing as we probe,
-    // WMA undershoots the true value by by a bit but it does a great job of
-    // smoothing out the noise in the sensor.
-    //
-    // Because the sensor is always going to be used at the same ranges,
-    // we could calibrate a fixed offset to apply to the frequency values (by
-    // calculating the average offset between the true centered average vs.
-    // the WMA to get a more accurate number.
-    //
-    // However, the actual frequency value itself is only used for coarse homing;
-    // and because we're not doing any temperature calibration coarse homing
-    // is never going to be super accurate anyway.
-    //
-    // Tap detection is done by looking at the derivative of this value only.
-    //
-
-    // TODO: the below can absolutely be made more efficient, but I'm
-    // keeping it simple while things are dialed in.
-
-    // Helpers to clean up the adds/mods/etc. to make the below more readable
-    #define NEXT_FREQ_I(i) (((i) + 1) % FREQ_WINDOW_SIZE)
-    #define NEXT_WMA_D_I(i) (((i) + 1) % WMA_D_WINDOW_SIZE)
-
-    wma_tap->freq_buffer[wma_tap->freq_i] = data;
-    wma_tap->freq_i = NEXT_FREQ_I(wma_tap->freq_i);
-
-    uint32_t wma = windowed_moving_average_u32(wma_tap->freq_buffer, FREQ_WINDOW_SIZE, wma_tap->freq_i);
-    int32_t wma_d = wma - wma_tap->wma;
-
-    // A simple average of wma_d to smooth it out a bit. Without this,
-    // we'll see some small spikes which will reset the accumulator;
-    // I think this is due to the drip move.
-    wma_tap->wma_d_buf[wma_tap->wma_d_i] = wma_d;
-    wma_tap->wma_d_i = NEXT_WMA_D_I(wma_tap->wma_d_i);
-
-    int32_t wma_d_avg = simple_average_i32(wma_tap->wma_d_buf, WMA_D_WINDOW_SIZE);
-    int32_t last_wma_d_avg = wma_tap->wma_d_avg;
-
-    wma_tap->wma = wma;
-    wma_tap->wma_d_avg = wma_d_avg;
-
-    if (wma_tap->init_sample_count) {
-        wma_tap->init_sample_count--;
-        return;
-    }
-
-    // The core tap threshold computation. If the derivative is
-    // increasing, keep resetting the tap start until we hit a peak.
-
-    if (wma_d_avg > last_wma_d_avg) {
-        // derivative is increasing; reset the accumulator,
-        // and reset the tap time
-        lh->tap_start_time = time;
-        wma_tap->tap_start_value = wma_d_avg;
-        return;
-    }
-
-    if (wma_tap->tap_start_value - wma_d_avg >= wma_tap->tap_threshold) {
-        // Note: we notify with the time the tap started, not the current time
-        notify_trigger(ld, lh->tap_start_time, ld->success_reason);
-        lh->trigger_time = time;
-        dprint("ZZZ tap t=%u n=%u l=%u (f=%u)", lh->tap_start_time, time, wma_tap->tap_start_value - wma_d_avg, data);
     }
 }
 
