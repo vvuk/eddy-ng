@@ -11,12 +11,12 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 try:
-    from klippy.extras import bus, bulk_sensor
+    from klippy.extras import bus
     from klippy.printer import Printer
 
     IS_KALICO = True
 except ImportError:
-    from . import bus, bulk_sensor
+    from . import bus
     from klippy import Printer
 
     IS_KALICO = False
@@ -162,22 +162,8 @@ class LDC1612_ng:
         )
         mcu.register_config_callback(self._build_config)
 
-        self._start_count = 0
         self._chip_initialized = False
-
-        # Bulk sample message reading
-        chip_smooth = self._data_rate * BATCH_UPDATES * 2
-        self._ffreader = bulk_sensor.FixedFreqReader(mcu, chip_smooth, ">I")
-        # Process messages in batches
-        self._batch_bulk = bulk_sensor.BatchBulkHelper(
-            self.printer,
-            self._process_batch,
-            self._start_measurements,
-            self._finish_measurements,
-            BATCH_UPDATES,
-        )
-        hdr = ("time", "frequency", "z")
-        self._batch_bulk.add_mux_endpoint("ldc1612_ng/dump_ldc1612", "sensor", self._name, {"header": hdr})
+        self._data_callback = None
 
         gcode = self.printer.lookup_object("gcode")
         gcode.register_mux_command(
@@ -214,22 +200,18 @@ class LDC1612_ng:
     def cmd_LDC_CALIBRATE(self, gcmd):
         is_in_progress = True
 
-        def handle_batch(msg):
-            return is_in_progress
-
-        self.add_bulk_sensor_data_client(handle_batch)
+        self.start_streaming(lambda _: _)
         toolhead = self.printer.lookup_object("toolhead")
         toolhead.dwell(0.100)
         toolhead.wait_moves()
         old_config = self.read_reg(REG_CONFIG)
         self.set_reg(REG_CONFIG, 0x001 | (1 << 9))
-        toolhead.wait_moves()
         toolhead.dwell(0.100)
         toolhead.wait_moves()
         reg_drive_current0 = self.read_reg(REG_DRIVE_CURRENT0)
+        self.stop_streaming()
+
         self.set_reg(REG_CONFIG, old_config)
-        is_in_progress = False
-        # Report found value to user
         drive_cur = (reg_drive_current0 >> 6) & 0x1F
         gcmd.respond_info(
             f"{self._name}: Estimated reg_drive_current: {drive_cur}\n"
@@ -241,8 +223,6 @@ class LDC1612_ng:
         cmdqueue = self._i2c.get_command_queue()
 
         self._ldc1612_ng_start_stop_cmd = self._mcu.lookup_command("ldc1612_ng_start_stop oid=%c rest_ticks=%u", cq=cmdqueue)
-
-        self._ffreader.setup_query_command("ldc1612_ng_query_bulk_status oid=%c", oid=self._oid, cq=cmdqueue)
 
         self._ldc1612_ng_latched_status_cmd = self._mcu.lookup_query_command(
             "query_ldc1612_ng_latched_status_v2 oid=%c",
@@ -271,6 +251,8 @@ class LDC1612_ng:
             cq=cmdqueue,
         )
 
+        self._mcu.register_response(self._handle_data, "ldc1612_ng_data")
+
         # XXX move this to a totally separate thing at some point
         self._mcu.register_response(self._handle_debug_print, "debug_print")
 
@@ -291,9 +273,6 @@ class LDC1612_ng:
     def set_reg(self, reg, val, minclock=0):
         logging.info(f"set_reg: {reg:2x} {val:8x}")
         self._i2c.i2c_write([reg, (val >> 8) & 0xFF, val & 0xFF], minclock=minclock)
-
-    def add_bulk_sensor_data_client(self, cb):
-        self._batch_bulk.add_client(cb)
 
     def latched_status(self):
         response = self._ldc1612_ng_latched_status_cmd.send([self._oid])
@@ -330,17 +309,19 @@ class LDC1612_ng:
 
     def data_error_to_str(self, d: int):
         err_bits = [
-            "Under-range Error",
-            "Over-range Error",
-            "Watchdog Error",
-            "Amplitude Error",
+            "Under-range",
+            "Over-range",
+            "Watchdog",
+            "Amplitude",
         ]
-        d = d >> 12  # shift out the data bits
+        d = d >> 28
+        if d == 0:
+            return ""
         errors = []
         for bit, err in enumerate(err_bits):
             if d & (1 << bit):
                 errors.append(err)
-        return " ".join(errors)
+        return "[" + " ".join(errors) + "]"
 
     def read_one_value(self):
         self._init_chip()
@@ -361,9 +342,12 @@ class LDC1612_ng:
         return int((freq - offset) * (1 << 28) / float(self._ldc_freq_ref) + 0.5)
 
     def from_ldc_freqval(self, val, ignore_err=False):
-        if val >= 0x0FFFFFFF and not ignore_err:
+        if (val & 0xF0000000) != 0 and not ignore_err:
             raise self.printer.command_error(f"LDC1612 frequency value has error bits: {hex(val)}")
         return round((val + (self._ldc_offset_ref << 12)) * (float(self._ldc_freq_ref) / (1 << 28)), 3)
+
+    def ldc_freqval_error(self, val):
+        return val >> 28
 
     #
     # Homing
@@ -574,55 +558,47 @@ class LDC1612_ng:
         self.set_reg(REG_DRIVE_CURRENT0, cval << 11)
 
     # Start, stop, and process message batches
-    def _start_measurements(self):
+    def start_streaming(self, callback):
+        if self._data_callback is not None:
+            raise self.printer.command_error("start_streaming: already streaming")
+
         self._init_chip()
-        self._start_count += 1
+        self._next_seq = 0
+        self._data_callback = callback
 
-        if self._start_count > 1:
-            logging.info("LDC1612 start count: %d", self._start_count)
-            return
-
-        # Start bulk reading
-        rest_ticks = self._mcu.seconds_to_clock(0.5 / self._data_rate)
+        # Read at twice the RCOUNT rate to make sure we don't miss samples
+        rcount_now_sec = self.read_reg(REG_RCOUNT0) * 16.0 / self._ldc_freq_ref
+        rest_ticks = self._mcu.seconds_to_clock(rcount_now_sec / 2.0)
         self._ldc1612_ng_start_stop_cmd.send([self._oid, rest_ticks])
-        # logging.info("LDC1612 starting '%s' measurements", self._name)
-        # Initialize clock tracking
-        self._ffreader.note_start()
 
-    def _finish_measurements(self):
-        self._start_count -= 1
-
-        if self._start_count > 0:
-            logging.info("LDC1612 stop, start count now: %d", self._start_count)
-            return
-
-        # Halt bulk reading
+    def stop_streaming(self):
         self._ldc1612_ng_start_stop_cmd.send_wait_ack([self._oid, 0])
-        self._ffreader.note_end()
+        self._next_seq = 0
+        self._data_callback = None
         # logging.info("LDC1612 finished '%s' measurements", self._name)
 
-    def _process_batch(self, eventtime):
-        samples = self._ffreader.pull_samples()
-        count = 0
-        err_count = 0
-        last_err_kind = 0
-        for ptime, val in samples:
-            if val > 0x0FFFFFFF:  # high nibble indicates an error
-                err_kind = (val >> 28)
-                err_count += 1
-                if last_err_kind != err_kind:
-                    if self._verbose:
-                        logging.info(f"LDC1612 error: {hex(val)}")
-                    last_err_kind = err_kind
-            else:
-                # val is a raw value
-                samples[count] = (ptime, val)
-                count += 1
-        # remove the samples we didn't fill in because of errors
-        del samples[count:]
-        return {
-            "data": samples,
-            "errors": err_count,
-            "overflows": self._ffreader.get_last_overflows(),
-        }
+    def _handle_data(self, params):
+        seq = params["seq"]
+        data_raw = params["data"]
+
+        if seq != self._next_seq:
+            logging.error(f"LDC1612ng lost data! Expected seq {self._next_seq} got {seq}")
+        self._next_seq = seq+1
+
+        # data is I believe a byte array. Convert to little endian u32 array
+        num_elements = len(data_raw) // 4
+        num_samples = num_elements // 2
+
+        data = struct.unpack(f"<{num_elements}I", data_raw)
+        times = [0.0]*num_samples
+        values = [0]*num_samples
+
+        for i in range(len(data)//2):
+            times[i] = self._clock32_to_print_time(data[i*2])
+            values[i] = data[i*2+1]
+
+        if not self._data_callback:
+            raise self.printer.command_error("DATA WITHOUT CALLBACK")
+
+        self._data_callback(times, values)
 

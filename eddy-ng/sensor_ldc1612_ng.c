@@ -167,16 +167,19 @@ struct ldc1612_ng {
     struct gpio_out led_gpio;
 #endif
 
-    #define BUF_COUNT32_MAX ((MESSAGE_PAYLOAD_MAX - 2) / 4)
+    // max number of pairs of 4-byte items
+    #define BUF_COUNT32_MAX (((MESSAGE_PAYLOAD_MAX - 3) / 8) * 2)
     uint8_t buf_next;
     uint8_t seq_next;
+    uint8_t overflows;
     uint32_t buffer[BUF_COUNT32_MAX];
 };
 
 void command_config_ldc1612_ng(uint32_t *args);
 
-static void read_reg(struct ldc1612_ng* ld, uint8_t reg, uint8_t* res);
-static uint16_t read_reg_status(struct ldc1612_ng* ld);
+static inline void read_reg(struct ldc1612_ng* ld, uint8_t reg, uint8_t* res);
+static inline uint32_t read_reg_data0(struct ldc1612_ng* ld);
+static inline uint16_t read_reg_status(struct ldc1612_ng* ld);
 
 static uint_fast8_t ldc1612_ng_timer_event(struct timer* timer);
 
@@ -190,6 +193,7 @@ static void check_sos_tap(struct ldc1612_ng* ld, uint32_t data, uint32_t time);
 //
 static struct task_wake ldc1612_ng_wake;
 
+#if false
 static void
 spin_us(uint32_t us)
 {
@@ -199,6 +203,7 @@ spin_us(uint32_t us)
             break;
     }
 }
+#endif
 
 static int
 check_intb_asserted(struct ldc1612_ng *ld)
@@ -228,7 +233,7 @@ ldc1612_ng_timer_event(struct timer *timer)
     struct ldc1612_ng *ld = container_of(timer, struct ldc1612_ng, timer);
 
     if (ld->flags & LDC_PENDING)
-        ld->sb.possible_overflows++;
+        ld->overflows++;
 
     if (!(ld->flags & LDC_HAVE_INTB) || check_intb_asserted(ld)) {
         ld->flags |= LDC_PENDING;
@@ -256,6 +261,22 @@ read_reg_status(struct ldc1612_ng *ld)
     read_reg(ld, REG_STATUS, data_status);
     ld->last_status = (data_status[0] << 8) | data_status[1];
     return ld->last_status;
+}
+
+// Read data0
+uint32_t
+read_reg_data0(struct ldc1612_ng *ld)
+{
+    uint8_t d[4];
+    read_reg(ld, REG_DATA0_MSB, &d[0]);
+    read_reg(ld, REG_DATA0_LSB, &d[2]);
+    irq_enable();
+
+    uint32_t data = ((uint32_t)d[0] << 24)
+                  | ((uint32_t)d[1] << 16)
+                  | ((uint32_t)d[2] << 8)
+                  | ((uint32_t)d[3]);
+    return data;
 }
 
 // Notify trsync of event
@@ -293,6 +314,7 @@ flush_buffer(struct ldc1612_ng *ld, uint8_t oid)
           , oid, ld->seq_next, ld->buf_next * 4, ld->buffer);
     ld->seq_next++;
     ld->buf_next = 0;
+    ld->overflows = 0;
 }
 
 static void
@@ -389,15 +411,8 @@ command_query_ldc1612_ng_latched_status(uint32_t *args)
     if (ld->rest_ticks == 0) {
         irq_disable();
         status = read_reg_status(ld);
-        uint8_t d[4];
-        read_reg(ld, REG_DATA0_MSB, &d[0]);
-        read_reg(ld, REG_DATA0_LSB, &d[2]);
+        lastval = read_reg_data0(ld);
         irq_enable();
-
-        lastval =   ((uint32_t)d[0] << 24)
-                  | ((uint32_t)d[1] << 16)
-                  | ((uint32_t)d[2] << 8)
-                  | ((uint32_t)d[3]);
     }
 
     sendf("ldc1612_ng_latched_status oid=%c status=%u lastval=%u"
@@ -427,7 +442,7 @@ command_ldc1612_ng_start_stop(uint32_t *args)
 
     ld->buf_next = 0;
     ld->seq_next = 0;
-    memset(ld->buffer, 0, sizeof(ld->buffer));
+    ld->overflows = 0;
 
     irq_disable();
     ld->timer.waketime = timer_read_time() + ld->rest_ticks;
@@ -435,30 +450,6 @@ command_ldc1612_ng_start_stop(uint32_t *args)
     irq_enable();
 }
 DECL_COMMAND(command_ldc1612_ng_start_stop, "ldc1612_ng_start_stop oid=%c rest_ticks=%u");
-
-void
-command_ldc1612_ng_query_bulk_status(uint32_t *args)
-{
-    struct ldc1612_ng *ld = oid_lookup(args[0], command_config_ldc1612_ng);
-
-    if (ld->flags & LDC_HAVE_INTB) {
-        // Check if a sample is pending in the chip via the intb line
-        irq_disable();
-        uint32_t time = timer_read_time();
-        int p = check_intb_asserted(ld);
-        irq_enable();
-        sensor_bulk_status(&ld->sb, args[0], time, 0, p ? BYTES_PER_SAMPLE : 0);
-    } else {
-        // Query sensor to see if a sample is pending
-        uint32_t time1 = timer_read_time();
-        uint16_t status = read_reg_status(ld);
-        uint32_t time2 = timer_read_time();
-
-        uint32_t fifo = status & 0x08 ? BYTES_PER_SAMPLE : 0;
-        sensor_bulk_status(&ld->sb, args[0], time1, time2-time1, fifo);
-    }
-}
-DECL_COMMAND(command_ldc1612_ng_query_bulk_status, "ldc1612_ng_query_bulk_status oid=%c");
 
 #if defined(LDC_DEBUG) && LDC_DEBUG > 0
 void dprint(const char *fmt, ...)
@@ -587,26 +578,25 @@ ldc1612_ng_update(struct ldc1612_ng *ld, uint8_t oid)
     uint32_t time = timer_read_time();
 
     // Read coil0 frequency
-    uint8_t *d = &ld->sb.data[ld->sb.data_count];
+    uint8_t d[4];
     read_reg(ld, REG_DATA0_MSB, &d[0]);
     read_reg(ld, REG_DATA0_LSB, &d[2]);
-    ld->sb.data_count += BYTES_PER_SAMPLE;
-
     uint32_t data =   ((uint32_t)d[0] << 24)
                     | ((uint32_t)d[1] << 16)
                     | ((uint32_t)d[2] << 8)
                     | ((uint32_t)d[3]);
 
     ld->last_read_value = data;
+    ld->buffer[ld->buf_next++] = time;
+    ld->buffer[ld->buf_next++] = data;
 
     switch (ld->homing.mode) {
     case HOME_MODE_HOME: check_homing(ld, data, time); break;
     case HOME_MODE_SOS: check_sos_tap(ld, data, time); break;
     }
 
-    // Flush local buffer if needed
-    if (ld->sb.data_count + BYTES_PER_SAMPLE > ARRAY_SIZE(ld->sb.data))
-        sensor_bulk_report(&ld->sb, oid);
+    if (ld->buf_next >= BUF_COUNT32_MAX)
+      flush_buffer(ld, oid);
 }
 
 static float

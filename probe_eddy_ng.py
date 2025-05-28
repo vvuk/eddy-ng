@@ -1021,7 +1021,7 @@ class ProbeEddy:
 
         first_idx = bisect.bisect_left(sampler.times, stime)
         if first_idx == len(sampler.times):
-            raise self._printer.command_error(f"No samples in time range")
+            raise self._printer.command_error(f"No samples in time range (errors: {sampler.error_counts})")
 
         errors = sampler.error_count
         return ProbeEddyProbeResult.make(sampler.times[first_idx:], sampler.heights[first_idx:], errors=errors)
@@ -2578,6 +2578,7 @@ class ProbeEddySampler:
         self._stopped = False
         self._started = False
         self._errors = 0
+        self._error_counts = [0, 0, 0, 0]
         self._fmap = eddy.map_for_drive_current() if calculate_heights else None
 
         self.times = []
@@ -2612,29 +2613,37 @@ class ProbeEddySampler:
 
     # bulk sample callback for when new data arrives
     # from the probe
-    def _add_hw_measurement(self, msg):
-        if self._stopped:
-            return False
+    def _add_hw_data(self, times, raw_freqs):
+        has_errors = False
+        for rf in raw_freqs:
+            if (rf >> 28) != 0:
+                has_errors = True
+                break
 
-        self._errors += msg["errors"]
-        data = msg["data"]
+        if not has_errors:
+            self.times.extend(times)
+            self.raw_freqs.extend(raw_freqs)
+            return
 
-        # data is (t, fv)
-        if data:
-            times, raw_freqs = zip(*data)
-        else:
-            times, raw_freqs = [], []
+        for i in range(len(times)):
+            t = times[i]
+            rf = raw_freqs[i]
+            err = rf >> 28
+            if err == 0:
+                self.times.append(t)
+                self.raw_freqs.append(rf)
+                continue
 
-        self.times.extend(times)
-        self.raw_freqs.extend(raw_freqs)
-
-        return True
+            self._errors += 1
+            for i in range(4):
+                if err & (1 << i) != 0:
+                    self._error_counts[i] += 1
 
     def start(self):
         if self._stopped:
             raise self._printer.command_error("ProbeEddySampler.start() called after finish()")
         if not self._started:
-            self._sensor.add_bulk_sensor_data_client(self._add_hw_measurement)
+            self._sensor.start_streaming(self._add_hw_data)
             self._started = True
 
     def finish(self):
@@ -2644,6 +2653,7 @@ class ProbeEddySampler:
             raise self._printer.command_error("ProbeEddySampler.finish() called without start()")
         if self.eddy._sampler is not self:
             raise self._printer.command_error("ProbeEddySampler.finish(): eddy._sampler is not us!")
+        self._sensor.stop_streaming()
         self._update_samples()
         self.eddy._sampler_finished(self)
         self._stopped = True
@@ -2665,6 +2675,10 @@ class ProbeEddySampler:
     @property
     def error_count(self):
         return self._errors
+
+    @property
+    def error_counts(self):
+        return list(self._error_counts)
 
     # get the last sampled height
     def get_last_height(self) -> float:
