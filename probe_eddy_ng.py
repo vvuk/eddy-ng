@@ -23,6 +23,8 @@ from itertools import combinations
 from functools import cmp_to_key
 from typing import cast
 
+from scipy.optimize import curve_fit
+
 from dataclasses import dataclass, field
 from typing import (
     Dict,
@@ -570,7 +572,7 @@ class ProbeEddy:
 
     def _log_debug(self, msg):
         if self.params.debug:
-            logging.debug(f"{self._name}: {msg}")
+            logging.info(f"{self._name}: {msg}")
 
     def define_commands(self, gcode, bigfoot: bool = False):
         gcode.register_command("PROBE_EDDY_NG_STATUS", self.cmd_STATUS, self.cmd_STATUS_help)
@@ -589,6 +591,9 @@ class ProbeEddy:
             self.cmd_PROBE_STATIC,
             self.cmd_PROBE_STATIC_help + " (alias for PROBE_EDDY_NG_PROBE_STATIC)",
         )
+
+        gcode.register_command("EDDYNG_STREAM_START", self.cmd_STREAM_START, "")
+        gcode.register_command("EDDYNG_STREAM_STOP", self.cmd_STREAM_STOP, "")
 
         if bigfoot:
             return
@@ -655,12 +660,11 @@ class ProbeEddy:
         )
 
         gcode.register_command("EDDYNG_BED_MESH_EXPERIMENTAL", self.cmd_MESH, "")
-        gcode.register_command("EDDYNG_START_STREAM_EXPERIMENTAL", self.cmd_START_STREAM, "")
-        gcode.register_command("EDDYNG_STOP_STREAM_EXPERIMENTAL", self.cmd_STOP_STREAM, "")
 
     def _handle_command_error(self, gcmd=None):
         try:
             if self._sampler is not None:
+                logging.info("COMMAND ERROR")
                 self._sampler.finish()
         except:
             logging.exception("EDDYng handle_command_error: sampler.finish() failed")
@@ -1479,6 +1483,8 @@ class ProbeEddy:
                 "last_tap_z": float(self._last_tap_z),
             }
         )
+        if self._bigfoot:
+            self._bigfoot.update_status(status)
         return status
 
     # Old Probe interface, for Kalico
@@ -2170,15 +2176,19 @@ class ProbeEddy:
             thtml = time.time() - t0
         self._log_info(f"Wrote tap plot to {tapplot_path_png or ''} {tapplot_path_html or ''}  [took {timg:.1f}, {thtml:.1f}]")
 
-    def cmd_START_STREAM(self, gcmd):
+    def cmd_STREAM_START(self, gcmd):
         self.save_samples_path = "/tmp/stream.csv"
-        self._log_info("Eddy sampling enabled")
-        self.start_sampler()
+        msg = f"Starting stream to {self.save_samples_path}"
+        if not self.calibrated():
+            msg += " (not calibrated)"
+        gcmd.respond_info(msg)
+        self.start_sampler(calculate_heights=self.calibrated())
 
-    def cmd_STOP_STREAM(self, gcmd):
+    def cmd_STREAM_STOP(self, gcmd):
         self._log_info("Eddy sampling finished")
+        sampler = self._sampler
         self._sampler.finish()
-        self._sampler = None
+        gcmd.respond_info(f"Stopped stream ({len(sampler.times)} samples, {sampler.error_count} errors)")
 
 
 
@@ -2658,6 +2668,18 @@ class ProbeEddySampler:
         self.eddy._sampler_finished(self)
         self._stopped = True
 
+    def trim_to_times(self, tstart: float | None = None, tend: float | None = None):
+        if not self._stopped:
+            raise self._printer.command_error("ProbeEddySampler.trim_to_times while sampler was active")
+
+        istart = bisect.bisect_left(self.times, tstart) if tstart else 0
+        iend = bisect.bisect_right(self.times, tend) if tend else len(self.times)
+
+        self.times = self.times[istart:iend]
+        self.freqs = self.freqs[istart:iend]
+        self.raw_freqs = self.raw_freqs[istart:iend]
+        self.heighs = self.heights[istart:iend] if self.heights else None
+
     def _update_samples(self):
         if len(self.freqs) == len(self.raw_freqs):
             return
@@ -2698,15 +2720,18 @@ class ProbeEddySampler:
 
     # Wait until a sample for the given time arrives
     def wait_for_sample_at_time(self, sample_print_time, max_wait_time=0.250, raise_error=True) -> bool:
-        def report_no_samples():
+        self.eddy._log_debug(
+            f"EDDYng waiting for sample at {sample_print_time:.3f} (now: max_wait_time: {max_wait_time:.3f})"
+        )
+        def report_no_samples(waited_for):
             if raise_error:
-                raise self._printer.command_error(f"No samples received for time {sample_print_time:.3f} (waited for {max_wait_time:.3f})")
+                raise self._printer.command_error(f"No samples received for time {sample_print_time:.3f} (waited for {waited_for:.3f})")
             return False
 
         if self._stopped:
             # if we're not getting any more samples, we can check directly
             if len(self.times) == 0:
-                return report_no_samples()
+                return report_no_samples(0.0)
             return self.times[-1] >= sample_print_time
 
         # quick check
@@ -2718,6 +2743,7 @@ class ProbeEddySampler:
         # if sample_print_time is in the future, make sure to wait max_wait_time
         # past the expected time
         if sample_print_time > wait_start_time:
+            self.eddy._log_debug(f"{sample_print_time} > {wait_start_time}; max_wait_time = {max_wait_time} + ({sample_print_time} - {wait_start_time} [= {sample_print_time-wait_start_time}])")
             max_wait_time = max_wait_time + (sample_print_time - wait_start_time)
 
         # this is just a sanity check, there shouldn't be any reason to ever wait this long
@@ -2733,7 +2759,7 @@ class ProbeEddySampler:
         while len(self.times) == 0 or self.times[-1] < sample_print_time:
             now = self.eddy._print_time_now()
             if now - wait_start_time > max_wait_time:
-                return report_no_samples()
+                return report_no_samples(now - wait_start_time)
             self._reactor.pause(self._reactor.monotonic() + 0.010)
 
         if now - wait_start_time > 1.0:
@@ -3332,12 +3358,73 @@ def load_config_prefix(config: ConfigWrapper):
 class BigfootProbe:
     def __init__(self, eddy: ProbeEddy):
         self.eddy = eddy
+        self.last_result = None
+        self.last_offset = None
         self._printer = eddy._printer
         self._sensor = eddy._sensor
+        self._reference = [0.0, 0.0, 0.0]
 
         gcode = self._printer.lookup_object("gcode")
         gcode.register_command("BIGFOOT_SCAN", self.cmd_BIGFOOT_SCAN)
-    
+        gcode.register_command("BIGFOOT_SET_REFERENCE", self.cmd_BIGFOOT_SET_REFERENCE)
+        gcode.register_command("BIGFOOT_SET_TOOL_OFFSET", self.cmd_BIGFOOT_SET_TOOL_OFFSET)
+  
+    def update_status(self, status):
+        if self.last_result:
+            status.update({"bigfoot_scan_result": self.last_result})
+        if self.last_offset:
+            status.update({"bigfoot_scan_offset": self.last_offset})
+
+    def _last_probe_z_result(self):
+        ps = self._printer.lookup_object('probe').get_status(self._printer.get_reactor().monotonic())
+        return ps.get("last_z_result", None)
+
+    def cmd_BIGFOOT_SET_TOOL_OFFSET(self, gcmd):
+        tool_name = gcmd.get("TOOL")
+        x = gcmd.get_float("X", None)
+        y = gcmd.get_float("Y", None)
+        z = gcmd.get_float("Z", None)
+
+        if (x is None or y is None or z is None) and not self.last_offset:
+            raise self._printer.command_error("BIGFOOT_SET_TOOL_OFFSET: need X Y Z if no last scan result")
+ 
+        x = x if x is not None else self.last_offset[0]
+        y = y if y is not None else self.last_offset[1]
+        z = z if z is not None else self.last_offset[2]
+
+        tool = self._printer.lookup_object(f"tool {tool_name}")
+        tool.gcode_x_offset = x
+        tool.gcode_y_offset = y
+        tool.gcode_z_offset = z
+
+        gcmd.respond_info(f"Set tool {tool} offset to {x:.3f} {y:.3f} {z:.3f}")
+
+    def cmd_BIGFOOT_SET_REFERENCE(self, gcmd):
+        clear = gcmd.get
+        x = gcmd.get_float("X", None)
+        y = gcmd.get_float("Y", None)
+        z = gcmd.get_float("Z", None)
+        z_use_probe = gcmd.get_int("Z_USE_PROBE", 0) == 1
+
+        if z_use_probe and z is not None:
+            raise self._printer.command_error("Can't specify both Z and Z_USE_PROBE")
+
+        if (x is None or y is None) and not self.last_result:
+            raise self._printer.command_error("BIGFOOT_SET_REFERENCE: need both X and Y if no last scan result")
+
+        x = x if x is not None else self.last_result[0]
+        y = y if y is not None else self.last_result[1]
+        if z is None:
+            if z_use_probe:
+                z = self._last_probe_z_result()
+                if z is None:
+                    raise self._printer.command_error("BIGFOOT_SET_REFERENCE: no last probe result to use for Z")
+            else:
+                z = 0.0
+
+        self._reference = [x, y, z]
+        gcmd.respond_info(f"BIGFOOT_SCAN reference set to {x:.3f} {y:.3f} {z:.3f}")
+
     def cmd_BIGFOOT_SCAN(self, gcmd):
         try:
             self.cmd_BIGFOOT_SCAN_actual(gcmd)
@@ -3346,7 +3433,13 @@ class BigfootProbe:
             self.eddy._log_error(f"BIGFOOT_SCAN error: {e}")
 
     def cmd_BIGFOOT_SCAN_actual(self, gcmd):
-        if self.eddy.params.bigfoot_scan_position:
+        use_last = gcmd.get_int("USE_LAST", 0) == 1
+        if use_last:
+            if not self.last_result:
+                raise self._printer.command_error("BIGFOOT_SCAN: USE_LAST specified but no last result")
+            x, y = self.last_result
+            z = self.eddy.params.bigfoot_scan_position[2] if self.eddy.params.bigfoot_scan_position else None
+        elif self.eddy.params.bigfoot_scan_position:
             x, y, z = self.eddy.params.bigfoot_scan_position
         else:
             x, y, z = None, None, None
@@ -3356,7 +3449,10 @@ class BigfootProbe:
         if x is None or y is None or z is None:
             raise self._printer.command_error("BIGFOOT_SCAN requires X, Y, and Z")
 
+        z_use_probe = gcmd.get_int("Z_USE_PROBE", 0) == 1
+
         radius = gcmd.get_float("RADIUS", 5.0)
+        passes = gcmd.get_int("PASSES", 2)
 
         move_speed = gcmd.get_float("MOVE_SPEED", 100.0)
         speed = gcmd.get_float("SPEED", self.eddy.params.probe_speed)
@@ -3364,20 +3460,30 @@ class BigfootProbe:
         th: ToolHead = cast(ToolHead, self._printer.lookup_object("toolhead"))
         kin = th.get_kinematics()
 
+        th_z = th.get_position()[2]
+        if th_z < z:
+            th.manual_move([None, None, z], self.eddy.params.lift_speed)
+
+        th.manual_move([x, y, None], move_speed)
         th.manual_move([None, None, z], self.eddy.params.lift_speed)
         th.wait_moves()
 
-        th.manual_move([x, y, z], move_speed)
-        th.wait_moves()
-
-        def scan_between(start, end):
+        def scan_between(start, end, passes):
             th.manual_move([start[0], start[1], z], move_speed)
-            th.dwell(0.250)
+            th.dwell(0.100)
+
             tstart = th.get_last_move_time()
-            th.manual_move([end[0], end[1], z], speed)
-            th.manual_move([start[0], start[1], z], speed)
+            while passes > 0:
+                th.manual_move([end[0], end[1], z], speed)
+                passes -= 1
+                if passes == 0:
+                    break
+                th.manual_move([start[0], start[1], z], speed)
+                passes -= 1
             tend = th.get_last_move_time()
-            th.dwell(0.250)
+
+            th.dwell(0.100)
+            th.wait_moves()
             return tstart, tend
 
         def compute_closest_point(axis, tstart, tend):
@@ -3433,15 +3539,12 @@ class BigfootProbe:
 
             return c_result, [c1, c2], iend - istart, best_len
 
-        def write_debug(axis, tstart, tend):
+        def write_debug(axis):
             mode = "w" if axis == "x" else "a"
             with open("/tmp/bigfoot.csv", mode) as datafile:
                 if axis == "x":
                     datafile.write("axis,time,x,y,z,f,rf\n")
-                istart = bisect.bisect_left(sampler.times, tstart)
-                iend = bisect.bisect_right(sampler.times, tend)
-                for ki in range(iend - istart):
-                    i = istart + ki
+                for i in range(len(sampler.times)):
                     t = sampler.times[i]
                     f = sampler.freqs[i]
                     rf = sampler.raw_freqs[i]
@@ -3449,26 +3552,64 @@ class BigfootProbe:
                     x, y, z = pos if pos is not None else ('', '', '')
                     datafile.write(f"{axis},{t},{x},{y},{z},{f},{rf}\n")
 
-        with self.eddy.start_sampler(calculate_heights=False) as sampler:
-            # first figure out x
-            tstart, tend = scan_between([x - radius, y], [x + radius, y])
-            sampler.wait_for_sample_at_time(th.get_last_move_time() + 0.100)
-            sampler.finish()
+        result = [-math.inf, -math.inf]
 
-        x_result, x_range, x_sample_count, x_run_count = compute_closest_point('x', tstart, tend)
-        write_debug('x', tstart, tend)
-        self.eddy._log_msg(f"BIGFOOT_SCAN: x range {x_range[0]:.3f} to {x_range[1]:.3f} over {tend-tstart:.3f}s, {x_sample_count} samples, {x_run_count} best run")
+        for axindex, axis in enumerate(['x', 'y']):
+            tstart_pos = [x, y]
+            tend_pos = [x, y]
 
-        with self.eddy.start_sampler(calculate_heights=False) as sampler:
-            tstart, tend = scan_between([x_result, y - radius], [x_result, y + radius])
-            sampler.wait_for_sample_at_time(th.get_last_move_time() + 0.100)
-            sampler.finish()
+            tstart_pos[axindex] -= radius
+            tend_pos[axindex] += radius
 
-        y_result, y_range, y_sample_count, y_run_count = compute_closest_point('y', tstart, tend)
-        write_debug('y', tstart, tend)
-        self.eddy._log_msg(f"BIGFOOT_SCAN: y range {y_range[0]:.3f} to {y_range[1]:.3f} over {tend-tstart:.3f}s, {y_sample_count} samples, {y_run_count} best run")
+            with self.eddy.start_sampler(calculate_heights=False) as sampler:
+                tstart, tend = scan_between(tstart_pos, tend_pos, passes)
+                sampler.wait_for_sample_at_time(tend, max_wait_time=1.0)
+                sampler.finish()
+                sampler.trim_to_times(tstart, tend)
 
-        self.eddy._log_msg(f"BIGFOOT_SCAN: center: {x_result:.3f}, {y_result:.3f}")
+                np_times = np.asarray(sampler.times)
+                np_rf = np.asarray(sampler.freqs)
+                np_pos = np.asarray([self.eddy._get_trapq_position(t)[0][axindex] for t in np_times])
+
+                write_debug(axis)
+
+                def gaussian(x, a, x0, sigma, offset):
+                    return a * np.exp(-(x - x0)**2 / (2 * sigma**2)) + offset
+
+                p0 = [np_rf.max() - np_rf.min(),    # a
+                      np_pos[np.argmax(np_rf)],            # x0
+                      (np_pos.max() - np_pos.min()) / 4,          # sigma
+                      np_rf.min()]                          # offset
+
+                bounds = ([0, np_pos.min(), 1e-6, 0],
+                          [np.inf, np_pos.max(), (np_pos.max() - np_pos.min())*2, np.inf])
+
+                popt, _ = curve_fit(gaussian, np_pos, np_rf, p0=p0, bounds=bounds, maxfev=10000)
+                a, x0, sigma, offset = popt
+                val = gaussian(x0, *popt)
+
+                self.eddy._log_msg(f"BIGFOOT_SCAN: {axis} {x0:.3f} (val {val:.6f} sigma {sigma:.6f})  {tend-tstart:.3f}s, {len(sampler.times)} samples")
+                result[axindex] = float(x0)
+
+        # we're moving at speed mm/sec. we're sampling at rcount_sec.
+        rcount_sec = self.eddy._sensor.get_rcount_sec()
+        samples_per_sec = 1.0 / rcount_sec
+        precision = speed / samples_per_sec
+
+        self.eddy._log_msg(f"BIGFOOT_SCAN: center: {result[0]:.3f} {result[1]:.3f} (samp_ms: {rcount_sec*1000.0:.3f} speed: {speed:.3f})")
+
+        z = 0.0
+        if z_use_probe:
+            z = self._last_probe_z_result()
+            if z is None:
+                raise self._printer.command_error("BIGFOOT_SCAN: no last probe result to use for Z")
+
+
+        offset = [result[0] - self._reference[0], result[1] - self._reference[1], z - self._reference[2]]
+        self.eddy._log_msg(f"BIGFOOT_SCAN: offset: {offset[0]:.3f} {offset[1]:.3f} {offset[2]:.3f} (samp_ms: {rcount_sec*1000.0:.3f} speed: {speed:.3f})")
+
+        self.last_result = result
+        self.last_offset = offset
 
 
 

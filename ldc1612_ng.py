@@ -7,8 +7,11 @@
 import math
 import logging
 import struct
+import threading
+import traceback
 from dataclasses import dataclass
 from typing import List, Optional
+import numpy as np
 
 try:
     from klippy.extras import bus
@@ -132,6 +135,8 @@ class LDC1612_ng:
         self._i2c = bus.MCU_I2C_from_config(config, default_addr=LDC1612_ADDR, default_speed=400000)
         self._mcu = mcu = self._i2c.get_mcu()
         self._oid = oid = mcu.create_oid()
+        self._data_lock = threading.Lock()
+        self._pending_data = []
 
         logging.info(f"LDC1612ng {self._name} oid: {oid} i2c_oid {self._i2c.get_oid()}")
 
@@ -164,6 +169,7 @@ class LDC1612_ng:
 
         self._chip_initialized = False
         self._data_callback = None
+        self._data_timer = None
 
         gcode = self.printer.lookup_object("gcode")
         gcode.register_mux_command(
@@ -251,7 +257,7 @@ class LDC1612_ng:
             cq=cmdqueue,
         )
 
-        self._mcu.register_response(self._handle_data, "ldc1612_ng_data")
+        self._mcu.register_response(self._handle_data, "ldc1612_ng_data", self._oid)
 
         # XXX move this to a totally separate thing at some point
         self._mcu.register_response(self._handle_debug_print, "debug_print")
@@ -284,10 +290,10 @@ class LDC1612_ng:
 
     def status_to_str(self, s: int):
         status_bits = [
-            "0",
-            "1",
-            "2",
+            "UNREADONCV3",
+            "UNREADCONV2",
             "UNREADCONV1",
+            "UNREADCONV0",
             "4",
             "5",
             "DRDY",
@@ -298,8 +304,8 @@ class LDC1612_ng:
             "ERR_WD",
             "ERR_OR",
             "ERR_UR",
-            "14",
-            "ERR_CH1",
+            "ERR_CHBIT0",
+            "ERR_CHBIT1",
         ]
         flags = []
         for bit, flag in enumerate(status_bits):
@@ -481,9 +487,12 @@ class LDC1612_ng:
 
         offset_now = round(self.read_reg(REG_OFFSET0) / (2 ** 16) * self._ldc_freq_ref)
         settle_now = self.read_reg(REG_SETTLECOUNT0) * 16.0 / self._ldc_freq_ref * 1000.0
-        rcount_now = self.read_reg(REG_RCOUNT0) * 16.0 / self._ldc_freq_ref * 1000.0
+        rcount_now = self.get_rcount_sec() * 1000.0
 
         gcmd.respond_info(f"Offset: {offset_now} settle time: {settle_now:.6f}ms rcount: {rcount_now:.6f}ms deglitch: {deglitch_now}")
+
+    def get_rcount_sec(self):
+        return self.read_reg(REG_RCOUNT0) * 16.0 / self._ldc_freq_ref
 
     def _init_chip(self):
         if self._chip_initialized:
@@ -558,47 +567,75 @@ class LDC1612_ng:
         self.set_reg(REG_DRIVE_CURRENT0, cval << 11)
 
     # Start, stop, and process message batches
-    def start_streaming(self, callback):
+    def start_streaming(self, callback, callback_interval=0.5):
         if self._data_callback is not None:
             raise self.printer.command_error("start_streaming: already streaming")
 
         self._init_chip()
         self._next_seq = 0
         self._data_callback = callback
+        self._data_interval = callback_interval
+
+        reactor = self.printer.get_reactor()
+        self._data_timer = reactor.register_timer(self._process_data, reactor.monotonic() + callback_interval)
 
         # Read at twice the RCOUNT rate to make sure we don't miss samples
-        rcount_now_sec = self.read_reg(REG_RCOUNT0) * 16.0 / self._ldc_freq_ref
+        rcount_now_sec = self.get_rcount_sec()
         rest_ticks = self._mcu.seconds_to_clock(rcount_now_sec / 2.0)
         self._ldc1612_ng_start_stop_cmd.send([self._oid, rest_ticks])
 
     def stop_streaming(self):
+        traceback.print_stack()
         self._ldc1612_ng_start_stop_cmd.send_wait_ack([self._oid, 0])
+        reactor = self.printer.get_reactor()
+        reactor.unregister_timer(self._data_timer)
+
+        self._process_data(reactor.monotonic())
+
         self._next_seq = 0
         self._data_callback = None
         # logging.info("LDC1612 finished '%s' measurements", self._name)
 
     def _handle_data(self, params):
         seq = params["seq"]
+        overflows = params["ov"]
         data_raw = params["data"]
 
-        if seq != self._next_seq:
-            logging.error(f"LDC1612ng lost data! Expected seq {self._next_seq} got {seq}")
-        self._next_seq = seq+1
+        with self._data_lock:
+            self._pending_data.append([seq, overflows, data_raw])
 
-        # data is I believe a byte array. Convert to little endian u32 array
-        num_elements = len(data_raw) // 4
-        num_samples = num_elements // 2
-
-        data = struct.unpack(f"<{num_elements}I", data_raw)
-        times = [0.0]*num_samples
-        values = [0]*num_samples
-
-        for i in range(len(data)//2):
-            times[i] = self._clock32_to_print_time(data[i*2])
-            values[i] = data[i*2+1]
+    def _process_data(self, eventtime):
+        with self._data_lock:
+            pending_data = self._pending_data
+            self._pending_data = []
 
         if not self._data_callback:
             raise self.printer.command_error("DATA WITHOUT CALLBACK")
 
+        reactor = self.printer.get_reactor()
+
+        times: list[float] = []
+        values: list[int] = []
+
+        for seq, overflows, data_raw in pending_data:
+            if overflows > 0:
+                logging.error(f"LDC1612ng at least {overflows} dropped conversions")
+            if seq != self._next_seq:
+                logging.error(f"LDC1612ng lost data! Expected seq {self._next_seq} got {seq}")
+            self._next_seq = (seq+1) & 0xff
+
+            # data is byte string. Convert to little endian u32 array
+            data = np.frombuffer(data_raw, dtype=np.uint32)
+
+            for i in range(len(data)//2):
+                t = self._clock32_to_print_time(int(data[i*2]))
+                v = int(data[i*2+1])
+                times.append(t)
+                values.append(v)
+            print_time_now = self._mcu.estimated_print_time(reactor.monotonic())
+            logging.info(f"now: {print_time_now} samples: {times[:3]}")
+
         self._data_callback(times, values)
+        return self.printer.get_reactor().monotonic() + self._data_interval
+
 

@@ -17,10 +17,6 @@
 #include "sched.h" // DECL_TASK
 #include "trsync.h" // trsync_do_trigger
 
-#if !defined(LDC_DEBUG)
-#define LDC_DEBUG 0
-#endif
-
 #if CONFIG_MACH_STM32F0
 // For Cartographer
 #include "board/internal.h"
@@ -30,11 +26,33 @@
 #define SUPPORT_CARTOGRAPHER 0
 #endif
 
-#if LDC_DEBUG > 0
+#define LDC_DEBUG 1
+
+#if CONFIG_WANT_EDDY_NG_DEBUG
+#if SUPPORT_CARTOGRAPHER
+#define LDC_DEBUG 1
+#else
+#define LDC_DEBUG 2
+#endif
+#endif
+
+#if !defined(LDC_DEBUG)
+#define LDC_DEBUG 0
+#endif
+
+#if LDC_DEBUG > 1
 #include "printf.h"
 void dprint(const char *fmt, ...);
+#define dprint1(...) do { } while (0)
+#define dprint2 dprint
+#elif LDC_DEBUG > 0
+void dprint(const char *msg);
+#define dprint1 dprint
+#define dprint2(...) do { } while (0)
 #else
 #define dprint(...) do { } while (0)
+#define dprint1(...) do { } while (0)
+#define dprint2(...) do { } while (0)
 #endif
 
 enum {
@@ -73,6 +91,8 @@ enum {
 #define SAMPLE_ERR_OR 0x4
 #define SAMPLE_ERR_WD 0x2
 #define SAMPLE_ERR_AE 0x1
+
+#define STATUS_UNREADCONV0 0x0008
 
 // conversion under range
 #define STATUS_ERR_UR 0x2000
@@ -168,7 +188,7 @@ struct ldc1612_ng {
 #endif
 
     // max number of pairs of 4-byte items
-    #define BUF_COUNT32_MAX (((MESSAGE_PAYLOAD_MAX - 3) / 8) * 2)
+    #define BUF_COUNT32_MAX (((MESSAGE_PAYLOAD_MAX - 4) / 8) * 2)
     uint8_t buf_next;
     uint8_t seq_next;
     uint8_t overflows;
@@ -193,7 +213,6 @@ static void check_sos_tap(struct ldc1612_ng* ld, uint32_t data, uint32_t time);
 //
 static struct task_wake ldc1612_ng_wake;
 
-#if false
 static void
 spin_us(uint32_t us)
 {
@@ -203,7 +222,6 @@ spin_us(uint32_t us)
             break;
     }
 }
-#endif
 
 static int
 check_intb_asserted(struct ldc1612_ng *ld)
@@ -285,7 +303,7 @@ notify_trigger(struct ldc1612_ng *ld, uint32_t time, uint8_t reason)
 {
     ld->homing.mode = 0;
     trsync_do_trigger(ld->ts, reason);
-    dprint("ZZZ notify_trigger: %u at %u", reason, time);
+    dprint2("notify_trigger: %u at %u", reason, time);
 }
 
 void
@@ -310,8 +328,8 @@ flush_buffer(struct ldc1612_ng *ld, uint8_t oid)
         return;
 
     // Send the buffer
-    sendf("ldc1612_ng_data oid=%c seq=%u data=%*s"
-          , oid, ld->seq_next, ld->buf_next * 4, ld->buffer);
+    sendf("ldc1612_ng_data oid=%c seq=%c ov=%c data=%*s"
+          , oid, ld->seq_next, ld->overflows, ld->buf_next * 4, ld->buffer);
     ld->seq_next++;
     ld->buf_next = 0;
     ld->overflows = 0;
@@ -320,7 +338,7 @@ flush_buffer(struct ldc1612_ng *ld, uint8_t oid)
 static void
 config_ldc1612_ng(uint32_t oid, uint32_t i2c_oid, uint8_t product, int32_t intb_pin)
 {
-    dprint("EDDYng cfg o=%u i=%u b=%d", oid, i2c_oid, intb_pin);
+    dprint2("EDDYng cfg o=%u i=%u b=%d", oid, i2c_oid, intb_pin);
 
     struct ldc1612_ng *ld = oid_alloc(oid, command_config_ldc1612_ng, sizeof(*ld));
 
@@ -434,11 +452,11 @@ command_ldc1612_ng_start_stop(uint32_t *args)
     if (ld->rest_ticks == 0) {
         // End measurements
         flush_buffer(ld, args[0]);
-        dprint("ZZZ stop");
+        dprint("stop");
         return;
     }
 
-    dprint("ZZZ start");
+    dprint("start");
 
     ld->buf_next = 0;
     ld->seq_next = 0;
@@ -451,7 +469,7 @@ command_ldc1612_ng_start_stop(uint32_t *args)
 }
 DECL_COMMAND(command_ldc1612_ng_start_stop, "ldc1612_ng_start_stop oid=%c rest_ticks=%u");
 
-#if defined(LDC_DEBUG) && LDC_DEBUG > 0
+#if defined(LDC_DEBUG) && LDC_DEBUG > 1
 void dprint(const char *fmt, ...)
 {
     char buf[60];
@@ -462,6 +480,11 @@ void dprint(const char *fmt, ...)
     va_end(args);
 
     sendf("debug_print m=%*s", len, buf);
+}
+#elif defined(LDC_DEBUG) && LDC_DEBUG > 0
+void dprint(const char *msg)
+{
+    sendf("debug_print m=%*s", strlen(msg), msg);
 }
 #endif
 
@@ -486,7 +509,7 @@ command_ldc1612_ng_setup_home(uint32_t *args)
     uint8_t err_max = args[9];
 
     if (trigger_freq == 0 || trsync_oid == 0) {
-        dprint("ZZZ resetting homing/tapping");
+        dprint("resetting homing/tapping");
         ld->ts = NULL;
         lh->mode = 0;
         return;
@@ -494,13 +517,13 @@ command_ldc1612_ng_setup_home(uint32_t *args)
 
     if (ld->rest_ticks == 0) {
         notify_trigger(ld, 0, other_reason_base);
-        dprint("ZZZ sensor not started!");
+        dprint("sensor not started!");
         return;
     }
 
     if (lh->mode > 0) {
         notify_trigger(ld, 0, other_reason_base);
-        dprint("ZZZ homing already set up!");
+        dprint("homing already set up!");
         return;
     }
 
@@ -521,11 +544,11 @@ command_ldc1612_ng_setup_home(uint32_t *args)
 
     switch (mode) {
     case HOME_MODE_HOME:
-        dprint("ZZZ setup home sf=%u tf=%u", start_freq, trigger_freq);
+        dprint2("setup home sf=%u tf=%u", start_freq, trigger_freq);
         break;
     case HOME_MODE_SOS:
         lh->sos_tap.tap_threshold = tap_threshold / 65536.0f;
-        dprint("ZZZ setup sos sf=%u tf=%u tap=%f", start_freq, trigger_freq, lh->sos_tap.tap_threshold);
+        dprint2("setup sos sf=%u tf=%u tap=%f", start_freq, trigger_freq, lh->sos_tap.tap_threshold);
         break;
     case HOME_MODE_WMA:
     default:
@@ -558,7 +581,7 @@ command_ldc1612_ng_finish_home(uint32_t *args)
     sendf("ldc1612_ng_finish_home_reply oid=%c trigger_clock=%u tap_start_clock=%u error=%u"
           , args[0], trigger_time, tap_start_time, error);
 
-    dprint("ZZZ finish tap_s=%u trig_t=%u", tap_start_time, trigger_time);
+    dprint2("finish tap_s=%u trig_t=%u", tap_start_time, trigger_time);
 }
 DECL_COMMAND(command_ldc1612_ng_finish_home,
              "ldc1612_ng_finish_home oid=%c");
@@ -572,7 +595,21 @@ ldc1612_ng_update(struct ldc1612_ng *ld, uint8_t oid)
     irq_disable();
     ld->flags &= ~LDC_PENDING;
     irq_enable();
-    if (!(status & 0x08)) // UNREADCONV1
+
+  #if false
+    char bits[33] = { 0 };
+    for (int i = 0; i < 32; i++) {
+      if (status & (1 << i)) {
+        bits[31 - i] = '1';
+      } else {
+        bits[31 - i] = '0';
+      }
+    }
+
+    dprint(bits);
+#endif
+
+    if (!(status & STATUS_UNREADCONV0))
         return;
 
     uint32_t time = timer_read_time();
@@ -648,7 +685,8 @@ check_error(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
 
     lh->error_count++;
 
-    dprint("ZZZ err=%u t=%u s=%u cnt=%u", data, time, ld->last_status,
+    dprint1("err");
+    dprint2("err=%u t=%u s=%u cnt=%u", data, time, ld->last_status,
         lh->error_count);
 
     if (lh->error_count <= lh->error_threshold)
@@ -680,7 +718,8 @@ check_safe_start(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
     // And we need to do it _after_ this time, to make sure we didn't
     // start below the threshold
     if (lh->safe_start_time != 0 && timer_is_before(time, lh->safe_start_time)) {
-        dprint("ZZZ EARLY! time=%u < %u", time, lh->safe_start_time);
+        dprint1("early");
+        dprint2("EARLY! time=%u < %u", time, lh->safe_start_time);
         notify_trigger(ld, 0, ld->other_reason_base + REASON_ERROR_TOO_EARLY);
         return false;
     }
@@ -694,7 +733,7 @@ check_safe_start(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
         return false;
     }
 
-    dprint("ZZZ safe start");
+    dprint("safe start");
 
     // Ok, we've passed all the safety thresholds. Values from this point on
     // will be considered for homing/tapping
@@ -720,7 +759,7 @@ check_homing(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
     if (data > lh->homing_trigger_freq) {
         notify_trigger(ld, time, ld->success_reason);
         lh->trigger_time = time;
-        dprint("ZZZ home t=%u f=%u", time, data);
+        dprint2("home t=%u f=%u", time, data);
     }
 }
 
@@ -763,7 +802,7 @@ check_sos_tap(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
         if (diff >= sos_tap->tap_threshold) {
             lh->trigger_time = time;
             notify_trigger(ld, time, ld->success_reason);
-            dprint("ZZZ tap st=%u tt=%u l=%f (f=%f)", lh->tap_start_time, time, sos_tap->tap_start_value - val, freq);
+            dprint2("tap st=%u tt=%u l=%f (f=%f)", lh->tap_start_time, time, sos_tap->tap_start_value - val, freq);
             return;
         }
     } else if (val > sos_tap->last_value) {
