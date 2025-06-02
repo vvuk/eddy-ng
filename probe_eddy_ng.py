@@ -556,7 +556,7 @@ class ProbeEddy:
 
     def _log_debug(self, msg):
         if self.params.debug:
-            logging.debug(f"{self._name}: {msg}")
+            logging.info(f"{self._name}: {msg}")
 
     def define_commands(self, gcode):
         gcode.register_command("PROBE_EDDY_NG_STATUS", self.cmd_STATUS, self.cmd_STATUS_help)
@@ -1676,6 +1676,8 @@ class ProbeEddy:
 
                 probe_z = probe_position[2]
 
+                self._log_debug(f"tap: probe_z: {probe_z:.3f} finish_z: {finish_z:.3f} moved up to {start_z:.3f}")
+
                 if probe_z - target_z < 0.050:
                     # we detected a tap but it was too close to our target z
                     # to be trusted
@@ -1853,10 +1855,9 @@ class ProbeEddy:
         try:
             self._sensor.set_drive_current(tap_drive_current)
 
-            sample_i = 0
             sample_last_err = None
 
-            while sample_i < max_samples:
+            for sample_i in range(max_samples):
                 if self.params.debug:
                     self.save_samples_path = f"/tmp/tap-samples-{sample_i+1}.csv"
 
@@ -1867,7 +1868,6 @@ class ProbeEddy:
                     lift_speed=lift_speed,
                     tapcfg=tapcfg,
                 )
-                sample_i += 1
 
                 if write_every_tap_plot:
                     try:
@@ -1877,18 +1877,18 @@ class ProbeEddy:
 
                 if tap.error:
                     if "too close to target z" in str(tap.error):
-                        self._log_msg(f"Tap {sample_i}: failed: try lowering TARGET_Z by 0.100 (to {target_z - 0.100:.3f})")
+                        self._log_msg(f"Tap {sample_i+1}: failed: try lowering TARGET_Z by 0.100 (to {target_z - 0.100:.3f})")
                     else:
-                        self._log_msg(f"Tap {sample_i}: failed ({tap.error})")
+                        self._log_msg(f"Tap {sample_i+1}: failed ({tap.error})")
                     sample_err_count += 1
                     sample_last_err = tap
                     continue
 
                 results.append(tap)
 
-                self._log_msg(f"Tap {sample_i}: z={tap.probe_z:.3f}")
+                self._log_msg(f"Tap {sample_i+1}: z={tap.probe_z:.3f}")
                 self._log_debug(
-                    f"tap[{sample_i}]: {tap.probe_z:.3f} toolhead at: {tap.toolhead_z:.3f} overshoot: {tap.overshoot:.3f} at {tap.tap_time:.4f}s"
+                    f"tap[{sample_i+1}]: {tap.probe_z:.3f} toolhead at: {tap.toolhead_z:.3f} overshoot: {tap.overshoot:.3f} at {tap.tap_time:.4f}s"
                 )
 
                 if samples == 1:
@@ -1933,9 +1933,11 @@ class ProbeEddy:
         homed_to_str = ""
         if home_z:
             th_pos = th.get_position()
-            true_z_zero = - (tap_adjust_z + tap_overshoot)
+            th_z = th_pos[2]
+            #true_z_zero = - (tap_adjust_z + tap_overshoot)
+            true_z_zero = - computed_tap_z
             th_pos[2] = th_pos[2] + true_z_zero
-            homed_to_str = f"homed z with true_z_zero={true_z_zero:.3f}, "
+            homed_to_str = f"homed z with true_z_zero={true_z_zero:.3f}, thz={th_z:.3f}, setz={th_pos[2]:.3f}, overshoot={tap_overshoot:.3f}, "
             self._set_toolhead_position(th_pos, [2])
             self._last_tap_gcode_adjustment = 0.0
             adjusted_tap_z = 0.0
@@ -2126,7 +2128,7 @@ class ProbeEddy:
 
         fig.update_layout(
             hovermode="x unified",
-            title=dict(text=f"Tap {tapnum}: {tap.probe_z:.3f}"),
+            title=dict(text=f"Tap {tapnum+1}: {tap.probe_z:.3f}"),
             yaxis=dict(title="Z", side="right"),  # Z axis
             yaxis2=dict(overlaying="y", title="Freq", tickformat="d", side="left"),  # Freq + WMA
             yaxis3=dict(overlaying="y", side="left", tickformat="d", position=0.2),  # derivatives, tap accum
