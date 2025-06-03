@@ -1334,9 +1334,9 @@ class ProbeEddy:
 
         if times is None:
             if report_errors:
-                self._log_error("No samples collected. This could be a hardware issue or an incorrect drive current.")
+                self._log_error(f"Drive current {drive_current}: No samples collected. This could be a hardware issue or an incorrect drive current.")
             else:
-                self._log_warning("Warning: no samples collected.")
+                self._log_warning(f"Drive current {drive_current}: Warning: no samples collected.")
             return None, None, None
 
         # and build a map
@@ -2924,7 +2924,7 @@ class ProbeEddyFrequencyMap:
         if len(freqs) == 0 or len(heights) == 0:
             if report_errors:
                 self._eddy._log_error(
-                    f"Error: Calibration failed, couldn't compute averages ({len(raw_freqs_list)}, {len(raw_heights_list)}), probably due to no valid samples received."
+                    f"Drive current {drive_current}: Calibration failed, couldn't compute averages ({len(raw_freqs_list)}, {len(raw_heights_list)}), probably due to no valid samples received."
                 )
             return None, None
 
@@ -2938,28 +2938,28 @@ class ProbeEddyFrequencyMap:
         if report_errors:
             if max_height < 2.5:  # we really can't do anything with this
                 self._eddy._log_error(
-                    f"Error: max height for valid samples is too low: {max_height:.3f} < 2.5. Possible causes: bad drive current, bad sensor mount height."
+                    f"Drive current {drive_current} error: max height for valid samples is too low: {max_height:.3f} < 2.5. Possible causes: bad drive current, bad sensor mount height."
                 )
                 if not self._eddy.params.allow_unsafe:
                     return None, None
 
             if min_height > 0.65:  # this is a bit arbitrary; but if it's this far off we shouldn't trust it
                 self._eddy._log_error(
-                    f"Error: min height for valid samples is too high: {min_height:.3f} > 0.65. Possible causes: bad drive current, bad sensor mount height."
+                    f"Drive current {drive_current} error: min height for valid samples is too high: {min_height:.3f} > 0.65. Possible causes: bad drive current, bad sensor mount height."
                 )
                 if not self._eddy.params.allow_unsafe:
                     return None, None
 
             if min_height > 0.025:
                 self._eddy._log_msg(
-                    f"Warning: min height is {min_height:.3f} (> 0.025) is too high for tap. This calibration will work fine for homing, but may not for tap."
+                    f"Drive current {drive_current} warning: min height is {min_height:.3f} (> 0.025) is too high for tap. This calibration will work fine for homing, but may not for tap."
                 )
 
             # somewhat arbitrary spread
             if freq_spread < 0.30:
                 extremely = "EXTREMELY " if freq_spread < 0.15 else ""
                 self._eddy._log_warning(
-                    f"Warning: frequency spread is {extremely}low ({freq_spread:.2f}%, {min_freq:.1f}-{max_freq:.1f}), which will greatly impact accuracy. Your sensor may be too high."
+                    f"Drive current {drive_current} warning: frequency spread is {extremely}low ({freq_spread:.2f}%, {min_freq:.1f}-{max_freq:.1f}), which will greatly impact accuracy. Your sensor may be too high."
                 )
 
         low_samples = heights <= ProbeEddyFrequencyMap.low_z_threshold
@@ -2989,7 +2989,7 @@ class ProbeEddyFrequencyMap:
         if report_errors:
             if rmse_fth > 0.050:
                 self._eddy._log_error(
-                    f"Error: calibration error margin is too high ({rmse_fth:.3f}). Possible causes: bad drive current, bad sensor mount height."
+                    f"Drive current {drive_current} error: calibration error margin is too high ({rmse_fth:.3f}). Possible causes: bad drive current, bad sensor mount height."
                 )
                 if not self._eddy.params.allow_unsafe:
                     return None, None
