@@ -3376,7 +3376,8 @@ class BigfootProbe:
             status.update({"bigfoot_scan_offset": self.last_offset})
 
     def _last_probe_z_result(self):
-        ps = self._printer.lookup_object('probe').get_status(self._printer.get_reactor().monotonic())
+        probe = self._printer.lookup_object('probe')
+        ps = probe.get_status(self._printer.get_reactor().monotonic())
         return ps.get("last_z_result", None)
 
     def cmd_BIGFOOT_SET_TOOL_OFFSET(self, gcmd):
@@ -3397,7 +3398,7 @@ class BigfootProbe:
         tool.gcode_y_offset = y
         tool.gcode_z_offset = z
 
-        gcmd.respond_info(f"Set tool {tool} offset to {x:.3f} {y:.3f} {z:.3f}")
+        gcmd.respond_info(f"Set tool {tool.name} offset to {x:.3f} {y:.3f} {z:.3f}")
 
     def cmd_BIGFOOT_SET_REFERENCE(self, gcmd):
         clear = gcmd.get
