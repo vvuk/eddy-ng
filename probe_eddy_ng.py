@@ -3501,7 +3501,7 @@ class BigfootProbe:
         z_use_probe = gcmd.get_int("Z_USE_PROBE", 0) == 1
 
         radius = gcmd.get_float("RADIUS", 5.0)
-        passes = gcmd.get_int("PASSES", 2)
+        passes = gcmd.get_int("PASSES", 3)
 
         move_speed = gcmd.get_float("MOVE_SPEED", 100.0)
         speed = gcmd.get_float("SPEED", self.eddy.params.probe_speed)
@@ -3534,59 +3534,6 @@ class BigfootProbe:
             th.dwell(0.100)
             th.wait_moves()
             return tstart, tend
-
-        def compute_closest_point(axis, tstart, tend):
-            istart = bisect.bisect_left(sampler.times, tstart)
-            iend = bisect.bisect_right(sampler.times, tend)
-            freqs = np.zeros(iend - istart)
-            coords = np.zeros(iend - istart)
-
-            # Pull out the frequencies and coordinates between tstart..tend
-            for i in range(iend - istart):
-                t = sampler.times[istart + i]
-                f = sampler.freqs[istart + i]
-
-                pos, velocity = self.eddy._get_trapq_position(t)
-                c = pos[0] if axis == "x" else pos[1]  # the coordinate value
-                freqs[i] = f
-                coords[i] = c
-
-            coord_sorted_idx = np.argsort(coords)
-            coords = coords[coord_sorted_idx]
-            freqs = freqs[coord_sorted_idx]
-
-            # now figure out highest 2 frequencies
-            f_low, f_high = np.unique(freqs)[-2:]
-            mask = (freqs == f_low) | (freqs == f_high)
-
-            # now find the longest run of the top 2 values; the sensor will
-            # bounce between two discrete values
-            i = 0
-            best_start = best_len = best_high_count = 0
-            while i < len(freqs):
-                if not mask[i]:
-                    i += 1
-                    continue
-                start = i
-                high_count = 0
-                while i < len(freqs) and mask[i]:
-                    if freqs[i] == f_high:
-                        high_count += 1
-                    i += 1
-                length = i - start
-                if (length > best_len) or (length == best_len and high_count > best_high_count):
-                    self.eddy._log_info(f"new best {start} {length} {high_count}, prev {best_start}, {best_len}, {best_high_count}")
-                    best_start = start
-                    best_len = length
-                    best_high_count = high_count
-
-            self.eddy._log_info(f"result {best_start}, {best_len}, {best_high_count}")
-            self.eddy._log_info(f"coords {len(coords)} freqs {len(freqs)}")
-            c1 = coords[best_start]
-            c2 = coords[best_start + best_len - 1]
-            c_result = (c1 + c2) / 2.0
-
-            return c_result, [c1, c2], iend - istart, best_len
 
         def write_debug(axis):
             mode = "w" if axis == "x" else "a"
@@ -3645,8 +3592,8 @@ class BigfootProbe:
 
         # we're moving at speed mm/sec. we're sampling at rcount_sec.
         rcount_sec = self.eddy._sensor.get_rcount_sec()
-        samples_per_sec = 1.0 / rcount_sec
-        precision = speed / samples_per_sec
+        # samples_per_sec = 1.0 / rcount_sec
+        # best_precision = speed / samples_per_sec
 
         self.eddy._log_msg(
             f"EDDYNG_NOZZLE_POSITION_SCAN: center: {result[0]:.3f} {result[1]:.3f} (samp_ms: {rcount_sec * 1000.0:.3f} speed: {speed:.3f})"
