@@ -3442,12 +3442,15 @@ class BigfootProbe:
         y = y if y is not None else self.last_offset[1]
         z = z if z is not None else self.last_offset[2]
 
-        tool = self._printer.lookup_object(f"tool {tool_name}")
+        tool = self._printer.lookup_object(f"tool {tool_name}", None)
+        if tool is None:
+            raise self._printer.command_error(f"EDDYNG_SET_TOOL_OFFSET: Tool {tool_name} not found")
+
         tool.gcode_x_offset = x
         tool.gcode_y_offset = y
         tool.gcode_z_offset = z
 
-        gcmd.respond_info(f"Set tool {tool.name} offset to {x:.3f} {y:.3f} {z:.3f}")
+        gcmd.respond_info(f"Tool {tool_name} offset set to {x:.3f} {y:.3f} {z:.3f}")
 
     def cmd_EDDYNG_NOZZLE_POSITION_SET_REFERENCE(self, gcmd):
         x = gcmd.get_float("X", None)
