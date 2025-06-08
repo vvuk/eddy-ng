@@ -266,6 +266,7 @@ class ProbeEddyParams:
     # whether to print lots of verbose debug info to the log
     debug: bool = True
     bigfoot: bool = False
+    bigfoot_primary: bool = True
     bigfoot_scan_position: list[float] | None = None
 
     tap_trigger_safe_start_height: float = 1.5
@@ -290,6 +291,18 @@ class ProbeEddyParams:
         self.probe_speed = config.getfloat("probe_speed", self.probe_speed, above=0.0)
         self.lift_speed = config.getfloat("lift_speed", self.lift_speed, above=0.0)
         self.move_speed = config.getfloat("move_speed", self.move_speed, above=0.0)
+        self.reg_drive_current = config.getint("reg_drive_current", 0, minval=0, maxval=31)
+
+        self.allow_unsafe = config.getboolean("allow_unsafe", self.allow_unsafe)
+        self.debug = config.getboolean("debug", self.debug)
+        self.max_errors = config.getint("max_errors", self.max_errors)
+
+        self.bigfoot = config.getboolean("bigfoot", self.bigfoot)
+        if self.bigfoot:
+            self.bigfoot_scan_position = config.getfloatlist("bigfoot_scan_position", count=3, default=None)
+            self.bigfoot_primary = config.getboolean("bigfoot_primary", default=self.bigfoot_primary)
+            return
+
         self.home_trigger_height = config.getfloat("home_trigger_height", self.home_trigger_height, minval=1.0)
         self.home_trigger_safe_start_offset = config.getfloat(
             "home_trigger_safe_start_offset",
@@ -298,9 +311,7 @@ class ProbeEddyParams:
         )
         self.calibration_z_max = config.getfloat("calibration_z_max", self.calibration_z_max, above=0.0)
 
-        self.reg_drive_current = config.getint("reg_drive_current", 0, minval=0, maxval=31)
         self.tap_drive_current = config.getint("tap_drive_current", 0, minval=0, maxval=31)
-
         self.tap_start_z = config.getfloat("tap_start_z", self.tap_start_z, above=0.0)
         self.tap_target_z = config.getfloat("tap_target_z", self.tap_target_z)
         self.tap_speed = config.getfloat("tap_speed", self.tap_speed, above=0.0)
@@ -338,15 +349,8 @@ class ProbeEddyParams:
         if self.tap_trigger_safe_start_height == -1.0:  # sentinel
             self.tap_trigger_safe_start_height = self.home_trigger_height / 2.0
 
-        self.allow_unsafe = config.getboolean("allow_unsafe", self.allow_unsafe)
         self.write_tap_plot = config.getboolean("write_tap_plot", self.write_tap_plot)
         self.write_every_tap_plot = config.getboolean("write_every_tap_plot", self.write_every_tap_plot)
-        self.debug = config.getboolean("debug", self.debug)
-        self.bigfoot = config.getboolean("bigfoot", self.bigfoot)
-        if self.bigfoot:
-            self.bigfoot_scan_position = config.getfloatlist("bigfoot_scan_position", count=3, default=None)
-
-        self.max_errors = config.getint("max_errors", self.max_errors)
 
         self.x_offset = config.getfloat("x_offset", self.x_offset)
         self.y_offset = config.getfloat("y_offset", self.y_offset)
@@ -448,14 +452,14 @@ class ProbeEddy:
         }
         sensor_type = config.getchoice("sensor_type", {s: s for s in sensors})
 
+        self.params = ProbeEddyParams()
+        self.params.load_from_config(config)
+
         self._sensor_type = sensor_type
-        self._sensor = sensors[sensor_type](config)
+        self._sensor = sensors[sensor_type](config, name=self._name, primary=self.params.bigfoot_primary)
         self._mcu = self._sensor.get_mcu()
         self._toolhead: ToolHead = None  # filled in _handle_connect
         self._trapq = None
-
-        self.params = ProbeEddyParams()
-        self.params.load_from_config(config)
 
         self._dummy_gcode_cmd: GCodeCommand = self._gcode.create_gcode_command("", "", {})
         self._dc_to_fmap: Dict[int, ProbeEddyFrequencyMap] = {}
@@ -575,91 +579,96 @@ class ProbeEddy:
             logging.info(f"{self._name}: {msg}")
 
     def define_commands(self, gcode, bigfoot: bool = False):
-        gcode.register_command("PROBE_EDDY_NG_STATUS", self.cmd_STATUS, self.cmd_STATUS_help)
-        gcode.register_command(
-            "PES",
-            self.cmd_STATUS,
-            self.cmd_STATUS_help + " (alias for PROBE_EDDY_NG_STATUS)",
-        )
-        gcode.register_command(
-            "PROBE_EDDY_NG_PROBE_STATIC",
-            self.cmd_PROBE_STATIC,
-            self.cmd_PROBE_STATIC_help,
-        )
-        gcode.register_command(
-            "PEPS",
-            self.cmd_PROBE_STATIC,
-            self.cmd_PROBE_STATIC_help + " (alias for PROBE_EDDY_NG_PROBE_STATIC)",
-        )
+        names = [self._name]
+        if self.params.bigfoot_primary:
+            names.append(None)
 
-        gcode.register_command("EDDYNG_STREAM_START", self.cmd_STREAM_START, "")
-        gcode.register_command("EDDYNG_STREAM_STOP", self.cmd_STREAM_STOP, "")
+        for name in names:
+            gcode.register_mux_command("PROBE_EDDY_NG_STATUS", "SENSOR", name, self.cmd_STATUS, self.cmd_STATUS_help)
+            gcode.register_mux_command(
+                "PES",
+                "SENSOR", name, self.cmd_STATUS,
+                self.cmd_STATUS_help + " (alias for PROBE_EDDY_NG_STATUS)",
+            )
+            gcode.register_mux_command(
+                "PROBE_EDDY_NG_PROBE_STATIC",
+                "SENSOR", name, self.cmd_PROBE_STATIC,
+                self.cmd_PROBE_STATIC_help,
+            )
+            gcode.register_mux_command(
+                "PEPS",
+                "SENSOR", name, self.cmd_PROBE_STATIC,
+                self.cmd_PROBE_STATIC_help + " (alias for PROBE_EDDY_NG_PROBE_STATIC)",
+            )
 
-        if bigfoot:
-            return
+            gcode.register_mux_command("EDDYNG_STREAM_START", "SENSOR", name, self.cmd_STREAM_START, "")
+            gcode.register_mux_command("EDDYNG_STREAM_STOP", "SENSOR", name, self.cmd_STREAM_STOP, "")
 
-        gcode.register_command(
-            "PROBE_EDDY_NG_CALIBRATE",
-            self.cmd_CALIBRATE,
-            self.cmd_CALIBRATE_help,
-        )
-        gcode.register_command(
-            "PROBE_EDDY_NG_CALIBRATION_STATUS",
-            self.cmd_CALIBRATION_STATUS,
-            self.cmd_CALIBRATION_STATUS_help,
-        )
-        gcode.register_command(
-            "PROBE_EDDY_NG_SETUP",
-            self.cmd_SETUP,
-            self.cmd_SETUP_help,
-        )
-        gcode.register_command(
-            "PROBE_EDDY_NG_CLEAR_CALIBRATION",
-            self.cmd_CLEAR_CALIBRATION,
-            self.cmd_CLEAR_CALIBRATION_help,
-        )
-        gcode.register_command("PROBE_EDDY_NG_PROBE", self.cmd_PROBE, self.cmd_PROBE_help)
-        gcode.register_command(
-            "PROBE_EDDY_NG_PROBE_ACCURACY",
-            self.cmd_PROBE_ACCURACY,
-            self.cmd_PROBE_ACCURACY_help,
-        )
-        gcode.register_command("PROBE_EDDY_NG_TAP", self.cmd_TAP, self.cmd_TAP_help)
-        gcode.register_command(
-            "PROBE_EDDY_NG_SET_TAP_OFFSET",
-            self.cmd_SET_TAP_OFFSET,
-            "Set or clear the tap offset for the bed mesh scan and other probe operations",
-        )
-        gcode.register_command(
-            "PROBE_EDDY_NG_SET_TAP_ADJUST_Z",
-            self.cmd_SET_TAP_ADJUST_Z,
-            "Set the tap adjustment value",
-        )
-        gcode.register_command(
-            "PROBE_EDDY_NG_TEST_DRIVE_CURRENT",
-            self.cmd_TEST_DRIVE_CURRENT,
-            "Test a drive current.",
-        )
-        gcode.register_command("Z_OFFSET_APPLY_PROBE", None)
-        gcode.register_command(
-            "Z_OFFSET_APPLY_PROBE",
-            self.cmd_Z_OFFSET_APPLY_PROBE,
-            "Apply the current G-Code Z offset to tap_adjust_z",
-        )
+            if bigfoot:
+                return
 
-        # some handy aliases while I'm debugging things to save my fingers
-        gcode.register_command(
-            "PEP",
-            self.cmd_PROBE,
-            self.cmd_PROBE_help + " (alias for PROBE_EDDY_NG_PROBE)",
-        )
-        gcode.register_command(
-            "PETAP",
-            self.cmd_TAP,
-            self.cmd_TAP_help + " (alias for PROBE_EDDY_NG_TAP)",
-        )
+            gcode.register_mux_command(
+                "PROBE_EDDY_NG_CALIBRATE",
+                "SENSOR", name, self.cmd_CALIBRATE,
+                self.cmd_CALIBRATE_help,
+            )
+            gcode.register_mux_command(
+                "PROBE_EDDY_NG_CALIBRATION_STATUS",
+                "SENSOR", name, self.cmd_CALIBRATION_STATUS,
+                self.cmd_CALIBRATION_STATUS_help,
+            )
+            gcode.register_mux_command(
+                "PROBE_EDDY_NG_SETUP",
+                "SENSOR", name, self.cmd_SETUP,
+                self.cmd_SETUP_help,
+            )
+            gcode.register_mux_command(
+                "PROBE_EDDY_NG_CLEAR_CALIBRATION",
+                "SENSOR", name, self.cmd_CLEAR_CALIBRATION,
+                self.cmd_CLEAR_CALIBRATION_help,
+            )
+            gcode.register_mux_command("PROBE_EDDY_NG_PROBE", self.cmd_PROBE, self.cmd_PROBE_help)
+            gcode.register_mux_command(
+                "PROBE_EDDY_NG_PROBE_ACCURACY",
+                "SENSOR", name, self.cmd_PROBE_ACCURACY,
+                self.cmd_PROBE_ACCURACY_help,
+            )
+            gcode.register_mux_command("PROBE_EDDY_NG_TAP", self.cmd_TAP, self.cmd_TAP_help)
+            gcode.register_mux_command(
+                "PROBE_EDDY_NG_SET_TAP_OFFSET",
+                "SENSOR", name, self.cmd_SET_TAP_OFFSET,
+                "Set or clear the tap offset for the bed mesh scan and other probe operations",
+            )
+            gcode.register_mux_command(
+                "PROBE_EDDY_NG_SET_TAP_ADJUST_Z",
+                "SENSOR", name, self.cmd_SET_TAP_ADJUST_Z,
+                "Set the tap adjustment value",
+            )
+            gcode.register_mux_command(
+                "PROBE_EDDY_NG_TEST_DRIVE_CURRENT",
+                "SENSOR", name, self.cmd_TEST_DRIVE_CURRENT,
+                "Test a drive current.",
+            )
+            gcode.register_command("Z_OFFSET_APPLY_PROBE", None)
+            gcode.register_mux_command(
+                "Z_OFFSET_APPLY_PROBE",
+                "SENSOR", name, self.cmd_Z_OFFSET_APPLY_PROBE,
+                "Apply the current G-Code Z offset to tap_adjust_z",
+            )
 
-        gcode.register_command("EDDYNG_BED_MESH_EXPERIMENTAL", self.cmd_MESH, "")
+            # some handy aliases while I'm debugging things to save my fingers
+            gcode.register_mux_command(
+                "PEP",
+                "SENSOR", name, self.cmd_PROBE,
+                self.cmd_PROBE_help + " (alias for PROBE_EDDY_NG_PROBE)",
+            )
+            gcode.register_mux_command(
+                "PETAP",
+                "SENSOR", name, self.cmd_TAP,
+                self.cmd_TAP_help + " (alias for PROBE_EDDY_NG_TAP)",
+            )
+
+            gcode.register_mux_command("EDDYNG_BED_MESH_EXPERIMENTAL", "SENSOR", name, self.cmd_MESH, "")
 
     def _handle_command_error(self, gcmd=None):
         try:
@@ -3358,6 +3367,7 @@ def load_config_prefix(config: ConfigWrapper):
 class BigfootProbe:
     def __init__(self, eddy: ProbeEddy):
         self.eddy = eddy
+        self.params = self.eddy.params
         self.last_result = None
         self.last_offset = None
         self._printer = eddy._printer
@@ -3365,9 +3375,15 @@ class BigfootProbe:
         self._reference = [0.0, 0.0, 0.0]
 
         gcode = self._printer.lookup_object("gcode")
-        gcode.register_command("BIGFOOT_SCAN", self.cmd_BIGFOOT_SCAN)
-        gcode.register_command("BIGFOOT_SET_REFERENCE", self.cmd_BIGFOOT_SET_REFERENCE)
-        gcode.register_command("BIGFOOT_SET_TOOL_OFFSET", self.cmd_BIGFOOT_SET_TOOL_OFFSET)
+
+        names = [self.eddy._name]
+        if self.params.bigfoot_primary:
+            names.append(None)
+
+        for name in names:
+            gcode.register_mux_command("BIGFOOT_SCAN", "SENSOR", name, self.cmd_BIGFOOT_SCAN)
+            gcode.register_mux_command("BIGFOOT_SET_REFERENCE", "SENSOR", name, self.cmd_BIGFOOT_SET_REFERENCE)
+            gcode.register_mux_command("BIGFOOT_SET_TOOL_OFFSET", "SENSOR", name, self.cmd_BIGFOOT_SET_TOOL_OFFSET)
   
     def update_status(self, status):
         if self.last_result:

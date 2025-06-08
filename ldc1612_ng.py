@@ -78,7 +78,7 @@ class LDC1612_ng_homing_result:
 
 # Interface class to LDC1612 mcu support
 class LDC1612_ng:
-    def __init__(self, config):
+    def __init__(self, config, name: str | None = None, primary: bool = True):
         self.printer: Printer = config.get_printer()
 
         self._name = config.get_name().split()[-1]
@@ -172,27 +172,32 @@ class LDC1612_ng:
         self._data_timer = None
 
         gcode = self.printer.lookup_object("gcode")
-        gcode.register_mux_command(
-            "LDC_NG_CALIBRATE_DRIVE_CURRENT",
-            "CHIP",
-            self._name,
-            self.cmd_LDC_CALIBRATE,
-            desc=self.cmd_LDC_CALIBRATE_help,
-        )
-        gcode.register_mux_command(
-            "LDC_NG_SET_DRIVE_CURRENT",
-            "CHIP",
-            self._name,
-            self.cmd_LDC_SET_DC,
-            desc=self.cmd_LDC_SET_DC_help,
-        )
-        gcode.register_mux_command(
-            "LDC_NG_SET",
-            "CHIP",
-            self._name,
-            self.cmd_LDC_SET,
-            desc="Set various LDC config values"
-        )
+
+        names = [name]
+        if primary:
+            names.append(None)
+        for name in names:
+            gcode.register_mux_command(
+                "LDC_NG_CALIBRATE_DRIVE_CURRENT",
+                "CHIP",
+                name,
+                self.cmd_LDC_CALIBRATE,
+                desc=self.cmd_LDC_CALIBRATE_help,
+            )
+            gcode.register_mux_command(
+                "LDC_NG_SET_DRIVE_CURRENT",
+                "CHIP",
+                name,
+                self.cmd_LDC_SET_DC,
+                desc=self.cmd_LDC_SET_DC_help,
+            )
+            gcode.register_mux_command(
+                "LDC_NG_SET",
+                "CHIP",
+                name,
+                self.cmd_LDC_SET,
+                desc="Set various LDC config values"
+            )
 
 
     cmd_LDC_SET_DC_help = "Set LDC1612 DRIVE_CURRENT register (idrive value only)"
