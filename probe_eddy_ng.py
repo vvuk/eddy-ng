@@ -3412,9 +3412,9 @@ class BigfootProbe:
             names.append(None)
 
         for name in names:
-            gcode.register_mux_command("BIGFOOT_SCAN", "SENSOR", name, self.cmd_BIGFOOT_SCAN)
-            gcode.register_mux_command("BIGFOOT_SET_REFERENCE", "SENSOR", name, self.cmd_BIGFOOT_SET_REFERENCE)
-            gcode.register_mux_command("BIGFOOT_SET_TOOL_OFFSET", "SENSOR", name, self.cmd_BIGFOOT_SET_TOOL_OFFSET)
+            gcode.register_mux_command("EDDYNG_NOZZLE_POSITION_SCAN", "SENSOR", name, self.cmd_BIGFOOT_SCAN)
+            gcode.register_mux_command("EDDYNG_SET_NOZZLE_POSITION_REFERENCE", "SENSOR", name, self.cmd_BIGFOOT_SET_REFERENCE)
+            gcode.register_mux_command("EDDYNG_SET_TOOL_OFFSET", "SENSOR", name, self.cmd_BIGFOOT_SET_TOOL_OFFSET)
 
     def update_status(self, status):
         if self.last_result:
@@ -3448,7 +3448,6 @@ class BigfootProbe:
         gcmd.respond_info(f"Set tool {tool.name} offset to {x:.3f} {y:.3f} {z:.3f}")
 
     def cmd_BIGFOOT_SET_REFERENCE(self, gcmd):
-        clear = gcmd.get
         x = gcmd.get_float("X", None)
         y = gcmd.get_float("Y", None)
         z = gcmd.get_float("Z", None)
