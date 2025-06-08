@@ -266,7 +266,7 @@ class ProbeEddyParams:
     # whether to print lots of verbose debug info to the log
     debug: bool = True
     bigfoot: bool = False
-    bigfoot_primary: bool = True
+    primary: bool = True
     bigfoot_scan_position: list[float] | None = None
 
     tap_trigger_safe_start_height: float = 1.5
@@ -279,7 +279,7 @@ class ProbeEddyParams:
             return None
         try:
             return [float(v) for v in re.split(r"\s*,\s*|\s+", s)]
-        except:
+        except ValueError:
             raise configerror(f"Can't parse '{s}' as list of floats")
 
     def is_default_butter_config(self):
@@ -296,11 +296,11 @@ class ProbeEddyParams:
         self.allow_unsafe = config.getboolean("allow_unsafe", self.allow_unsafe)
         self.debug = config.getboolean("debug", self.debug)
         self.max_errors = config.getint("max_errors", self.max_errors)
+        self.primary = config.getboolean("primary", default=self.primary)
 
         self.bigfoot = config.getboolean("bigfoot", self.bigfoot)
         if self.bigfoot:
             self.bigfoot_scan_position = config.getfloatlist("bigfoot_scan_position", count=3, default=None)
-            self.bigfoot_primary = config.getboolean("bigfoot_primary", default=self.bigfoot_primary)
             return
 
         self.home_trigger_height = config.getfloat("home_trigger_height", self.home_trigger_height, minval=1.0)
@@ -456,7 +456,7 @@ class ProbeEddy:
         self.params.load_from_config(config)
 
         self._sensor_type = sensor_type
-        self._sensor = sensors[sensor_type](config, name=self._name, primary=self.params.bigfoot_primary)
+        self._sensor = sensors[sensor_type](config, name=self._name, primary=self.params.primary)
         self._mcu = self._sensor.get_mcu()
         self._toolhead: ToolHead = None  # filled in _handle_connect
         self._trapq = None
@@ -580,7 +580,7 @@ class ProbeEddy:
 
     def define_commands(self, gcode, bigfoot: bool = False):
         names = [self._name]
-        if self.params.bigfoot_primary:
+        if self.params.primary:
             names.append(None)
 
         for name in names:
@@ -3408,7 +3408,7 @@ class BigfootProbe:
         gcode = self._printer.lookup_object("gcode")
 
         names = [self.eddy._name]
-        if self.params.bigfoot_primary:
+        if self.params.primary:
             names.append(None)
 
         for name in names:
@@ -3506,8 +3506,13 @@ class BigfootProbe:
         move_speed = gcmd.get_float("MOVE_SPEED", 100.0)
         speed = gcmd.get_float("SPEED", self.eddy.params.probe_speed)
 
+        zval = 0.0
+        if z_use_probe:
+            zval = self._last_probe_z_result()
+            if zval is None:
+                raise self._printer.command_error("EDDYNG_NOZZLE_POSITION_SCAN: Z_USE_PROBE specified, but no last probe result to use for Z")
+
         th: ToolHead = cast(ToolHead, self._printer.lookup_object("toolhead"))
-        kin = th.get_kinematics()
 
         th_z = th.get_position()[2]
         if th_z < z:
@@ -3586,29 +3591,25 @@ class BigfootProbe:
                 val = gaussian(x0, *popt)
 
                 self.eddy._log_msg(
-                    f"EDDYNG_NOZZLE_POSITION_SCAN: {axis} {x0:.3f} (val {val:.6f} sigma {sigma:.6f})  {tend - tstart:.3f}s, {len(sampler.times)} samples"
+                    f"{axis} {x0:.3f} (fv {val:.6f} sigma {sigma:.6f} over {tend - tstart:.3f}s, {len(sampler.times)} samples)"
                 )
                 result[axindex] = float(x0)
 
         # we're moving at speed mm/sec. we're sampling at rcount_sec.
         rcount_sec = self.eddy._sensor.get_rcount_sec()
         # samples_per_sec = 1.0 / rcount_sec
+        # TODO: not correct, need to also look at the quantization of the data.
+        # would be handy to be able to log this.
         # best_precision = speed / samples_per_sec
 
-        self.eddy._log_msg(
-            f"EDDYNG_NOZZLE_POSITION_SCAN: center: {result[0]:.3f} {result[1]:.3f} (samp_ms: {rcount_sec * 1000.0:.3f} speed: {speed:.3f})"
-        )
+        msg = f"Center: {result[0]:.3f} {result[1]:.3f} (samp_ms: {rcount_sec * 1000.0:.3f} speed: {speed:.3f})"
 
-        z = 0.0
-        if z_use_probe:
-            z = self._last_probe_z_result()
-            if z is None:
-                raise self._printer.command_error("EDDYNG_NOZZLE_POSITION_SCAN: no last probe result to use for Z")
+        offset = [result[0] - self._reference[0], result[1] - self._reference[1], zval - self._reference[2]]
 
-        offset = [result[0] - self._reference[0], result[1] - self._reference[1], z - self._reference[2]]
-        self.eddy._log_msg(
-            f"EDDYNG_NOZZLE_POSITION_SCAN: offset: {offset[0]:.3f} {offset[1]:.3f} {offset[2]:.3f} (samp_ms: {rcount_sec * 1000.0:.3f} speed: {speed:.3f})"
-        )
+        if self._reference[0] != 0.0 and self._reference[1] != 0.0 and self._reference[2] != 0.0:
+            msg += f"\nOffset: {offset[0]:.3f} {offset[1]:.3f} {offset[2]:.3f} (samp_ms: {rcount_sec * 1000.0:.3f} speed: {speed:.3f})"
+
+        self.eddy._log_msg(msg)
 
         self.last_result = result
         self.last_offset = offset
