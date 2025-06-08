@@ -417,7 +417,7 @@ class ProbeEddyProbeResult:
             max_value=float(np.max(h)),
             tstart=float(times[0]),
             tend=float(times[-1]),
-            errors=errors
+            errors=errors,
         )
 
     def __format__(self, spec):
@@ -476,7 +476,7 @@ class ProbeEddy:
         self._last_tap_gcode_adjustment = 0.0
 
         self._ffi_pull_move_1 = chelper.get_ffi()[0].new("struct pull_move[1]")
- 
+
         self._printer.register_event_handler("gcode:command_error", self._handle_command_error)
         self._printer.register_event_handler("klippy:connect", self._handle_connect)
 
@@ -554,7 +554,7 @@ class ProbeEddy:
 
         # define our own commands
         self.define_commands(self._gcode)
-        
+
         # patch bed_mesh because Klipper
         if not IS_KALICO:
             bed_mesh.ProbeManager.start_probe = bed_mesh_ProbeManager_start_probe_override
@@ -587,17 +587,23 @@ class ProbeEddy:
             gcode.register_mux_command("PROBE_EDDY_NG_STATUS", "SENSOR", name, self.cmd_STATUS, self.cmd_STATUS_help)
             gcode.register_mux_command(
                 "PES",
-                "SENSOR", name, self.cmd_STATUS,
+                "SENSOR",
+                name,
+                self.cmd_STATUS,
                 self.cmd_STATUS_help + " (alias for PROBE_EDDY_NG_STATUS)",
             )
             gcode.register_mux_command(
                 "PROBE_EDDY_NG_PROBE_STATIC",
-                "SENSOR", name, self.cmd_PROBE_STATIC,
+                "SENSOR",
+                name,
+                self.cmd_PROBE_STATIC,
                 self.cmd_PROBE_STATIC_help,
             )
             gcode.register_mux_command(
                 "PEPS",
-                "SENSOR", name, self.cmd_PROBE_STATIC,
+                "SENSOR",
+                name,
+                self.cmd_PROBE_STATIC,
                 self.cmd_PROBE_STATIC_help + " (alias for PROBE_EDDY_NG_PROBE_STATIC)",
             )
 
@@ -609,62 +615,84 @@ class ProbeEddy:
 
             gcode.register_mux_command(
                 "PROBE_EDDY_NG_CALIBRATE",
-                "SENSOR", name, self.cmd_CALIBRATE,
+                "SENSOR",
+                name,
+                self.cmd_CALIBRATE,
                 self.cmd_CALIBRATE_help,
             )
             gcode.register_mux_command(
                 "PROBE_EDDY_NG_CALIBRATION_STATUS",
-                "SENSOR", name, self.cmd_CALIBRATION_STATUS,
+                "SENSOR",
+                name,
+                self.cmd_CALIBRATION_STATUS,
                 self.cmd_CALIBRATION_STATUS_help,
             )
             gcode.register_mux_command(
                 "PROBE_EDDY_NG_SETUP",
-                "SENSOR", name, self.cmd_SETUP,
+                "SENSOR",
+                name,
+                self.cmd_SETUP,
                 self.cmd_SETUP_help,
             )
             gcode.register_mux_command(
                 "PROBE_EDDY_NG_CLEAR_CALIBRATION",
-                "SENSOR", name, self.cmd_CLEAR_CALIBRATION,
+                "SENSOR",
+                name,
+                self.cmd_CLEAR_CALIBRATION,
                 self.cmd_CLEAR_CALIBRATION_help,
             )
             gcode.register_mux_command("PROBE_EDDY_NG_PROBE", self.cmd_PROBE, self.cmd_PROBE_help)
             gcode.register_mux_command(
                 "PROBE_EDDY_NG_PROBE_ACCURACY",
-                "SENSOR", name, self.cmd_PROBE_ACCURACY,
+                "SENSOR",
+                name,
+                self.cmd_PROBE_ACCURACY,
                 self.cmd_PROBE_ACCURACY_help,
             )
             gcode.register_mux_command("PROBE_EDDY_NG_TAP", self.cmd_TAP, self.cmd_TAP_help)
             gcode.register_mux_command(
                 "PROBE_EDDY_NG_SET_TAP_OFFSET",
-                "SENSOR", name, self.cmd_SET_TAP_OFFSET,
+                "SENSOR",
+                name,
+                self.cmd_SET_TAP_OFFSET,
                 "Set or clear the tap offset for the bed mesh scan and other probe operations",
             )
             gcode.register_mux_command(
                 "PROBE_EDDY_NG_SET_TAP_ADJUST_Z",
-                "SENSOR", name, self.cmd_SET_TAP_ADJUST_Z,
+                "SENSOR",
+                name,
+                self.cmd_SET_TAP_ADJUST_Z,
                 "Set the tap adjustment value",
             )
             gcode.register_mux_command(
                 "PROBE_EDDY_NG_TEST_DRIVE_CURRENT",
-                "SENSOR", name, self.cmd_TEST_DRIVE_CURRENT,
+                "SENSOR",
+                name,
+                self.cmd_TEST_DRIVE_CURRENT,
                 "Test a drive current.",
             )
             gcode.register_command("Z_OFFSET_APPLY_PROBE", None)
             gcode.register_mux_command(
                 "Z_OFFSET_APPLY_PROBE",
-                "SENSOR", name, self.cmd_Z_OFFSET_APPLY_PROBE,
+                "SENSOR",
+                name,
+                self.cmd_Z_OFFSET_APPLY_PROBE,
                 "Apply the current G-Code Z offset to tap_adjust_z",
             )
 
             # some handy aliases while I'm debugging things to save my fingers
             gcode.register_mux_command(
                 "PEP",
-                "SENSOR", name, self.cmd_PROBE,
+                "SENSOR",
+                name,
+                self.cmd_PROBE,
                 self.cmd_PROBE_help + " (alias for PROBE_EDDY_NG_PROBE)",
             )
             gcode.register_mux_command(
                 "PETAP",
-                "SENSOR", name, self.cmd_TAP,
+                "SENSOR",
+                name,
+                self.cmd_TAP,
                 self.cmd_TAP_help + " (alias for PROBE_EDDY_NG_TAP)",
             )
 
@@ -844,7 +872,9 @@ class ProbeEddy:
                     past_pos, past_v = self._get_trapq_position(times[i])
                     past_k_z = past_pos[2] if past_pos is not None else ""
                     past_v = past_v if past_v is not None else ""
-                    data_file.write(f"{times[i]},{freqs[i]},{heights[i] if heights else ''},{past_k_z},{past_v},{raw_freqs[i]},{trigger_time},{tap_start_time}\n")
+                    data_file.write(
+                        f"{times[i]},{freqs[i]},{heights[i] if heights else ''},{past_k_z},{past_v},{raw_freqs[i]},{trigger_time},{tap_start_time}\n"
+                    )
             logging.info(f"Wrote {len(times)} samples to {self.save_samples_path}")
             self.save_samples_path = None
 
@@ -1893,7 +1923,7 @@ class ProbeEddy:
 
             while sample_i < max_samples:
                 if self.params.debug:
-                    self.save_samples_path = f"/tmp/tap-samples-{sample_i+1}.csv"
+                    self.save_samples_path = f"/tmp/tap-samples-{sample_i + 1}.csv"
 
                 tap = self.do_one_tap(
                     start_z=tap_start_z,
@@ -1968,7 +1998,7 @@ class ProbeEddy:
         homed_to_str = ""
         if home_z:
             th_pos = th.get_position()
-            true_z_zero = - (tap_adjust_z + tap_overshoot)
+            true_z_zero = -(tap_adjust_z + tap_overshoot)
             th_pos[2] = th_pos[2] + true_z_zero
             homed_to_str = f"homed z with true_z_zero={true_z_zero:.3f}, "
             self._set_toolhead_position(th_pos, [2])
@@ -2057,7 +2087,7 @@ class ProbeEddy:
         if tapnum == -1:
             filename_base = "tap"
         else:
-            filename_base = f"tap-{tapnum+1}"
+            filename_base = f"tap-{tapnum + 1}"
         tapplot_path_png = f"/tmp/{filename_base}.png"
         tapplot_path_html = f"/tmp/{filename_base}.html"
 
@@ -2120,12 +2150,12 @@ class ProbeEddy:
 
         import plotly.graph_objects as go
 
-        (c_red, c_lt_red) = ('#9e4058', '#C2697F')
-        (c_orange, c_lt_orange) = ('#d0641e', '#E68E54')
-        (c_yellow, c_lt_yellow) = ('#f9ab0e', '"#FBC559')
-        (c_green, c_lt_green) = ('#589e40', '#7FC269')
-        (c_blue, c_lt_blue) = ('#2c3778', '#4151B0')
-        (c_purple, c_lt_purple) = ('#513965', '#785596')
+        (c_red, c_lt_red) = ("#9e4058", "#C2697F")
+        (c_orange, c_lt_orange) = ("#d0641e", "#E68E54")
+        (c_yellow, c_lt_yellow) = ("#f9ab0e", '"#FBC559')
+        (c_green, c_lt_green) = ("#589e40", "#7FC269")
+        (c_blue, c_lt_blue) = ("#2c3778", "#4151B0")
+        (c_purple, c_lt_purple) = ("#513965", "#785596")
 
         fig = go.Figure()
 
@@ -2198,7 +2228,6 @@ class ProbeEddy:
         sampler = self._sampler
         self._sampler.finish()
         gcmd.respond_info(f"Stopped stream ({len(sampler.times)} samples, {sampler.error_count} errors)")
-
 
 
 # Probe interface that does only scanning, no up/down movement.
@@ -2729,9 +2758,8 @@ class ProbeEddySampler:
 
     # Wait until a sample for the given time arrives
     def wait_for_sample_at_time(self, sample_print_time, max_wait_time=0.250, raise_error=True) -> bool:
-        self.eddy._log_debug(
-            f"EDDYng waiting for sample at {sample_print_time:.3f} (now: max_wait_time: {max_wait_time:.3f})"
-        )
+        self.eddy._log_debug(f"EDDYng waiting for sample at {sample_print_time:.3f} (now: max_wait_time: {max_wait_time:.3f})")
+
         def report_no_samples(waited_for):
             if raise_error:
                 raise self._printer.command_error(f"No samples received for time {sample_print_time:.3f} (waited for {waited_for:.3f})")
@@ -2752,7 +2780,9 @@ class ProbeEddySampler:
         # if sample_print_time is in the future, make sure to wait max_wait_time
         # past the expected time
         if sample_print_time > wait_start_time:
-            self.eddy._log_debug(f"{sample_print_time} > {wait_start_time}; max_wait_time = {max_wait_time} + ({sample_print_time} - {wait_start_time} [= {sample_print_time-wait_start_time}])")
+            self.eddy._log_debug(
+                f"{sample_print_time} > {wait_start_time}; max_wait_time = {max_wait_time} + ({sample_print_time} - {wait_start_time} [= {sample_print_time - wait_start_time}])"
+            )
             max_wait_time = max_wait_time + (sample_print_time - wait_start_time)
 
         # this is just a sanity check, there shouldn't be any reason to ever wait this long
@@ -2846,7 +2876,7 @@ class ProbeEddySampler:
             raise self._printer.command_error("Update samples didn't compute heights")
 
         self.eddy._log_debug(
-                f"find_height_at_time: looking between {start_time:.3f}s-{end_time:.3f}s, inside {len(self.times)} samples, time range {self.times[0]:.3f}s to {self.times[-1]:.3f}s"
+            f"find_height_at_time: looking between {start_time:.3f}s-{end_time:.3f}s, inside {len(self.times)} samples, time range {self.times[0]:.3f}s to {self.times[-1]:.3f}s"
         )
 
         # find the first sample that is >= start_time
@@ -3229,7 +3259,6 @@ class BedMeshScanHelper:
 
         self._mesh_points, self._mesh_path = self._generate_path()
 
-
     def _generate_path(self):
         x_vals = np.linspace(self._x_min, self._x_max, self._x_points)
         y_vals = np.linspace(self._y_min, self._y_max, self._y_points)
@@ -3267,11 +3296,11 @@ class BedMeshScanHelper:
             i += 1
 
         def sort_points(a, b):
-            if a[1] < b[1]: # y first
+            if a[1] < b[1]:  # y first
                 return -1
             if a[1] > b[1]:
                 return 1
-            if a[0] < b[0]: # then x
+            if a[0] < b[0]:  # then x
                 return -1
             if a[0] > b[0]:
                 return 1
@@ -3290,14 +3319,16 @@ class BedMeshScanHelper:
             matrix.append(row)
 
         params = self._bed_mesh.bmc.mesh_config.copy()
-        params.update({
-            "min_x": self._x_min,
-            "max_x": self._x_max,
-            "min_y": self._y_min,
-            "max_y": self._y_max,
-            "x_count": self._x_points,
-            "y_count": self._y_points,
-        })
+        params.update(
+            {
+                "min_x": self._x_min,
+                "max_x": self._x_max,
+                "min_y": self._y_min,
+                "max_y": self._y_max,
+                "x_count": self._x_points,
+                "y_count": self._y_points,
+            }
+        )
         mesh = bed_mesh.ZMesh(params, None)
         try:
             mesh.build_mesh(matrix)
@@ -3322,10 +3353,10 @@ class BedMeshScanHelper:
 
         with self._eddy.start_sampler() as sampler:
             path_times = self._scan_path()
-            sampler.wait_for_sample_at_time(path_times[-1] + sample_time*2.)
+            sampler.wait_for_sample_at_time(path_times[-1] + sample_time * 2.0)
             sampler.finish()
 
-            heights = sampler.find_heights_at_times([(t - sample_time/2., t + sample_time/2.) for t in path_times])
+            heights = sampler.find_heights_at_times([(t - sample_time / 2.0, t + sample_time / 2.0) for t in path_times])
             # Note plus tap_offset here, vs -tap_offset when probing. These are actual
             # heights, the other is "offset from real"
             heights = [h + self._eddy._tap_offset for h in heights]
@@ -3384,7 +3415,7 @@ class BigfootProbe:
             gcode.register_mux_command("BIGFOOT_SCAN", "SENSOR", name, self.cmd_BIGFOOT_SCAN)
             gcode.register_mux_command("BIGFOOT_SET_REFERENCE", "SENSOR", name, self.cmd_BIGFOOT_SET_REFERENCE)
             gcode.register_mux_command("BIGFOOT_SET_TOOL_OFFSET", "SENSOR", name, self.cmd_BIGFOOT_SET_TOOL_OFFSET)
-  
+
     def update_status(self, status):
         if self.last_result:
             status.update({"bigfoot_scan_result": self.last_result})
@@ -3392,7 +3423,7 @@ class BigfootProbe:
             status.update({"bigfoot_scan_offset": self.last_offset})
 
     def _last_probe_z_result(self):
-        probe = self._printer.lookup_object('probe')
+        probe = self._printer.lookup_object("probe")
         ps = probe.get_status(self._printer.get_reactor().monotonic())
         return ps.get("last_z_result", None)
 
@@ -3404,7 +3435,7 @@ class BigfootProbe:
 
         if (x is None or y is None or z is None) and not self.last_offset:
             raise self._printer.command_error("BIGFOOT_SET_TOOL_OFFSET: need X Y Z if no last scan result")
- 
+
         x = x if x is not None else self.last_offset[0]
         y = y if y is not None else self.last_offset[1]
         z = z if z is not None else self.last_offset[2]
@@ -3506,16 +3537,16 @@ class BigfootProbe:
         def compute_closest_point(axis, tstart, tend):
             istart = bisect.bisect_left(sampler.times, tstart)
             iend = bisect.bisect_right(sampler.times, tend)
-            freqs = np.zeros(iend-istart)
-            coords = np.zeros(iend-istart)
+            freqs = np.zeros(iend - istart)
+            coords = np.zeros(iend - istart)
 
             # Pull out the frequencies and coordinates between tstart..tend
             for i in range(iend - istart):
-                t = sampler.times[istart+i]
-                f = sampler.freqs[istart+i]
+                t = sampler.times[istart + i]
+                f = sampler.freqs[istart + i]
 
                 pos, velocity = self.eddy._get_trapq_position(t)
-                c = pos[0] if axis == 'x' else pos[1] # the coordinate value
+                c = pos[0] if axis == "x" else pos[1]  # the coordinate value
                 freqs[i] = f
                 coords[i] = c
 
@@ -3566,12 +3597,12 @@ class BigfootProbe:
                     f = sampler.freqs[i]
                     rf = sampler.raw_freqs[i]
                     pos, v = self.eddy._get_trapq_position(t)
-                    x, y, z = pos if pos is not None else ('', '', '')
+                    x, y, z = pos if pos is not None else ("", "", "")
                     datafile.write(f"{axis},{t},{x},{y},{z},{f},{rf}\n")
 
         result = [-math.inf, -math.inf]
 
-        for axindex, axis in enumerate(['x', 'y']):
+        for axindex, axis in enumerate(["x", "y"]):
             tstart_pos = [x, y]
             tend_pos = [x, y]
 
@@ -3591,21 +3622,24 @@ class BigfootProbe:
                 write_debug(axis)
 
                 def gaussian(x, a, x0, sigma, offset):
-                    return a * np.exp(-(x - x0)**2 / (2 * sigma**2)) + offset
+                    return a * np.exp(-((x - x0) ** 2) / (2 * sigma**2)) + offset
 
-                p0 = [np_rf.max() - np_rf.min(),    # a
-                      np_pos[np.argmax(np_rf)],            # x0
-                      (np_pos.max() - np_pos.min()) / 4,          # sigma
-                      np_rf.min()]                          # offset
+                p0 = [
+                    np_rf.max() - np_rf.min(),  # a
+                    np_pos[np.argmax(np_rf)],  # x0
+                    (np_pos.max() - np_pos.min()) / 4,  # sigma
+                    np_rf.min(),
+                ]  # offset
 
-                bounds = ([0, np_pos.min(), 1e-6, 0],
-                          [np.inf, np_pos.max(), (np_pos.max() - np_pos.min())*2, np.inf])
+                bounds = ([0, np_pos.min(), 1e-6, 0], [np.inf, np_pos.max(), (np_pos.max() - np_pos.min()) * 2, np.inf])
 
                 popt, _ = curve_fit(gaussian, np_pos, np_rf, p0=p0, bounds=bounds, maxfev=10000)
                 a, x0, sigma, offset = popt
                 val = gaussian(x0, *popt)
 
-                self.eddy._log_msg(f"BIGFOOT_SCAN: {axis} {x0:.3f} (val {val:.6f} sigma {sigma:.6f})  {tend-tstart:.3f}s, {len(sampler.times)} samples")
+                self.eddy._log_msg(
+                    f"BIGFOOT_SCAN: {axis} {x0:.3f} (val {val:.6f} sigma {sigma:.6f})  {tend - tstart:.3f}s, {len(sampler.times)} samples"
+                )
                 result[axindex] = float(x0)
 
         # we're moving at speed mm/sec. we're sampling at rcount_sec.
@@ -3613,7 +3647,7 @@ class BigfootProbe:
         samples_per_sec = 1.0 / rcount_sec
         precision = speed / samples_per_sec
 
-        self.eddy._log_msg(f"BIGFOOT_SCAN: center: {result[0]:.3f} {result[1]:.3f} (samp_ms: {rcount_sec*1000.0:.3f} speed: {speed:.3f})")
+        self.eddy._log_msg(f"BIGFOOT_SCAN: center: {result[0]:.3f} {result[1]:.3f} (samp_ms: {rcount_sec * 1000.0:.3f} speed: {speed:.3f})")
 
         z = 0.0
         if z_use_probe:
@@ -3621,12 +3655,10 @@ class BigfootProbe:
             if z is None:
                 raise self._printer.command_error("BIGFOOT_SCAN: no last probe result to use for Z")
 
-
         offset = [result[0] - self._reference[0], result[1] - self._reference[1], z - self._reference[2]]
-        self.eddy._log_msg(f"BIGFOOT_SCAN: offset: {offset[0]:.3f} {offset[1]:.3f} {offset[2]:.3f} (samp_ms: {rcount_sec*1000.0:.3f} speed: {speed:.3f})")
+        self.eddy._log_msg(
+            f"BIGFOOT_SCAN: offset: {offset[0]:.3f} {offset[1]:.3f} {offset[2]:.3f} (samp_ms: {rcount_sec * 1000.0:.3f} speed: {speed:.3f})"
+        )
 
         self.last_result = result
         self.last_offset = offset
-
-
-

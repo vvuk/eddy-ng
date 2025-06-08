@@ -191,14 +191,7 @@ class LDC1612_ng:
                 self.cmd_LDC_SET_DC,
                 desc=self.cmd_LDC_SET_DC_help,
             )
-            gcode.register_mux_command(
-                "LDC_NG_SET",
-                "CHIP",
-                name,
-                self.cmd_LDC_SET,
-                desc="Set various LDC config values"
-            )
-
+            gcode.register_mux_command("LDC_NG_SET", "CHIP", name, self.cmd_LDC_SET, desc="Set various LDC config values")
 
     cmd_LDC_SET_DC_help = "Set LDC1612 DRIVE_CURRENT register (idrive value only)"
 
@@ -470,7 +463,7 @@ class LDC1612_ng:
 
         if offset is not None:
             self._ldc_offset = offset
-            offset = int(offset / self._ldc_freq_ref * (2 ** 16) + 0.5)
+            offset = int(offset / self._ldc_freq_ref * (2**16) + 0.5)
             self._ldc_offset_ref = offset
             self.set_reg(REG_OFFSET0, offset)
 
@@ -490,7 +483,7 @@ class LDC1612_ng:
         if deglitch_now == DEGLITCH_33MHZ:
             deglitch_now = "33mhz"
 
-        offset_now = round(self.read_reg(REG_OFFSET0) / (2 ** 16) * self._ldc_freq_ref)
+        offset_now = round(self.read_reg(REG_OFFSET0) / (2**16) * self._ldc_freq_ref)
         settle_now = self.read_reg(REG_SETTLECOUNT0) * 16.0 / self._ldc_freq_ref * 1000.0
         rcount_now = self.get_rcount_sec() * 1000.0
 
@@ -520,7 +513,7 @@ class LDC1612_ng:
         # This is the TI-recommended register configuration order
         # Setup chip in requested query rate
         rcount0 = self._ldc_freq_ref / (16.0 * (self._data_rate - 4))
-        offset = int(self._ldc_offset * (2 ** 16) / self._ldc_freq_ref + 0.5)
+        offset = int(self._ldc_offset * (2**16) / self._ldc_freq_ref + 0.5)
         self._ldc_offset_ref = offset
 
         self.set_reg(REG_RCOUNT0, int(rcount0 + 0.5))
@@ -627,14 +620,14 @@ class LDC1612_ng:
                 logging.error(f"LDC1612ng at least {overflows} dropped conversions")
             if seq != self._next_seq:
                 logging.error(f"LDC1612ng lost data! Expected seq {self._next_seq} got {seq}")
-            self._next_seq = (seq+1) & 0xff
+            self._next_seq = (seq + 1) & 0xFF
 
             # data is byte string. Convert to little endian u32 array
             data = np.frombuffer(data_raw, dtype=np.uint32)
 
-            for i in range(len(data)//2):
-                t = self._clock32_to_print_time(int(data[i*2]))
-                v = int(data[i*2+1])
+            for i in range(len(data) // 2):
+                t = self._clock32_to_print_time(int(data[i * 2]))
+                v = int(data[i * 2 + 1])
                 times.append(t)
                 values.append(v)
             print_time_now = self._mcu.estimated_print_time(reactor.monotonic())
@@ -642,5 +635,3 @@ class LDC1612_ng:
 
         self._data_callback(times, values)
         return self.printer.get_reactor().monotonic() + self._data_interval
-
-
