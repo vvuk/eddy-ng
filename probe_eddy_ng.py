@@ -3412,9 +3412,11 @@ class BigfootProbe:
             names.append(None)
 
         for name in names:
-            gcode.register_mux_command("EDDYNG_NOZZLE_POSITION_SCAN", "SENSOR", name, self.cmd_BIGFOOT_SCAN)
-            gcode.register_mux_command("EDDYNG_SET_NOZZLE_POSITION_REFERENCE", "SENSOR", name, self.cmd_BIGFOOT_SET_REFERENCE)
-            gcode.register_mux_command("EDDYNG_SET_TOOL_OFFSET", "SENSOR", name, self.cmd_BIGFOOT_SET_TOOL_OFFSET)
+            gcode.register_mux_command("EDDYNG_NOZZLE_POSITION_SCAN", "SENSOR", name, self.cmd_EDDYNG_NOZZLE_POSITION_SCAN)
+            gcode.register_mux_command(
+                "EDDYNG_NOZZLE_POSITION_SET_REFERENCE", "SENSOR", name, self.cmd_EDDYNG_NOZZLE_POSITION_SET_REFERENCE
+            )
+            gcode.register_mux_command("EDDYNG_SET_TOOL_OFFSET", "SENSOR", name, self.cmd_EDDYNG_SET_TOOL_OFFSET)
 
     def update_status(self, status):
         if self.last_result:
@@ -3427,14 +3429,14 @@ class BigfootProbe:
         ps = probe.get_status(self._printer.get_reactor().monotonic())
         return ps.get("last_z_result", None)
 
-    def cmd_BIGFOOT_SET_TOOL_OFFSET(self, gcmd):
+    def cmd_EDDYNG_SET_TOOL_OFFSET(self, gcmd):
         tool_name = gcmd.get("TOOL")
         x = gcmd.get_float("X", None)
         y = gcmd.get_float("Y", None)
         z = gcmd.get_float("Z", None)
 
         if (x is None or y is None or z is None) and not self.last_offset:
-            raise self._printer.command_error("BIGFOOT_SET_TOOL_OFFSET: need X Y Z if no last scan result")
+            raise self._printer.command_error("EDDYNG_SET_TOOL_OFFSET: need X Y Z if no last scan result")
 
         x = x if x is not None else self.last_offset[0]
         y = y if y is not None else self.last_offset[1]
@@ -3447,7 +3449,7 @@ class BigfootProbe:
 
         gcmd.respond_info(f"Set tool {tool.name} offset to {x:.3f} {y:.3f} {z:.3f}")
 
-    def cmd_BIGFOOT_SET_REFERENCE(self, gcmd):
+    def cmd_EDDYNG_NOZZLE_POSITION_SET_REFERENCE(self, gcmd):
         x = gcmd.get_float("X", None)
         y = gcmd.get_float("Y", None)
         z = gcmd.get_float("Z", None)
@@ -3457,7 +3459,7 @@ class BigfootProbe:
             raise self._printer.command_error("Can't specify both Z and Z_USE_PROBE")
 
         if (x is None or y is None) and not self.last_result:
-            raise self._printer.command_error("BIGFOOT_SET_REFERENCE: need both X and Y if no last scan result")
+            raise self._printer.command_error("EDDYNG_NOZZLE_POSITION_SET_REFERENCE: need both X and Y if no last scan result")
 
         x = x if x is not None else self.last_result[0]
         y = y if y is not None else self.last_result[1]
@@ -3465,25 +3467,25 @@ class BigfootProbe:
             if z_use_probe:
                 z = self._last_probe_z_result()
                 if z is None:
-                    raise self._printer.command_error("BIGFOOT_SET_REFERENCE: no last probe result to use for Z")
+                    raise self._printer.command_error("EDDYNG_NOZZLE_POSITION_SET_REFERENCE: no last probe result to use for Z")
             else:
                 z = 0.0
 
         self._reference = [x, y, z]
-        gcmd.respond_info(f"BIGFOOT_SCAN reference set to {x:.3f} {y:.3f} {z:.3f}")
+        gcmd.respond_info(f"EDDYNG_NOZZLE_POSITION_SCAN reference set to {x:.3f} {y:.3f} {z:.3f}")
 
-    def cmd_BIGFOOT_SCAN(self, gcmd):
+    def cmd_EDDYNG_NOZZLE_POSITION_SCAN(self, gcmd):
         try:
-            self.cmd_BIGFOOT_SCAN_actual(gcmd)
+            self.cmd_EDDYNG_NOZZLE_POSITION_SCAN_actual(gcmd)
         except Exception as e:
-            logging.exception("BIGFOOT_SCAN error")
-            self.eddy._log_error(f"BIGFOOT_SCAN error: {e}")
+            logging.exception("EDDYNG_NOZZLE_POSITION_SCAN error")
+            self.eddy._log_error(f"EDDYNG_NOZZLE_POSITION_SCAN error: {e}")
 
-    def cmd_BIGFOOT_SCAN_actual(self, gcmd):
+    def cmd_EDDYNG_NOZZLE_POSITION_SCAN_actual(self, gcmd):
         use_last = gcmd.get_int("USE_LAST", 0) == 1
         if use_last:
             if not self.last_result:
-                raise self._printer.command_error("BIGFOOT_SCAN: USE_LAST specified but no last result")
+                raise self._printer.command_error("EDDYNG_NOZZLE_POSITION_SCAN: USE_LAST specified but no last result")
             x, y = self.last_result
             z = self.eddy.params.bigfoot_scan_position[2] if self.eddy.params.bigfoot_scan_position else None
         elif self.eddy.params.bigfoot_scan_position:
@@ -3494,7 +3496,7 @@ class BigfootProbe:
         y = gcmd.get_float("Y", y)
         z = gcmd.get_float("Z", z)
         if x is None or y is None or z is None:
-            raise self._printer.command_error("BIGFOOT_SCAN requires X, Y, and Z")
+            raise self._printer.command_error("EDDYNG_NOZZLE_POSITION_SCAN requires X, Y, and Z")
 
         z_use_probe = gcmd.get_int("Z_USE_PROBE", 0) == 1
 
@@ -3637,7 +3639,7 @@ class BigfootProbe:
                 val = gaussian(x0, *popt)
 
                 self.eddy._log_msg(
-                    f"BIGFOOT_SCAN: {axis} {x0:.3f} (val {val:.6f} sigma {sigma:.6f})  {tend - tstart:.3f}s, {len(sampler.times)} samples"
+                    f"EDDYNG_NOZZLE_POSITION_SCAN: {axis} {x0:.3f} (val {val:.6f} sigma {sigma:.6f})  {tend - tstart:.3f}s, {len(sampler.times)} samples"
                 )
                 result[axindex] = float(x0)
 
@@ -3646,17 +3648,19 @@ class BigfootProbe:
         samples_per_sec = 1.0 / rcount_sec
         precision = speed / samples_per_sec
 
-        self.eddy._log_msg(f"BIGFOOT_SCAN: center: {result[0]:.3f} {result[1]:.3f} (samp_ms: {rcount_sec * 1000.0:.3f} speed: {speed:.3f})")
+        self.eddy._log_msg(
+            f"EDDYNG_NOZZLE_POSITION_SCAN: center: {result[0]:.3f} {result[1]:.3f} (samp_ms: {rcount_sec * 1000.0:.3f} speed: {speed:.3f})"
+        )
 
         z = 0.0
         if z_use_probe:
             z = self._last_probe_z_result()
             if z is None:
-                raise self._printer.command_error("BIGFOOT_SCAN: no last probe result to use for Z")
+                raise self._printer.command_error("EDDYNG_NOZZLE_POSITION_SCAN: no last probe result to use for Z")
 
         offset = [result[0] - self._reference[0], result[1] - self._reference[1], z - self._reference[2]]
         self.eddy._log_msg(
-            f"BIGFOOT_SCAN: offset: {offset[0]:.3f} {offset[1]:.3f} {offset[2]:.3f} (samp_ms: {rcount_sec * 1000.0:.3f} speed: {speed:.3f})"
+            f"EDDYNG_NOZZLE_POSITION_SCAN: offset: {offset[0]:.3f} {offset[1]:.3f} {offset[2]:.3f} (samp_ms: {rcount_sec * 1000.0:.3f} speed: {speed:.3f})"
         )
 
         self.last_result = result
