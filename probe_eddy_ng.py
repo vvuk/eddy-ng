@@ -3461,18 +3461,19 @@ class BigfootProbe:
         if z_use_probe and z is not None:
             raise self._printer.command_error("Can't specify both Z and Z_USE_PROBE")
 
+        if z is None and not z_use_probe:
+            raise self._printer.command_error("Must specify either Z or Z_USE_PROBE")
+
         if (x is None or y is None) and not self.last_result:
-            raise self._printer.command_error("EDDYNG_NOZZLE_POSITION_SET_REFERENCE: need both X and Y if no last scan result")
+            raise self._printer.command_error("Need both X and Y if no last scan result")
 
         x = x if x is not None else self.last_result[0]
         y = y if y is not None else self.last_result[1]
-        if z is None:
-            if z_use_probe:
-                z = self._last_probe_z_result()
-                if z is None:
-                    raise self._printer.command_error("EDDYNG_NOZZLE_POSITION_SET_REFERENCE: no last probe result to use for Z")
-            else:
-                z = 0.0
+        z = z or 0.0
+        if z_use_probe:
+            z = self._last_probe_z_result()
+            if z is None:
+                raise self._printer.command_error("Z_USE_PROBE specified, but no last probe result to use for Z")
 
         self._reference = [x, y, z]
         gcmd.respond_info(f"EDDYNG_NOZZLE_POSITION_SCAN reference set to {x:.3f} {y:.3f} {z:.3f}")
@@ -3488,7 +3489,7 @@ class BigfootProbe:
         use_last = gcmd.get_int("USE_LAST", 0) == 1
         if use_last:
             if not self.last_result:
-                raise self._printer.command_error("EDDYNG_NOZZLE_POSITION_SCAN: USE_LAST specified but no last result")
+                raise self._printer.command_error("No last scan result to use for USE_LAST")
             x, y = self.last_result
             z = self.eddy.params.bigfoot_scan_position[2] if self.eddy.params.bigfoot_scan_position else None
         elif self.eddy.params.bigfoot_scan_position:
@@ -3499,9 +3500,9 @@ class BigfootProbe:
         y = gcmd.get_float("Y", y)
         z = gcmd.get_float("Z", z)
         if x is None or y is None or z is None:
-            raise self._printer.command_error("EDDYNG_NOZZLE_POSITION_SCAN requires X, Y, and Z")
+            raise self._printer.command_error("EDDYNG_NOZZLE_POSITION_SCAN requires X, Y, and Z; bigfoot_scan_position in the config; or USE_LAST")
 
-        z_use_probe = gcmd.get_int("Z_USE_PROBE", 0) == 1
+        scan_z_use_probe = gcmd.get_int("SCAN_Z_USE_PROBE", 0) == 1
 
         radius = gcmd.get_float("RADIUS", 5.0)
         passes = gcmd.get_int("PASSES", 3)
@@ -3510,10 +3511,10 @@ class BigfootProbe:
         speed = gcmd.get_float("SPEED", self.eddy.params.probe_speed)
 
         zval = 0.0
-        if z_use_probe:
+        if scan_z_use_probe:
             zval = self._last_probe_z_result()
             if zval is None:
-                raise self._printer.command_error("EDDYNG_NOZZLE_POSITION_SCAN: Z_USE_PROBE specified, but no last probe result to use for Z")
+                raise self._printer.command_error("SCAN_Z_USE_PROBE specified, but no last probe result to use for scan Z")
 
         th: ToolHead = cast(ToolHead, self._printer.lookup_object("toolhead"))
 
