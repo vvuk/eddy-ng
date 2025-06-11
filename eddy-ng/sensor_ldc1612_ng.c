@@ -388,12 +388,10 @@ command_query_ldc1612_ng_latched_status(uint32_t *args)
     // If we're not actively running, then read the status and
     // value directly
     if (ld->rest_ticks == 0) {
-        irq_disable();
         status = read_reg_status(ld);
         uint8_t d[4];
         read_reg(ld, REG_DATA0_MSB, &d[0]);
         read_reg(ld, REG_DATA0_LSB, &d[2]);
-        irq_enable();
 
         lastval =   ((uint32_t)d[0] << 24)
                   | ((uint32_t)d[1] << 16)
