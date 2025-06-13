@@ -833,9 +833,10 @@ class ProbeEddy:
 
         err = ""
         if freqval > 0x0FFFFFFF:
-            height = -math.inf
             freq = 0.0
-            err = f"ERROR: {bin(freqval >> 28)} "
+            err += f"ERROR: {bin(freqval >> 28)} "
+        elif freq <= 0.0:
+            err += "(Zero frequency) "
         elif self.calibrated():
             height = self.freq_to_height(freq)
         else:
