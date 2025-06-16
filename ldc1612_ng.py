@@ -336,18 +336,19 @@ class LDC1612_ng:
         res = self._ldc1612_ng_latched_status_cmd.send([self._oid])
         status = res["status"]
         lastval = res["lastval"]
+        freq = self.from_ldc_freqval(lastval) if lastval <= 0x0FFFFFFF else 0.0
 
         return LDC1612_ng_value(
             status=status,
             freqval=lastval,
-            freq=self.from_ldc_freqval(lastval, ignore_err=True),
+            freq=freq,
         )
 
     def to_ldc_freqval(self, freq):
         return int(freq * (1 << 28) / float(self._ldc_freq_ref) + 0.5)
 
     def from_ldc_freqval(self, val, ignore_err=False):
-        if val >= 0x0FFFFFFF and not ignore_err:
+        if val > 0x0FFFFFFF and not ignore_err:
             raise self.printer.command_error(f"LDC1612 frequency value has error bits: {hex(val)}")
         return round(val * (float(self._ldc_freq_ref) / (1 << 28)), 3)
 
