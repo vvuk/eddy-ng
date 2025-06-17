@@ -427,10 +427,8 @@ command_query_ldc1612_ng_latched_status(uint32_t *args)
     // If we're not actively running, then read the status and
     // value directly
     if (ld->rest_ticks == 0) {
-        irq_disable();
         status = read_reg_status(ld);
         lastval = read_reg_data0(ld);
-        irq_enable();
     }
 
     sendf("ldc1612_ng_latched_status oid=%c status=%u lastval=%u"
