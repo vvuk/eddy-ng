@@ -1075,12 +1075,8 @@ class ProbeEddy:
         self._set_toolhead_position(th_pos, [2])
 
         orig_drive_current = self.current_drive_current()
-        start_dc = self._sensor._default_drive_current
-        end_dc = self._sensor._default_drive_current
-
-        if self._sensor_type == "ldc1612" or self._sensor_type == "btt_eddy" or self._sensor_type == "mellow_fly":
-            start_dc = min(31, self._sensor._default_drive_current + 10)
-            end_dc = 1
+        start_dc = self._sensor._drive_current_range[1]
+        end_dc = self._sensor._drive_current_range[0]
 
         start_dc: int = gcmd.get_int("START_DRIVE_CURRENT", start_dc, minval=0, maxval=31)
         end_dc: int = gcmd.get_int("END_DRIVE_CURRENT", end_dc, minval=0, maxval=31)
@@ -1137,7 +1133,8 @@ class ProbeEddy:
                 write_debug_files=debug,
             )
 
-            if mapping.height_range[1] < 1.0:
+            # ignore anything with max height range < 3.0
+            if mapping.height_range[1] < 3.0 or mapping.height_range[0] > 1.0:
                 mapping = None
 
             if mapping is None:
