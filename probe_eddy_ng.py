@@ -559,86 +559,49 @@ class ProbeEddy:
             logging.info(f"{self._name}: {msg}")
 
     def define_commands(self, gcode):
-        gcode.register_command("PROBE_EDDY_NG_STATUS", self.cmd_STATUS, self.cmd_STATUS_help)
-        gcode.register_command(
-            "PROBE_EDDY_NG_CALIBRATE",
-            self.cmd_CALIBRATE,
-            self.cmd_CALIBRATE_help,
-        )
-        gcode.register_command(
-            "PROBE_EDDY_NG_CALIBRATION_STATUS",
-            self.cmd_CALIBRATION_STATUS,
-            self.cmd_CALIBRATION_STATUS_help,
-        )
-        gcode.register_command(
-            "PROBE_EDDY_NG_SETUP",
-            self.cmd_SETUP,
-            self.cmd_SETUP_help,
-        )
-        gcode.register_command(
-            "PROBE_EDDY_NG_CLEAR_CALIBRATION",
-            self.cmd_CLEAR_CALIBRATION,
-            self.cmd_CLEAR_CALIBRATION_help,
-        )
-        gcode.register_command("PROBE_EDDY_NG_PROBE", self.cmd_PROBE, self.cmd_PROBE_help)
-        gcode.register_command(
-            "PROBE_EDDY_NG_PROBE_STATIC",
-            self.cmd_PROBE_STATIC,
-            self.cmd_PROBE_STATIC_help,
-        )
-        gcode.register_command(
-            "PROBE_EDDY_NG_PROBE_ACCURACY",
-            self.cmd_PROBE_ACCURACY,
-            self.cmd_PROBE_ACCURACY_help,
-        )
-        gcode.register_command("PROBE_EDDY_NG_TAP", self.cmd_TAP, self.cmd_TAP_help)
-        gcode.register_command(
-            "PROBE_EDDY_NG_SET_TAP_OFFSET",
-            self.cmd_SET_TAP_OFFSET,
-            "Set or clear the tap offset for the bed mesh scan and other probe operations",
-        )
-        gcode.register_command(
-            "PROBE_EDDY_NG_SET_TAP_ADJUST_Z",
-            self.cmd_SET_TAP_ADJUST_Z,
-            "Set the tap adjustment value",
-        )
-        gcode.register_command(
-            "PROBE_EDDY_NG_TEST_DRIVE_CURRENT",
-            self.cmd_TEST_DRIVE_CURRENT,
-            "Test a drive current.",
-        )
+        commands = [
+            ["STATUS", "PES"],
+            "CALIBRATE",
+            "SETUP",
+            "CLEAR_CALIBRATION",
+            ["PROBE", "PEP"],
+            ["PROBE_STATIC", "PEPS"],
+            "PROBE_ACCURACY",
+            ["TAP", "PETAP"],
+            "SET_TAP_ADJUST_Z",
+            "TEST_DRIVE_CURRENT",
+
+            "BED_MESH_EXPERIMENTAL",
+            "START_STREAM_EXPERIMENTAL",
+            "STOP_STREAM_EXPERIMENTAL",
+        ]
+
+        prefixes = ["PROBE_EDDY_NG", "EDDYNG"]
+
+        for v in commands:
+            if type(v) is list:
+                cmd_name = v[0]
+                aliases = v[1:]
+            else:
+                cmd_name = v
+                aliases = []
+
+            func_name = f"cmd_{cmd_name.replace("_EXPERIMENTAL", "")}"
+
+            cmd_fn = getattr(self, func_name)
+            cmd_help = getattr(self, f"{func_name}_help", None)
+            for p in prefixes:
+                gcode.register_command(f"{p}_{cmd_name}", cmd_fn, cmd_help)
+            for alias in aliases:
+                for p in prefixes:
+                    gcode.register_command(alias, cmd_fn, (cmd_help or "") + f" (alias for {cmd_name})")
+
         gcode.register_command("Z_OFFSET_APPLY_PROBE", None)
         gcode.register_command(
             "Z_OFFSET_APPLY_PROBE",
             self.cmd_Z_OFFSET_APPLY_PROBE,
             "Apply the current G-Code Z offset to tap_adjust_z",
         )
-
-        # some handy aliases while I'm debugging things to save my fingers
-        gcode.register_command(
-            "PES",
-            self.cmd_STATUS,
-            self.cmd_STATUS_help + " (alias for PROBE_EDDY_NG_STATUS)",
-        )
-        gcode.register_command(
-            "PEP",
-            self.cmd_PROBE,
-            self.cmd_PROBE_help + " (alias for PROBE_EDDY_NG_PROBE)",
-        )
-        gcode.register_command(
-            "PEPS",
-            self.cmd_PROBE_STATIC,
-            self.cmd_PROBE_STATIC_help + " (alias for PROBE_EDDY_NG_PROBE_STATIC)",
-        )
-        gcode.register_command(
-            "PETAP",
-            self.cmd_TAP,
-            self.cmd_TAP_help + " (alias for PROBE_EDDY_NG_TAP)",
-        )
-
-        gcode.register_command("EDDYNG_BED_MESH_EXPERIMENTAL", self.cmd_MESH, "")
-        gcode.register_command("EDDYNG_START_STREAM_EXPERIMENTAL", self.cmd_START_STREAM, "")
-        gcode.register_command("EDDYNG_STOP_STREAM_EXPERIMENTAL", self.cmd_STOP_STREAM, "")
 
     def _handle_command_error(self, gcmd=None):
         try:
@@ -818,7 +781,7 @@ class ProbeEddy:
             logging.info(f"Wrote {len(times)} samples to {self.save_samples_path}")
             self.save_samples_path = None
 
-    def cmd_MESH(self, gcmd: GCodeCommand):
+    def cmd_BED_MESH(self, gcmd: GCodeCommand):
         self._bed_mesh_helper.scan()
 
     cmd_STATUS_help = "Query the last raw coil value and status"
@@ -952,6 +915,8 @@ class ProbeEddy:
                 f"Drive current {dc}: {hmin:.3f} to {hmax:.3f} ({fmin:.1f} to {fmax:.1f}, {fspread:.2f}%; ftoh_high: {m._ftoh_high is not None})"
             )
 
+    cmd_SET_TAP_OFFSET_help = "Set or clear the tap offset for the bed mesh scan and other probe operations"
+
     def cmd_SET_TAP_OFFSET(self, gcmd: GCodeCommand):
         value = gcmd.get_float("VALUE", None)
         adjust = gcmd.get_float("ADJUST", None)
@@ -962,6 +927,8 @@ class ProbeEddy:
             tap_offset += adjust
         self._tap_offset = tap_offset
         gcmd.respond_info(f"Set tap offset: {tap_offset:.3f}")
+
+    cmd_SET_TAP_ADJUST_Z_help = "Set the tap adjustment value"
 
     def cmd_SET_TAP_ADJUST_Z(self, gcmd: GCodeCommand):
         value = gcmd.get_float("VALUE", None)
@@ -1107,18 +1074,19 @@ class ProbeEddy:
         th_pos[2] = 0.0
         self._set_toolhead_position(th_pos, [2])
 
-        # Note that the default is the default drive current
-        drive_current: int = gcmd.get_int(
-            "DRIVE_CURRENT",
-            self._sensor._default_drive_current,
-            minval=0,
-            maxval=31,
-        )
+        orig_drive_current = self.current_drive_current()
+        start_dc = self._sensor._default_drive_current
+        end_dc = self._sensor._default_drive_current
 
-        max_dc_increase = 0
-        if self._sensor_type == "ldc1612" or self._sensor_type == "btt_eddy":
-            max_dc_increase = 5
-        max_dc_increase = gcmd.get_int("MAX_DC_INCREASE", max_dc_increase, minval=0, maxval=30)
+        if self._sensor_type == "ldc1612" or self._sensor_type == "btt_eddy" or self._sensor_type == "mellow_fly":
+            start_dc = min(31, self._sensor._default_drive_current + 10)
+            end_dc = 1
+
+        start_dc: int = gcmd.get_int("START_DRIVE_CURRENT", start_dc, minval=0, maxval=31)
+        end_dc: int = gcmd.get_int("END_DRIVE_CURRENT", end_dc, minval=0, maxval=31)
+
+        if end_dc > start_dc:
+            raise self._printer.command_error("end can't be greater than start")
 
         # lift up above cal_z_max, and then move over so the probe
         # is over the nozzle position
@@ -1135,92 +1103,81 @@ class ProbeEddy:
             self.params.move_speed,
         )
 
-        # This is going to automate setup.
-        # The setup state machine looks like this:
-        # 1. Finding homing drive current
-        # 2. Finding tapping drive current
-        FINDING_HOMING = 1
-        FINDING_TAP = 2
-        DONE = 3
+        HOMING_REQ = (0.5, 5.0)
+        TAP_REQ = (0.025, 3.0)
 
-        start_drive_current = drive_current
-        result_msg = None
+        def in_range(m, req):
+            if m is None:
+                return False
+            return m.height_range[0] <= req[0] and m.height_range[1] >= req[1]
 
-        self._log_msg("setup: calibrating homing")
-        state = FINDING_HOMING
-        while state < DONE:
-            mapping, fth_rms, htf_rms = self._create_mapping(
+        def best_mapping(old_m, new_m, req):
+            if not in_range(new_m, req):
+                return old_m
+            if old_m is None:
+                return new_m
+            # prefer ranges that expand the valid range at the bottom end,
+            # as long as they're still within req
+            if old_m[0] > new_m[0]:
+                return new_m
+            return old_m
+
+        self._log_msg("Setup: calibrating...")
+        best_homing = None
+        best_tap = None
+        saw_success = False
+        for cur_dc in range(start_dc, end_dc - 1, -1):
+            mapping, _, _ = self._create_mapping(
                 self.params.calibration_z_max,
                 0.0,  # z_target
                 self.params.probe_speed,
                 self.params.lift_speed,
-                drive_current,
+                cur_dc,
                 report_errors=debug,
                 write_debug_files=debug,
             )
 
-            homing_req_min = 0.5
-            homing_req_max = 5.0
-            tap_req_min = 0.025
-            tap_req_max = 3.0
+            if mapping.height_range[1] < 1.0:
+                mapping = None
 
-            ok_for_homing = mapping is not None
-            ok_for_tap = mapping is not None
+            if mapping is None:
+                if saw_success:
+                    # don't test really low drive currents unnecessarily
+                    self._log_msg(f"DC {cur_dc} not usable, not checking further")
+                    break
+                self._log_msg(f"DC {cur_dc} not usable...")
+                continue
 
-            if ok_for_homing and (mapping.height_range[0] > homing_req_min or mapping.height_range[1] < homing_req_max):
-                ok_for_homing = False
-            if ok_for_tap and (mapping.height_range[0] > tap_req_min or mapping.height_range[1] < tap_req_max):
-                ok_for_tap = False
+            saw_success = True
+            self._log_msg(f"{mapping}")
 
-            if ok_for_homing or ok_for_tap:
-                self._log_info(f"dc {drive_current} homing {ok_for_homing} tap {ok_for_tap}, {fth_rms} {htf_rms}")
-                if mapping.freq_spread() < 0.30:
-                    self._log_warning(
-                        f"frequency spread {mapping.freq_spread()} is very low at drive current {drive_current}. (The sensor is probably mounted too high; the height includes any case thickness.)"
-                    )
-                    ok_for_homing = ok_for_tap = False
-                if fth_rms is None or fth_rms > 0.025:
-                    self._log_msg(f"calibration error rate is too high ({fth_rms}) at drive current {drive_current}.")
-                    ok_for_homing = ok_for_tap = False
+            best_homing = best_mapping(best_homing, mapping, HOMING_REQ)
+            best_tap = best_mapping(best_tap, mapping, TAP_REQ)
 
-            if state == FINDING_HOMING and ok_for_homing:
-                self._dc_to_fmap[drive_current] = mapping
-                self._reg_drive_current = drive_current
-                self._log_msg(f"using {drive_current} for homing.")
-                state = FINDING_TAP
+        if best_homing is None:
+            self._log_error(
+                "Unable to find valid homing drive current. Verify sensor height and consult documentation for troubleshooting."
+            )
+            self._sensor.set_drive_current(orig_drive_current)
+            return
 
-            if state == FINDING_TAP and ok_for_tap:
-                self._dc_to_fmap[drive_current] = mapping
-                self._tap_drive_current = drive_current
-                self._log_msg(f"using {drive_current} for tap.")
-                state = DONE
+        self._dc_to_fmap[best_homing.drive_current] = best_homing
+        self._reg_drive_current = best_homing.drive_current
+        self._log_msg(f"Using for homing: {best_homing}")
 
-            if state == DONE:
-                result_msg = "Setup success. Please check whether homing works with G28 Z, then check if tap works with PROBE_EDDY_NG_TAP."
-                break
-
-            if drive_current - start_drive_current >= max_dc_increase:
-                # we've failed completely
-                if state == FINDING_HOMING:
-                    result_msg = "Failed to find homing drive current. (Have you checked the sensor height?)"
-                elif state == FINDING_TAP:
-                    result_msg = "Failed to find tap drive current, but homing is set up. (Have you checked the sensor height?)"
-                else:
-                    result_msg = "Unknown state?"
-                break
-
-            # increase DC and keep going
-            drive_current += 1
-
-        if state == DONE:
-            self._log_msg(result_msg)
+        if best_tap is not None:
+            self._dc_to_fmap[best_tap.drive_current] = best_tap
+            self._tap_drive_current = best_tap.drive_current
+            self._log_msg(f"Using for tap: {best_tap}")
         else:
-            self._log_error(result_msg)
+            self._log_warning(
+                "Unable to find valid tap drive current, but homing should be functional. (Verify sensor height and consult documentation for troubleshooting.)"
+            )
 
-        if state > FINDING_HOMING:
-            self.reset_drive_current()
-            self.save_config()
+        self._log_msg("Setup complete. Verify Z homing with G28 Z, and tap with EDDYNG_TAP if tap calibration was successful.")
 
+        self.reset_drive_current()
+        self.save_config()
         self._z_not_homed()
 
     cmd_CALIBRATE_help = (
@@ -1394,6 +1351,8 @@ class ProbeEddy:
                 vels.append(s_v)
 
         return times, freqs, heights, vels
+
+    cmd_TEST_DRIVE_CURRENT_help = "Test drive current value when Z is already homed"
 
     def cmd_TEST_DRIVE_CURRENT(self, gcmd: GCodeCommand):
         drive_current: int = gcmd.get_int("DRIVE_CURRENT", self._reg_drive_current, minval=1, maxval=31)
@@ -2823,6 +2782,15 @@ class ProbeEddyFrequencyMap:
         self._ftoh: Optional[npp.Polynomial] = None
         self._ftoh_high: Optional[npp.Polynomial] = None
         self._htof: Optional[npp.Polynomial] = None
+        self._ftoh_rms = None
+        self._htof_rms = None
+
+    def __format__(self, _spec):
+        return (
+            f"DC {self.drive_current}: valid range {self.height_range[0]:.3f} to {self.height_range[1]:.3f}, "
+            + f"spread {self.freq_spread():.2f}% (freq {self.freq_range[0]:.1f} to {self.freq_range[1]:.1f})  "
+            + f"fit {self._ftoh_rms:.3f}, {self._htof_rms:.3f})"
+        )
 
     def _str_to_exact_floatlist(self, str):
         return [float.fromhex(v) for v in str.split(",")]
@@ -2973,7 +2941,7 @@ class ProbeEddyFrequencyMap:
         if np.count_nonzero(high_samples) > 50:
             ftoh_high_fn = npp.Polynomial.fit(1.0 / freqs[high_samples], heights[high_samples], deg=9)
         else:
-            self._eddy._log_debug(f"not computing ftoh_high, not enough high samples")
+            self._eddy._log_debug("not computing ftoh_high, not enough high samples")
             ftoh_high_fn = None
 
         # Calculate rms, only for the low values (where error is most relevant)
@@ -2999,15 +2967,13 @@ class ProbeEddyFrequencyMap:
         self._ftoh = ftoh_low_fn
         self._htof = htof_low_fn
         self._ftoh_high = ftoh_high_fn
+        self._ftoh_rms = rmse_fth
+        self._htof_rms = rmse_htf
         self.drive_current = drive_current
         self.height_range = [min_height, max_height]
         self.freq_range = [min_freq, max_freq]
 
-        self._eddy._log_msg(
-            f"Drive current {drive_current}: valid height: {min_height:.3f} to {max_height:.3f}, "
-            f"freq spread {freq_spread:.2f}% ({min_freq:.1f} - {max_freq:.1f}), "
-            f"Fit {rmse_fth:.4f} ({rmse_htf:.2f})"
-        )
+        self._eddy._log_msg(f"{self}")
 
         if write_debug_files:
             self._write_calibration_plot(
