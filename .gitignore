@@ -4,3 +4,5 @@
 *~
 *.orig
 *.rej
+tmp
+__pycache__
