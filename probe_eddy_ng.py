@@ -134,15 +134,8 @@ except ImportError:
 # by relying on absolute sensor readings.
 #
 
-
 @dataclass
-class ProbeEddyParams:
-    # The speed at which to perform normal homing operations
-    probe_speed: float = 5.0
-    # The speed at which to lift the toolhead during probing operations
-    lift_speed: float = 10.0
-    # The speed at which to move in the xy plane (typically only for calibration)
-    move_speed: float = 50.0
+class ProbeEddyNgParams:
     # The height at which the virtual endstop should trigger. A value
     # between 1.0 and 3.0 is recommended, with 2.0 or 2.5 being good
     # choices.
@@ -157,10 +150,82 @@ class ProbeEddyParams:
     # that are above the safe position before it's crossed, to ensure that homing
     # doesn't begin with the toolhead too low.
     home_trigger_safe_time_offset: float = 0.100
+    # Z toolhead must pass through after the home trigger
+    # Z before taps will be detected
+    tap_trigger_safe_start_height: float = 1.5
     # The maximum z value to calibrate from. 15.0 is fine as a default, calibrating
     # at higher values is not needed. Calibration will start with the first
     # valid height.
     calibration_z_max: float = 15.0
+    # When probing multiple points (not rapid scan), how long to sample for at each probe point,
+    # after a scan_sample_time_delay delay. The total dwell time at each probe point is
+    # scan_sample_time + scan_sample_time_delay.
+    scan_sample_time: float = 0.100
+    # When probing multiple points (not rapid scan), how long to delay at each probe point
+    # before the scan_sample_time kicks in.
+    scan_sample_time_delay: float = 0.050
+    # Probe position relative to toolhead
+    x_offset: float = 0.0
+    y_offset: float = 0.0
+    # remove some safety checks, largely for testing/development
+    allow_unsafe: bool = False
+    # whether to write the tap plot for the last tap
+    write_tap_plot: bool = True
+    # whether to write the tap plot for every tap
+    write_every_tap_plot: bool = True
+    # maximum number of errors to allow in a row on the sensor
+    max_errors: int = 0
+    # whether to print lots of verbose debug info to the log
+    debug: bool = True
+
+    def load_from_config(self, config: ConfigWrapper):
+        self.x_offset = config.getfloat("x_offset", self.x_offset)
+        self.y_offset = config.getfloat("y_offset", self.y_offset)
+
+        self.home_trigger_height = config.getfloat("home_trigger_height", self.home_trigger_height, minval=1.0)
+        self.home_trigger_safe_start_offset = config.getfloat(
+            "home_trigger_safe_start_offset",
+            self.home_trigger_safe_start_offset,
+            minval=0.5,
+        )
+        self.calibration_z_max = config.getfloat("calibration_z_max", self.calibration_z_max, above=0.0)
+
+        self.scan_sample_time = config.getfloat("scan_sample_time", self.scan_sample_time, above=0.0)
+        self.scan_sample_time_delay = config.getfloat("scan_sample_time_delay", self.scan_sample_time_delay, minval=0.0)
+
+        self.allow_unsafe = config.getboolean("allow_unsafe", self.allow_unsafe)
+        self.write_tap_plot = config.getboolean("write_tap_plot", self.write_tap_plot)
+        self.write_every_tap_plot = config.getboolean("write_every_tap_plot", self.write_every_tap_plot)
+        self.debug = config.getboolean("debug", self.debug)
+
+        self.max_errors = config.getint("max_errors", self.max_errors)
+
+        self.validate(config)
+
+    def validate(self, config: ConfigWrapper = None):
+        printer = config.get_printer()
+        req_cal_z_max = self.home_trigger_safe_start_offset + self.home_trigger_height + 1.0
+        if self.calibration_z_max < req_cal_z_max:
+            raise printer.config_error(
+                f"calibration_z_max must be at least home_trigger_safe_start_offset+home_trigger_height+1.0 ({self.home_trigger_safe_start_offset:.3f}+{self.home_trigger_height:.3f}+1.0={req_cal_z_max:.3f})"
+            )
+        if self.x_offset == 0.0 and self.y_offset == 0.0 and not self.allow_unsafe:
+            raise printer.config_error("ProbeEddy: x_offset and y_offset are both 0.0; is the sensor really mounted at the nozzle?")
+
+        if self.home_trigger_height <= self.tap_trigger_safe_start_height:
+            raise printer.config_error("ProbeEddy: home_trigger_height must be greater than tap_trigger_safe_start_height")
+
+
+@dataclass
+class ProbeEddyNgProfile:
+    # The probile name
+    name: str = "default"
+    # The speed at which to perform normal homing operations
+    probe_speed: float = 5.0
+    # The speed at which to lift the toolhead during probing operations
+    lift_speed: float = 10.0
+    # The speed at which to move in the xy plane (typically only for calibration)
+    move_speed: float = 50.0
     # The "drive current" for the LDC1612 sensor. This value is typically
     # sensor specific and depends on the coil design and the operating distance.
     # A good starting value for BTT Eddy is 15. A good value can be obtained
@@ -236,36 +301,10 @@ class ProbeEddyParams:
     # in the range of 0.0 to 1.0.
     tap_time_position: float = 0.3
 
-    # When probing multiple points (not rapid scan), how long to sample for at each probe point,
-    # after a scan_sample_time_delay delay. The total dwell time at each probe point is
-    # scan_sample_time + scan_sample_time_delay.
-    scan_sample_time: float = 0.100
-    # When probing multiple points (not rapid scan), how long to delay at each probe point
-    # before the scan_sample_time kicks in.
-    scan_sample_time_delay: float = 0.050
-    # number of points to save for calibration
-    calibration_points: int = 150
     # configuration for butterworth filter
     tap_butter_lowcut: float = 5.0
     tap_butter_highcut: float = 25.0
     tap_butter_order: int = 2
-    # Probe position relative to toolhead
-    x_offset: float = 0.0
-    y_offset: float = 0.0
-    # remove some safety checks, largely for testing/development
-    allow_unsafe: bool = False
-    # whether to write the tap plot for the last tap
-    write_tap_plot: bool = False
-    # whether to write the tap plot for every tap
-    write_every_tap_plot: bool = False
-    # maximum number of errors to allow in a row on the sensor
-    max_errors: int = 0
-    # whether to print lots of verbose debug info to the log
-    debug: bool = True
-
-    tap_trigger_safe_start_height: float = 1.5
-
-    _warning_msgs: List[str] = field(default_factory=list)
 
     @staticmethod
     def str_to_floatlist(s):
@@ -285,13 +324,6 @@ class ProbeEddyParams:
         self.probe_speed = config.getfloat("probe_speed", self.probe_speed, above=0.0)
         self.lift_speed = config.getfloat("lift_speed", self.lift_speed, above=0.0)
         self.move_speed = config.getfloat("move_speed", self.move_speed, above=0.0)
-        self.home_trigger_height = config.getfloat("home_trigger_height", self.home_trigger_height, minval=1.0)
-        self.home_trigger_safe_start_offset = config.getfloat(
-            "home_trigger_safe_start_offset",
-            self.home_trigger_safe_start_offset,
-            minval=0.5,
-        )
-        self.calibration_z_max = config.getfloat("calibration_z_max", self.calibration_z_max, above=0.0)
 
         self.reg_drive_current = config.getint("reg_drive_current", 0, minval=0, maxval=31)
         self.tap_drive_current = config.getint("tap_drive_current", 0, minval=0, maxval=31)
@@ -300,16 +332,12 @@ class ProbeEddyParams:
         self.tap_target_z = config.getfloat("tap_target_z", self.tap_target_z)
         self.tap_speed = config.getfloat("tap_speed", self.tap_speed, above=0.0)
         self.tap_adjust_z = config.getfloat("tap_adjust_z", self.tap_adjust_z)
-        self.calibration_points = config.getint("calibration_points", self.calibration_points)
 
         self.tap_mode = config.getchoice("tap_mode", mode_choices, self.tap_mode)
         default_tap_threshold = 1000.0  # for wma
         if self.tap_mode == "butter":
             default_tap_threshold = 250.0
         self.tap_threshold = config.getfloat("tap_threshold", default_tap_threshold)
-
-        self.scan_sample_time = config.getfloat("scan_sample_time", self.scan_sample_time, above=0.0)
-        self.scan_sample_time_delay = config.getfloat("scan_sample_time_delay", self.scan_sample_time_delay, minval=0.0)
 
         # for 'butter'
         self.tap_butter_lowcut = config.getfloat("tap_butter_lowcut", self.tap_butter_lowcut, above=0.0)
@@ -323,46 +351,12 @@ class ProbeEddyParams:
         self.tap_samples = config.getint("tap_samples", self.tap_samples, minval=1)
         self.tap_max_samples = config.getint("tap_max_samples", self.tap_max_samples, minval=self.tap_samples)
         self.tap_samples_stddev = config.getfloat("tap_samples_stddev", self.tap_samples_stddev, above=0.0)
-        self.tap_trigger_safe_start_height = config.getfloat(
-            "tap_trigger_safe_start_height",
-            -1.0,
-            above=0.0,
-        )
         self.tap_time_position = config.getfloat("tap_time_position", self.tap_time_position, minval=0.0, maxval=1.0)
-
-        if self.tap_trigger_safe_start_height == -1.0:  # sentinel
-            self.tap_trigger_safe_start_height = self.home_trigger_height / 2.0
-
-        self.allow_unsafe = config.getboolean("allow_unsafe", self.allow_unsafe)
-        self.write_tap_plot = config.getboolean("write_tap_plot", self.write_tap_plot)
-        self.write_every_tap_plot = config.getboolean("write_every_tap_plot", self.write_every_tap_plot)
-        self.debug = config.getboolean("debug", self.debug)
-
-        self.max_errors = config.getint("max_errors", self.max_errors)
-
-        self.x_offset = config.getfloat("x_offset", self.x_offset)
-        self.y_offset = config.getfloat("y_offset", self.y_offset)
 
         self.validate(config)
 
     def validate(self, config: ConfigWrapper = None):
-        printer = config.get_printer()
-        req_cal_z_max = self.home_trigger_safe_start_offset + self.home_trigger_height + 1.0
-        if self.calibration_z_max < req_cal_z_max:
-            raise printer.config_error(
-                f"calibration_z_max must be at least home_trigger_safe_start_offset+home_trigger_height+1.0 ({self.home_trigger_safe_start_offset:.3f}+{self.home_trigger_height:.3f}+1.0={req_cal_z_max:.3f})"
-            )
-        if self.x_offset == 0.0 and self.y_offset == 0.0 and not self.allow_unsafe:
-            raise printer.config_error("ProbeEddy: x_offset and y_offset are both 0.0; is the sensor really mounted at the nozzle?")
-
-        if self.home_trigger_height <= self.tap_trigger_safe_start_height:
-            raise printer.config_error("ProbeEddy: home_trigger_height must be greater than tap_trigger_safe_start_height")
-
-        need_scipy = False
-        if self.tap_mode == "butter" and not self.is_default_butter_config():
-            need_scipy = True
-
-        if need_scipy and not scipy:
+        if self.tap_mode == "butter" and not self.is_default_butter_config() and not scipy:
             raise printer.config_error(
                 "ProbeEddy: butter mode with custom filter parameters requires scipy, which is not available; please install scipy, use the defaults, or use wma mode"
             )
@@ -446,8 +440,12 @@ class ProbeEddy:
         self._toolhead: ToolHead = None  # filled in _handle_connect
         self._trapq = None
 
-        self.params = ProbeEddyParams()
+        self.params = ProbeEddyNgParams()
         self.params.load_from_config(config)
+        self.profile = ProbeEddyNgProfile(name="default")
+        self.profile.load_from_config(config)
+
+        self._warning_msgs: list[str] = []
 
         # figure out if either of these comes from the autosave section
         # so we can sort out what we want to write out later on
@@ -459,8 +457,8 @@ class ProbeEddy:
         old_saved_reg_drive_current = asfc.getint(self._full_name, "saved_reg_drive_current", fallback=0)
         old_saved_tap_drive_current = asfc.getint(self._full_name, "saved_tap_drive_current", fallback=0)
 
-        self._reg_drive_current = self.params.reg_drive_current or old_saved_reg_drive_current or self._sensor._drive_current
-        self._tap_drive_current = self.params.tap_drive_current or old_saved_tap_drive_current or self._reg_drive_current
+        self._reg_drive_current = self.profile.reg_drive_current or old_saved_reg_drive_current or self._sensor._drive_current
+        self._tap_drive_current = self.profile.tap_drive_current or old_saved_tap_drive_current or self._reg_drive_current
 
         # at what minimum physical height to start homing. It must be above the safe start position,
         # because we need to move from the start through the safe start position
@@ -492,14 +490,14 @@ class ProbeEddy:
             for dc in calibrated_drive_currents:
                 # read so that there are no warnings about unknown fields
                 _ = config.get(f"calibration_{dc}")
-            self.params._warning_msgs.append("EDDYng calibration: calibration data invalid, please recalibrate")
+            self._warning_msgs.append("EDDYng calibration: calibration data invalid, please recalibrate")
 
         # Our virtual endstop wrapper -- used for homing.
         self._endstop_wrapper = ProbeEddyEndstopWrapper(self)
 
         # There can only be one active sampler at a time
-        self._sampler: ProbeEddySampler = None
-        self._last_sampler: ProbeEddySampler = None
+        self._sampler: ProbeEddySampler | None = None
+        self._last_sampler: ProbeEddySampler | None = None
         self.save_samples_path = None
 
         # The last tap Z value, in absolute axis terms. Used for status.
@@ -526,7 +524,7 @@ class ProbeEddy:
         self._last_probe_result = 0.0
 
         # runtime configurable
-        self._tap_adjust_z = self.params.tap_adjust_z
+        self._tap_adjust_z = self.profile.tap_adjust_z
 
         # define our own commands
         self._dummy_gcode_cmd: GCodeCommand = self._gcode.create_gcode_command("", "", {})
@@ -613,7 +611,7 @@ class ProbeEddy:
     def _handle_connect(self):
         self._toolhead = self._printer.lookup_object("toolhead")
         self._trapq = self._toolhead.get_trapq()
-        for msg in self.params._warning_msgs:
+        for msg in self._warning_msgs:
             self._log_warning(msg)
 
     def _get_trapq_position(self, print_time: float) -> Tuple[Tuple[float, float, float], float]:
@@ -690,7 +688,7 @@ class ProbeEddy:
         toolhead: ToolHead = self._printer.lookup_object("toolhead")
         curpos = toolhead.get_position()
         curpos[2] = curpos[2] + by
-        toolhead.manual_move(curpos, self.params.probe_speed)
+        toolhead.manual_move(curpos, self.profile.probe_speed)
 
     def _set_toolhead_position(self, pos, homing_axes):
         # klipper changed homing_axes to be a "xyz" string instead
@@ -734,10 +732,10 @@ class ProbeEddy:
             str(ProbeEddyFrequencyMap.calibration_version),
         )
 
-        if self.params.reg_drive_current != self._reg_drive_current or self.params.reg_drive_current == self._saved_reg_drive_current:
+        if self.profile.reg_drive_current != self._reg_drive_current or self.profile.reg_drive_current == self._saved_reg_drive_current:
             configfile.set(self._full_name, "reg_drive_current", str(self._reg_drive_current))
 
-        if self.params.tap_drive_current != self._tap_drive_current or self.params.tap_drive_current == self._saved_tap_drive_current:
+        if self.profile.tap_drive_current != self._tap_drive_current or self.profile.tap_drive_current == self._saved_tap_drive_current:
             configfile.set(self._full_name, "tap_drive_current", str(self._tap_drive_current))
 
         for _, fmap in self._dc_to_fmap.items():
@@ -822,8 +820,8 @@ class ProbeEddy:
         start_z: float = gcmd.get_float("Z", 5.0)
         offsets: str = gcmd.get("OFFSETS", None)
 
-        probe_speed = gcmd.get_float("SPEED", self.params.probe_speed, above=0.0)
-        lift_speed = gcmd.get_float("LIFT_SPEED", self.params.lift_speed, above=0.0)
+        probe_speed = gcmd.get_float("SPEED", self.profile.probe_speed, above=0.0)
+        lift_speed = gcmd.get_float("LIFT_SPEED", self.profile.lift_speed, above=0.0)
 
         probe_zs = [start_z]
 
@@ -940,7 +938,7 @@ class ProbeEddy:
             tap_adjust_z += adjust
         self._tap_adjust_z = tap_adjust_z
 
-        if self.params.tap_adjust_z != self._tap_adjust_z:
+        if self.profile.tap_adjust_z != self._tap_adjust_z:
             configfile = self._printer.lookup_object("configfile")
             configfile.set(self._full_name, "tap_adjust_z", str(float(self._tap_adjust_z)))
 
@@ -949,7 +947,7 @@ class ProbeEddy:
     def cmd_Z_OFFSET_APPLY_PROBE(self, gcmd: GCodeCommand):
         gcode_move = self._printer.lookup_object("gcode_move")
         offset = gcode_move.get_status()["homing_origin"].z
-        offset += self.params.tap_adjust_z
+        offset += self.profile.tap_adjust_z
         offset -= self._last_tap_gcode_adjustment
         configfile = self._printer.lookup_object("configfile")
         configfile.set(self._full_name, "tap_adjust_z", f"{offset:.3f}")
@@ -989,8 +987,8 @@ class ProbeEddy:
         th = self._printer.lookup_object("toolhead")
         th_pos = th.get_position()
         if th_pos[2] < z:
-            th.manual_move([None, None, z + 3.0], self.params.lift_speed)
-        th.manual_move([None, None, z], self.params.probe_speed)
+            th.manual_move([None, None, z + 3.0], self.profile.lift_speed)
+        th.manual_move([None, None, z], self.profile.probe_speed)
         th.dwell(0.100)
         th.wait_moves()
 
@@ -1088,7 +1086,7 @@ class ProbeEddy:
         # is over the nozzle position
         th.manual_move(
             [None, None, self.params.calibration_z_max + 3.0],
-            self.params.lift_speed,
+            self.profile.lift_speed,
         )
         th.manual_move(
             [
@@ -1096,7 +1094,7 @@ class ProbeEddy:
                 th_pos[1] - self.offset["y"],
                 None,
             ],
-            self.params.move_speed,
+            self.profile.move_speed,
         )
 
         HOMING_REQ = (0.5, 5.0)
@@ -1126,8 +1124,8 @@ class ProbeEddy:
             mapping, _, _ = self._create_mapping(
                 self.params.calibration_z_max,
                 0.0,  # z_target
-                self.params.probe_speed,
-                self.params.lift_speed,
+                self.profile.probe_speed,
+                self.profile.lift_speed,
                 cur_dc,
                 report_errors=debug,
                 write_debug_files=debug,
@@ -1217,8 +1215,8 @@ class ProbeEddy:
         cal_z_max: float = gcmd.get_float("START_Z", self.params.calibration_z_max, above=2.0)
         z_target: float = gcmd.get_float("TARGET_Z", 0.0)
 
-        probe_speed: float = gcmd.get_float("SPEED", self.params.probe_speed, above=0.0)
-        lift_speed: float = gcmd.get_float("LIFT_SPEED", self.params.lift_speed, above=0.0)
+        probe_speed: float = gcmd.get_float("SPEED", self.profile.probe_speed, above=0.0)
+        lift_speed: float = gcmd.get_float("LIFT_SPEED", self.profile.lift_speed, above=0.0)
 
         # We just did a ManualProbeHelper, so we're going to zero the z-axis
         # to make the following code easier, so it can assume z=0 is actually real zero.
@@ -1240,7 +1238,7 @@ class ProbeEddy:
                 th_pos[1] - self.offset["y"],
                 None,
             ],
-            self.params.move_speed,
+            self.profile.move_speed,
         )
 
         mapping, fth_fit, htf_fit = self._create_mapping(
@@ -1361,8 +1359,8 @@ class ProbeEddy:
         mapping, fth, htf = self._create_mapping(
             z_start,
             z_end,
-            self.params.probe_speed,
-            self.params.lift_speed,
+            self.profile.probe_speed,
+            self.profile.lift_speed,
             drive_current,
             report_errors=False,
             write_debug_files=debug,
@@ -1385,8 +1383,8 @@ class ProbeEddy:
 
     def get_probe_params(self, gcmd=None):
         return {
-            "probe_speed": self.params.probe_speed,
-            "lift_speed": self.params.lift_speed,
+            "probe_speed": self.profile.probe_speed,
+            "lift_speed": self.profile.lift_speed,
             "sample_retract_dist": 0.0,
         }
 
@@ -1423,8 +1421,8 @@ class ProbeEddy:
 
     def get_lift_speed(self, gcmd=None):
         if gcmd is not None:
-            return gcmd.get_float("LIFT_SPEED", self.params.lift_speed, above=0.0)
-        return self.params.lift_speed
+            return gcmd.get_float("LIFT_SPEED", self.profile.lift_speed, above=0.0)
+        return self.profile.lift_speed
 
     def multi_probe_begin(self):
         pass
@@ -1447,8 +1445,8 @@ class ProbeEddy:
         th = self._printer.lookup_object("toolhead")
         th_pos = th.get_position()
         if th_pos[2] < z:
-            th.manual_move([None, None, z + 3.0], self.params.lift_speed)
-        th.manual_move([None, None, z], self.params.lift_speed)
+            th.manual_move([None, None, z + 3.0], self.profile.lift_speed)
+        th.manual_move([None, None, z], self.profile.lift_speed)
         th.dwell(0.100)
         th.wait_moves()
 
@@ -1528,12 +1526,12 @@ class ProbeEddy:
 
             th_pos[2] += move_up_by
             self._log_debug(f"probe_to_start_position_unhomed: moving toolhead up by {move_up_by:.3f} to {th_pos[2]:.3f}")
-            th.manual_move([None, None, th_pos[2]], self.params.probe_speed)
+            th.manual_move([None, None, th_pos[2]], self.profile.probe_speed)
             # TODO: this should just be th.wait_moves()
             self._sampler.wait_for_sample_at_time(th.get_last_move_time())
 
     def probe_to_start_position(self, z_pos=None):
-        self._log_debug(f"probe_to_start_position (tt: {self.params.tap_threshold}, z-homed: {self._z_homed()})")
+        self._log_debug(f"probe_to_start_position (tt: {self.profile.tap_threshold}, z-homed: {self._z_homed()})")
 
         # If we're not homed at all, rely on the sensor values to bring us to
         # a good place to start a diving probe from
@@ -1560,11 +1558,11 @@ class ProbeEddy:
         if th_pos[2] < start_z:
             self._log_debug(f"probe_to_start_position: moving toolhead from {th_pos[2]:.3f} to {(start_z + 1.0):.3f}")
             th_pos[2] = start_z + 1.0
-            th.manual_move(th_pos, self.params.lift_speed)
+            th.manual_move(th_pos, self.profile.lift_speed)
 
         self._log_debug(f"probe_to_start_position: moving toolhead from {th_pos[2]:.3f} to {start_z:.3f}")
         th_pos[2] = start_z
-        th.manual_move(th_pos, self.params.probe_speed)
+        th.manual_move(th_pos, self.profile.probe_speed)
 
         th.wait_moves()
 
@@ -1690,7 +1688,7 @@ class ProbeEddy:
 
         tap_start_time = self._endstop_wrapper.last_tap_start_time
         tap_end_time = self._endstop_wrapper.last_trigger_time
-        tap_time = tap_start_time + (tap_end_time - tap_start_time) * self.params.tap_time_position
+        tap_time = tap_start_time + (tap_end_time - tap_start_time) * self.profile.tap_time_position
 
         return ProbeEddy.TapResult(
             error=error,
@@ -1713,9 +1711,9 @@ class ProbeEddy:
         s_t = np.asarray(sampler.times[first_one:])
         s_f = np.asarray(sampler.freqs[first_one:])
 
-        lowcut = self.params.tap_butter_lowcut
-        highcut = self.params.tap_butter_highcut
-        order = self.params.tap_butter_order
+        lowcut = self.profile.tap_butter_lowcut
+        highcut = self.profile.tap_butter_highcut
+        order = self.profile.tap_butter_order
 
         sos = scipy.signal.butter(
             order,
@@ -1741,32 +1739,32 @@ class ProbeEddy:
             minval=1,
             maxval=31,
         )
-        tap_speed: float = gcmd.get_float("SPEED", self.params.tap_speed, above=0.0)
-        lift_speed: float = gcmd.get_float("RETRACT_SPEED", self.params.lift_speed, above=0.0)
-        tap_start_z: float = gcmd.get_float("START_Z", self.params.tap_start_z, above=2.0)
-        target_z: float = gcmd.get_float("TARGET_Z", self.params.tap_target_z)
+        tap_speed: float = gcmd.get_float("SPEED", self.profile.tap_speed, above=0.0)
+        lift_speed: float = gcmd.get_float("RETRACT_SPEED", self.profile.lift_speed, above=0.0)
+        tap_start_z: float = gcmd.get_float("START_Z", self.profile.tap_start_z, above=2.0)
+        target_z: float = gcmd.get_float("TARGET_Z", self.profile.tap_target_z)
         tap_threshold: float = gcmd.get_float("THRESHOLD", None)  # None so we have a sentinel value
         tap_threshold = gcmd.get_float("TT", tap_threshold)  # alias for THRESHOLD
         tap_adjust_z = gcmd.get_float("ADJUST_Z", self._tap_adjust_z)
         do_retract = gcmd.get_int("RETRACT", 1) == 1
-        samples = gcmd.get_int("SAMPLES", self.params.tap_samples, minval=1)
-        max_samples = gcmd.get_int("MAX_SAMPLES", self.params.tap_max_samples, minval=samples)
-        samples_stddev = gcmd.get_float("SAMPLES_STDDEV", self.params.tap_samples_stddev, above=0.0)
+        samples = gcmd.get_int("SAMPLES", self.profile.tap_samples, minval=1)
+        max_samples = gcmd.get_int("MAX_SAMPLES", self.profile.tap_max_samples, minval=samples)
+        samples_stddev = gcmd.get_float("SAMPLES_STDDEV", self.profile.tap_samples_stddev, above=0.0)
         home_z: bool = gcmd.get_int("HOME_Z", 1) == 1
         write_plot_arg: int = gcmd.get_int("PLOT", None)
 
-        mode = gcmd.get("MODE", self.params.tap_mode).lower()
+        mode = gcmd.get("MODE", self.profile.tap_mode).lower()
         if mode not in ("wma", "butter"):
             raise self._printer.command_error(f"Invalid mode: {mode}")
 
         # if the mode is different than the params, then require
         # specifying threshold
         if tap_threshold is None:
-            if mode != self.params.tap_mode:
+            if mode != self.profile.tap_mode:
                 raise self._printer.command_error(
-                    f"THRESHOLD required when mode ({mode}) is different than configured default ({self.params.tap_mode})"
+                    f"THRESHOLD required when mode ({mode}) is different than configured default ({self.profile.tap_mode})"
                 )
-            tap_threshold = self.params.tap_threshold
+            tap_threshold = self.profile.tap_threshold
 
         if not self._z_homed():
             raise self._printer.command_error("Z axis must be homed before tapping")
@@ -1780,20 +1778,20 @@ class ProbeEddy:
         tapcfg = ProbeEddy.TapConfig(mode=mode, threshold=tap_threshold)
         # fmt: off
         if mode == "butter":
-            if self.params.is_default_butter_config() and self._sensor._data_rate == 250:
+            if self.profile.is_default_butter_config() and self._sensor._data_rate == 250:
                 sos = [
                     [ 0.046131802093312926, 0.09226360418662585, 0.046131802093312926, 1.0, -1.3297767184682712, 0.5693902189294331, ],
                     [ 1.0, -2.0, 1.0, 1.0, -1.845000600983779, 0.8637525213328747, ],
                 ]
-            elif self.params.is_default_butter_config() and self._sensor._data_rate == 500:
+            elif self.profile.is_default_butter_config() and self._sensor._data_rate == 500:
                 sos = [
                     [ 0.013359200027856505, 0.02671840005571301, 0.013359200027856505, 1.0, -1.686278256753083, 0.753714473246724, ],
                     [ 1.0, -2.0, 1.0, 1.0, -1.9250515947328444, 0.9299234737648037, ],
                 ]
             elif scipy:
                 sos = scipy.signal.butter(
-                    self.params.tap_butter_order,
-                    [ self.params.tap_butter_lowcut, self.params.tap_butter_highcut, ],
+                    self.profile.tap_butter_order,
+                    [ self.profile.tap_butter_lowcut, self.profile.tap_butter_highcut, ],
                     btype="bandpass",
                     fs=self._sensor._data_rate,
                     output="sos",
@@ -1927,8 +1925,8 @@ class ProbeEddy:
         self._sensor.set_drive_current(orig_drive_current)
         th_now = th.get_position()
         th.manual_move([None, None, self.params.home_trigger_height + 1.0], lift_speed)
-        th.manual_move([th_now[0] - self.params.x_offset, th_now[1] - self.params.y_offset, None], self.params.move_speed)
-        th.manual_move([None, None, self.params.home_trigger_height], self.params.probe_speed)
+        th.manual_move([th_now[0] - self.params.x_offset, th_now[1] - self.params.y_offset, None], self.profile.move_speed)
+        th.manual_move([None, None, self.params.home_trigger_height], self.profile.probe_speed)
         th.dwell(0.500)
         th.wait_moves()
 
@@ -2011,7 +2009,7 @@ class ProbeEddy:
         s_t = s_t - time_start
         tap_start_time = self._last_sampler.memos.get("tap_start_time", time_start) - time_start
         tap_end_time = self._last_sampler.memos.get("trigger_time", time_start) - time_start
-        trigger_time = tap_start_time + (tap_end_time - tap_start_time) * self.params.tap_time_position
+        trigger_time = tap_start_time + (tap_end_time - tap_start_time) * self.profile.tap_time_position
         tap_threshold = self._last_sampler.memos.get("tap_threshold", 0)
 
         time_len = s_t.max()

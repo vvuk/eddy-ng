@@ -6,3 +6,4 @@
 *.rej
 tmp
 __pycache__
+wiki
