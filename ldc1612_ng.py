@@ -569,6 +569,8 @@ class LDC1612_ng:
         if self._data_callback is not None:
             raise self.printer.command_error("start_streaming: already streaming")
 
+        logging.info("LDC1612 starting'%s' measurements", self._name)
+
         self._init_chip()
         self._next_seq = 0
         self._data_callback = callback
@@ -592,7 +594,7 @@ class LDC1612_ng:
 
         self._next_seq = 0
         self._data_callback = None
-        # logging.info("LDC1612 finished '%s' measurements", self._name)
+        logging.info("LDC1612 finished '%s' measurements", self._name)
 
     def _handle_data(self, params):
         seq = params["seq"]
@@ -630,8 +632,9 @@ class LDC1612_ng:
                 v = int(data[i * 2 + 1])
                 times.append(t)
                 values.append(v)
-            print_time_now = self._mcu.estimated_print_time(reactor.monotonic())
-            logging.info(f"now: {print_time_now} samples: {times[:3]}")
+
+        print_time_now = self._mcu.estimated_print_time(reactor.monotonic())
+        logging.info(f"samples now: {print_time_now} sample times: {times[:2]}...{times[-2:]} values: {values[:2]}...{values[-2:]}")
 
         self._data_callback(times, values)
         return self.printer.get_reactor().monotonic() + self._data_interval

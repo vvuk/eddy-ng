@@ -485,6 +485,8 @@ class ProbeEddy:
             self._bigfoot = BigfootProbe(self)
             return
 
+        self._bigfoot = None
+
         # figure out if either of these comes from the autosave section
         # so we can sort out what we want to write out later on
         asfc = self._printer.lookup_object("configfile").autosave.fileconfig
@@ -641,7 +643,7 @@ class ProbeEddy:
                 self.cmd_CLEAR_CALIBRATION,
                 self.cmd_CLEAR_CALIBRATION_help,
             )
-            gcode.register_mux_command("PROBE_EDDY_NG_PROBE", self.cmd_PROBE, self.cmd_PROBE_help)
+            gcode.register_mux_command("PROBE_EDDY_NG_PROBE", "SENSOR", name, self.cmd_PROBE, self.cmd_PROBE_help)
             gcode.register_mux_command(
                 "PROBE_EDDY_NG_PROBE_ACCURACY",
                 "SENSOR",
@@ -649,7 +651,7 @@ class ProbeEddy:
                 self.cmd_PROBE_ACCURACY,
                 self.cmd_PROBE_ACCURACY_help,
             )
-            gcode.register_mux_command("PROBE_EDDY_NG_TAP", self.cmd_TAP, self.cmd_TAP_help)
+            gcode.register_mux_command("PROBE_EDDY_NG_TAP", "SENSOR", name, self.cmd_TAP, self.cmd_TAP_help)
             gcode.register_mux_command(
                 "PROBE_EDDY_NG_SET_TAP_OFFSET",
                 "SENSOR",
@@ -1051,10 +1053,13 @@ class ProbeEddy:
         )
 
     def probe_static_height(self, duration: float = 0.100) -> ProbeEddyProbeResult:
+        now = self._print_time_now()
+        tend = now + (duration + self._sensor._ldc_settle_time)
         with self.start_sampler() as sampler:
-            now = self._print_time_now()
-            sampler.wait_for_sample_at_time(now + (duration + self._sensor._ldc_settle_time))
-            sampler.finish()
+            self._reactor.pause(self._reactor.monotonic() + duration)
+            while tend >= self._print_time_now():
+                self._reactor.pause(self._reactor.monotonic() + 0.050)
+                break
 
         if sampler.height_count == 0:
             return ProbeEddyProbeResult([])
@@ -2762,11 +2767,14 @@ class ProbeEddySampler:
 
         def report_no_samples(waited_for):
             if raise_error:
-                raise self._printer.command_error(f"No samples received for time {sample_print_time:.3f} (waited for {waited_for:.3f})")
+                lsf = f", last sample {self.times[-1]}" if self.times else ", no samples at all"
+                logging.info(f"stack", stack_info=True)
+                raise self._printer.command_error(f"No samples received for time {sample_print_time:.3f} (waited for {waited_for:.3f}{lsf})")
             return False
 
         if self._stopped:
             # if we're not getting any more samples, we can check directly
+            self.eddy._log_debug(f"stopped, last sample time: {self.times[-1]}")
             if len(self.times) == 0:
                 return report_no_samples(0.0)
             return self.times[-1] >= sample_print_time
