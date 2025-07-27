@@ -7,7 +7,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 from __future__ import annotations
-
+import configparser
 import os
 import logging
 import math
@@ -3294,6 +3294,10 @@ def bed_mesh_ProbeManager_start_probe_override(self, gcmd):
     else:
         self.probe_helper.start_probe(gcmd)
 
-
 def load_config_prefix(config: ConfigWrapper):
-    return ProbeEddy(config)
+    try:
+        # Will raise if sensor_type (or any required option) is missing
+        return ProbeEddy(config)
+    except (configerror, configparser.Error) as e:
+        logging.info(f"ProbeEddyNG not configured, skipping addon: {e}")
+        return None
