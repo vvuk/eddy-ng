@@ -69,6 +69,7 @@ try:
 except ImportError:
     scipy = None
 
+
 # In this file, a couple of conventions are used (for sanity).
 # Variables are named according to:
 # - "height" is always a physical height as detected by the probe in mm
@@ -133,6 +134,20 @@ except ImportError:
 # Care in macros should be taken to not invalidate the Z offset set after a tap
 # by relying on absolute sensor readings.
 #
+
+
+@dataclass
+class EddyTemperatureProfile:
+    """Temperature profile for BTT Eddy probe"""
+    temp_min: float
+    temp_max: float
+    tap_adjust_z: float = 0.0
+    reg_drive_current: int = 15
+    tap_drive_current: int = 16
+    calibration_version: int = 5
+    calibrated_at_temp: Optional[float] = None
+    calibrated_drive_currents: Optional[str] = None
+    calibrations: Optional[Dict[str, str]] = None
 
 
 @dataclass
@@ -528,6 +543,13 @@ class ProbeEddy:
         # runtime configurable
         self._tap_adjust_z = self.params.tap_adjust_z
 
+        # Temperature profiles support
+        self._temp_profiles = {}
+        self._active_temp_profile = None
+        self._temp_profiles_tolerance = 2.0
+        self._temperature_sensor = None
+        self._init_temperature_profiles(config)
+
         # define our own commands
         self._dummy_gcode_cmd: GCodeCommand = self._gcode.create_gcode_command("", "", {})
         self.define_commands(self._gcode)
@@ -538,6 +560,261 @@ class ProbeEddy:
         # patch bed_mesh because Klipper
         if not IS_KALICO:
             bed_mesh.ProbeManager.start_probe = bed_mesh_ProbeManager_start_probe_override
+
+    def _init_temperature_profiles(self, config: ConfigWrapper):
+        """Initialize temperature profiles from configuration"""
+        # Load main settings from probe section
+        self._active_temp_profile = config.get('temp_profiles_active', None)
+        self._temp_profiles_tolerance = config.getfloat('temp_profiles_tolerance', 2.0)
+
+        # Load profile sections
+        for profile_section in config.get_prefix_sections('eddy_temp_profile '):
+            # Extract profile name from section name
+            profile_name = profile_section.get_name().split('eddy_temp_profile ')[1]
+
+            # Load calibration data fields
+            calibrations = {}
+            for option in profile_section.get_prefix_options('calibration_'):
+                if not option.endswith('_version'):
+                    calibrations[option] = profile_section.get(option)
+
+            # Create temperature profile using dataclass
+            profile = EddyTemperatureProfile(
+                temp_min=profile_section.getfloat('temp_min'),
+                temp_max=profile_section.getfloat('temp_max'),
+                tap_adjust_z=profile_section.getfloat('tap_adjust_z', 0.0),
+                reg_drive_current=profile_section.getint('reg_drive_current', 15),
+                tap_drive_current=profile_section.getint('tap_drive_current', 16),
+                calibration_version=profile_section.getint('calibration_version', 5),
+                calibrated_at_temp=profile_section.getfloat('calibrated_at_temp', None),
+                calibrated_drive_currents=profile_section.get('calibrated_drive_currents', None),
+                calibrations=calibrations if calibrations else None
+            )
+
+            self._temp_profiles[profile_name] = profile
+
+        if self._temp_profiles:
+            self._log_info(f"Loaded {len(self._temp_profiles)} temperature profiles from config")
+
+        # Register event handler to init temperature sensor
+        self._printer.register_event_handler("klippy:ready", self._init_temperature_sensor)
+
+    def _init_temperature_sensor(self):
+        """Initialize access to BTT Eddy temperature sensor"""
+        try:
+            # In config: [temperature_sensor btt_eddy]
+            sensor_name = f"temperature_sensor {self._name}"
+            self._temperature_sensor = self._printer.lookup_object(sensor_name)
+            self._log_info(f"Found temperature sensor: {sensor_name}")
+        except:
+            # Try alternative names
+            try:
+                self._temperature_sensor = self._printer.lookup_object("temperature_sensor btt_eddy")
+                self._log_info("Found temperature sensor: temperature_sensor btt_eddy")
+            except:
+                try:
+                    self._temperature_sensor = self._printer.lookup_object("temperature_sensor btt_eddy_mcu")
+                    self._log_info("Using MCU temperature as fallback: temperature_sensor btt_eddy_mcu")
+                except:
+                    self._log_warning("Temperature sensor not found for temperature profiles")
+
+    def _get_current_temperature(self):
+        """Get current BTT Eddy sensor temperature"""
+        if self._temperature_sensor:
+            try:
+                reactor = self._printer.get_reactor()
+                eventtime = reactor.monotonic()
+                status = self._temperature_sensor.get_status(eventtime)
+                temp = status.get('temperature', 25.0)
+                return temp
+            except Exception as e:
+                self._log_warning(f"Error reading temperature: {e}")
+
+        # Fallback - try to get through probe object itself
+        try:
+            if hasattr(self, '_sensor') and hasattr(self._sensor, 'get_status'):
+                status = self._sensor.get_status(0)
+                return status.get('temperature', 25.0)
+        except:
+            pass
+
+        return 25.0
+
+    def _select_profile_by_temperature(self, temp=None):
+        """Automatically select appropriate profile by temperature"""
+        if temp is None:
+            temp = self._get_current_temperature()
+
+        best_profile = None
+        min_distance = float('inf')
+
+        for name, profile in self._temp_profiles.items():
+            # Check if temperature is within profile range
+            if profile.temp_min <= temp <= profile.temp_max:
+                # Find profile with center closest to current temperature
+                center = (profile.temp_min + profile.temp_max) / 2
+                distance = abs(temp - center)
+                if distance < min_distance:
+                    min_distance = distance
+                    best_profile = name
+
+        if best_profile and best_profile != self._active_temp_profile:
+            self._activate_temperature_profile(best_profile)
+            self._log_info(f"Auto-selected profile '{best_profile}' for {temp:.1f}°C")
+
+        return best_profile
+
+    def _activate_temperature_profile(self, profile_name):
+        """Activate specified temperature profile"""
+        if profile_name not in self._temp_profiles:
+            self._log_error(f"Profile '{profile_name}' not found")
+            return False
+
+        profile = self._temp_profiles[profile_name]
+        self._active_temp_profile = profile_name
+
+        # Apply calibration_* data directly to probe
+        if profile.calibrations and hasattr(self, '_saved_calibration'):
+            if not hasattr(self, '_saved_calibration') or not self._saved_calibration:
+                self._saved_calibration = {}
+
+            for cal_key, cal_data in profile.calibrations.items():
+                self._saved_calibration[cal_key] = cal_data
+                self._log_info(f"Loaded {cal_key}")
+
+        # Apply drive currents
+        if profile.calibrated_drive_currents:
+            dc_str = profile.calibrated_drive_currents
+            if ',' in dc_str:
+                self._calibrated_drive_currents = [int(x.strip()) for x in dc_str.split(',')]
+            else:
+                self._calibrated_drive_currents = [int(dc_str)]
+
+        self._reg_drive_current = profile.reg_drive_current
+        self._tap_drive_current = profile.tap_drive_current
+
+        # Apply tap_adjust_z with logging
+        old_tap_adjust = self._tap_adjust_z
+        self._tap_adjust_z = profile.tap_adjust_z
+        if old_tap_adjust != self._tap_adjust_z:
+            self._log_info(f"Changed tap_adjust_z from {old_tap_adjust:.6f} to {profile.tap_adjust_z:.6f}")
+
+        # calibration_version is not applied - handled by the system automatically
+
+        # Reload calibration in probe
+        if hasattr(self, '_load_calibration'):
+            try:
+                self._load_calibration()
+                self._log_info(f"Reloaded calibration for profile '{profile_name}'")
+            except Exception as e:
+                self._log_warning(f"Could not reload calibration: {e}")
+
+        calibrations_count = len(profile.calibrations) if profile.calibrations else 0
+        self._log_info(f"Activated profile '{profile_name}' with {calibrations_count} calibrations")
+        return True
+
+    def _save_current_calibration_to_profile(self, profile_name):
+        """Save current calibration to specified profile"""
+        if profile_name not in self._temp_profiles:
+            self._log_error(f"Profile '{profile_name}' not found")
+            return False
+
+        profile = self._temp_profiles[profile_name]
+
+        # Get current configuration
+        configfile = self._printer.lookup_object('configfile')
+
+        # Read calibration directly from probe if available
+        calibrations = {}
+
+        # Try to get from probe's _saved_calibration
+        if hasattr(self, '_saved_calibration') and self._saved_calibration:
+            for key, value in self._saved_calibration.items():
+                if key.startswith('calibration_'):
+                    calibrations[key] = value
+
+        # If not found, try from save_config
+        if not calibrations:
+            status = configfile.get_status(None)
+            if 'save_config_pending_items' in status and self._full_name in status['save_config_pending_items']:
+                saved_config = status['save_config_pending_items'][self._full_name]
+                for key, value in saved_config.items():
+                    if key.startswith('calibration_') and not key.endswith('_version'):
+                        calibrations[key] = value
+
+        if calibrations:
+            profile.calibrations = calibrations
+            self._log_info(f"Saved {len(calibrations)} calibration entries")
+
+        # Save drive currents from probe
+        if hasattr(self, '_calibrated_drive_currents'):
+            if isinstance(self._calibrated_drive_currents, list):
+                profile.calibrated_drive_currents = ','.join(map(str, self._calibrated_drive_currents))
+            else:
+                profile.calibrated_drive_currents = str(self._calibrated_drive_currents)
+
+        profile.reg_drive_current = self._reg_drive_current
+        profile.tap_drive_current = self._tap_drive_current
+
+        # Always update tap_adjust_z with current value
+        old_tap_adjust = profile.tap_adjust_z
+        new_tap_adjust = self._tap_adjust_z
+        if old_tap_adjust != new_tap_adjust:
+            self._log_info(f"Updating tap_adjust_z in profile from {old_tap_adjust} to {new_tap_adjust:.6f}")
+            profile.tap_adjust_z = new_tap_adjust
+
+        profile.calibration_version = getattr(self, '_calibration_version', ProbeEddyFrequencyMap.calibration_version)
+
+        # Save current temperature
+        profile.calibrated_at_temp = self._get_current_temperature()
+
+        # Save profile to config
+        self._save_profile_to_config(profile_name)
+        self._save_temp_profiles_settings()
+
+        self._log_info(f"Saved calibration to profile '{profile_name}'")
+        return True
+
+    def _save_profile_to_config(self, profile_name):
+        """Save a single profile to configuration"""
+        if profile_name not in self._temp_profiles:
+            return False
+
+        profile = self._temp_profiles[profile_name]
+        configfile = self._printer.lookup_object('configfile')
+
+        section_name = f'eddy_temp_profile {profile_name}'
+
+        # Save basic profile settings
+        configfile.set(section_name, 'temp_min', '%.2f' % profile.temp_min)
+        configfile.set(section_name, 'temp_max', '%.2f' % profile.temp_max)
+        configfile.set(section_name, 'tap_adjust_z', '%.6f' % profile.tap_adjust_z)
+        configfile.set(section_name, 'reg_drive_current', str(profile.reg_drive_current))
+        configfile.set(section_name, 'tap_drive_current', str(profile.tap_drive_current))
+        configfile.set(section_name, 'calibration_version', str(profile.calibration_version))
+
+        if profile.calibrated_at_temp is not None:
+            configfile.set(section_name, 'calibrated_at_temp', '%.2f' % profile.calibrated_at_temp)
+
+        # Save calibrated_drive_currents
+        if profile.calibrated_drive_currents:
+            configfile.set(section_name, 'calibrated_drive_currents', profile.calibrated_drive_currents)
+
+        # Save calibration data
+        if profile.calibrations:
+            for cal_key, cal_data in profile.calibrations.items():
+                configfile.set(section_name, cal_key, cal_data)
+
+        return True
+
+    def _save_temp_profiles_settings(self):
+        """Save global temperature profile settings to configuration"""
+        configfile = self._printer.lookup_object('configfile')
+
+        # Save global settings to main probe section
+        if self._active_temp_profile:
+            configfile.set(self._full_name, 'temp_profiles_active', self._active_temp_profile)
+        configfile.set(self._full_name, 'temp_profiles_tolerance', '%.1f' % self._temp_profiles_tolerance)
 
     def _log_error(self, msg):
         logging.error(f"{self._name}: {msg}")
@@ -612,6 +889,11 @@ class ProbeEddy:
             "Z_OFFSET_APPLY_PROBE",
             self.cmd_Z_OFFSET_APPLY_PROBE,
             "Apply the current G-Code Z offset to tap_adjust_z",
+        )
+        gcode.register_command(
+            "EDDY_TEMP_PROFILE",
+            self.cmd_EDDY_TEMP_PROFILE,
+            "Manage BTT Eddy temperature profiles"
         )
 
         # some handy aliases while I'm debugging things to save my fingers
@@ -977,6 +1259,17 @@ class ProbeEddy:
             configfile = self._printer.lookup_object("configfile")
             configfile.set(self._full_name, "tap_adjust_z", str(float(self._tap_adjust_z)))
 
+        # Update in active temperature profile if exists
+        if self._active_temp_profile:
+            profile = self._temp_profiles.get(self._active_temp_profile)
+            if profile:
+                old_value = profile.tap_adjust_z
+                profile.tap_adjust_z = self._tap_adjust_z
+                self._log_info(f"Updated tap_adjust_z in profile '{self._active_temp_profile}' from {old_value:.6f} to {profile.tap_adjust_z:.6f}")
+                gcmd.respond_info(f"Updated tap_adjust_z in active profile '{self._active_temp_profile}'")
+                self._save_profile_to_config(self._active_temp_profile)
+                self._save_temp_profiles_settings()
+
         gcmd.respond_info(f"Set tap_adjust_z: {tap_adjust_z:.3f} (SAVE_CONFIG to make it permanent)")
 
     def cmd_Z_OFFSET_APPLY_PROBE(self, gcmd: GCodeCommand):
@@ -986,6 +1279,25 @@ class ProbeEddy:
         offset -= self._last_tap_gcode_adjustment
         configfile = self._printer.lookup_object("configfile")
         configfile.set(self._full_name, "tap_adjust_z", f"{offset:.3f}")
+
+        # Update in active temperature profile if exists (relative adjustment)
+        if self._active_temp_profile:
+            profile = self._temp_profiles.get(self._active_temp_profile)
+            if profile:
+                old_value = profile.tap_adjust_z
+                relative_adjustment = gcode_move.get_status()["homing_origin"].z
+                profile.tap_adjust_z += relative_adjustment
+                self._log_info(f"Applied Z offset to profile '{self._active_temp_profile}' from {old_value:.6f} to {profile.tap_adjust_z:.6f} (adjustment: {relative_adjustment:.6f})")
+                gcmd.respond_info(f"Applied Z offset to active profile '{self._active_temp_profile}'")
+                self._save_profile_to_config(self._active_temp_profile)
+                self._save_temp_profiles_settings()
+
+        self._log_msg(
+            f"{self._name}: new tap_adjust_z: {offset:.3f}\n"
+            "The SAVE_CONFIG command will update the printer config file\n"
+            "with the above and restart the printer."
+        )
+
         self._log_msg(
             f"{self._name}: new tap_adjust_z: {offset:.3f}\n"
             "The SAVE_CONFIG command will update the printer config file\n"
@@ -2166,6 +2478,193 @@ class ProbeEddy:
 
 
 
+    def cmd_EDDY_TEMP_PROFILE(self, gcmd):
+        """G-code command for managing temperature profiles"""
+        action = gcmd.get('ACTION', 'LIST').upper()
+
+        if action == 'LIST':
+            self._cmd_list_temp_profiles(gcmd)
+        elif action == 'CREATE':
+            self._cmd_create_temp_profile(gcmd)
+        elif action == 'DELETE':
+            self._cmd_delete_temp_profile(gcmd)
+        elif action == 'SELECT':
+            self._cmd_select_temp_profile(gcmd)
+        elif action == 'SAVE':
+            self._cmd_save_temp_calibration(gcmd)
+        elif action == 'STATUS':
+            self._cmd_temp_profiles_status(gcmd)
+        else:
+            raise gcmd.error(f"Unknown action: {action}")
+
+    def _cmd_list_temp_profiles(self, gcmd):
+        """List all temperature profiles"""
+        current_temp = self._get_current_temperature()
+        gcmd.respond_info(f"Current BTT Eddy temperature: {current_temp:.1f}°C")
+        gcmd.respond_info(f"Active profile: {self._active_temp_profile or 'None'}")
+
+        if not self._temp_profiles:
+            gcmd.respond_info("No temperature profiles configured")
+            return
+
+        gcmd.respond_info("Available profiles:")
+        for name, profile in self._temp_profiles.items():
+            status = []
+            if name == self._active_temp_profile:
+                status.append("ACTIVE")
+            if profile.temp_min <= current_temp <= profile.temp_max:
+                status.append("IN RANGE")
+
+            calibrated_temp = profile.calibrated_at_temp
+            if calibrated_temp is not None:
+                calibrated_temp = f"{calibrated_temp:.1f}°C"
+            else:
+                calibrated_temp = "N/A"
+
+            tap_adjust = profile.tap_adjust_z
+            status_str = f" [{', '.join(status)}]" if status else ""
+
+            gcmd.respond_info(
+                f"  {name}: {profile.temp_min:.1f}-{profile.temp_max:.1f}°C "
+                f"(calibrated at {calibrated_temp}, tap_adjust_z={tap_adjust:.6f}){status_str}"
+            )
+
+    def _cmd_create_temp_profile(self, gcmd):
+        """Create new temperature profile"""
+        name = gcmd.get('NAME')
+
+        # Get range parameters
+        current_temp = self._get_current_temperature()
+        temp_min = gcmd.get_float('MIN', None)
+        temp_max = gcmd.get_float('MAX', None)
+
+        # If bounds not specified, create range around current temperature
+        if temp_min is None or temp_max is None:
+            range_half = gcmd.get_float('RANGE', 5.0)
+            temp_min = current_temp - range_half
+            temp_max = current_temp + range_half
+
+        # Check range validity
+        if temp_min >= temp_max:
+            raise gcmd.error(f"Invalid temperature range: {temp_min}-{temp_max}")
+
+        # Get current tap_adjust_z from probe
+        current_tap_adjust = self._tap_adjust_z
+
+        # Create profile
+        self._temp_profiles[name] = EddyTemperatureProfile(
+            temp_min=temp_min,
+            temp_max=temp_max,
+            tap_adjust_z=current_tap_adjust,
+            reg_drive_current=15,
+            tap_drive_current=16,
+            calibration_version=5,
+            calibrated_at_temp=None
+        )
+
+        self._active_temp_profile = name
+
+        # Save to config
+        self._save_profile_to_config(name)
+        self._save_temp_profiles_settings()
+
+        gcmd.respond_info(
+            f"Created profile '{name}' for {temp_min:.1f}-{temp_max:.1f}°C "
+            f"(current temp: {current_temp:.1f}°C, tap_adjust_z: {current_tap_adjust:.6f})"
+        )
+        gcmd.respond_info("Run SAVE_CONFIG to persist changes")
+
+    def _cmd_delete_temp_profile(self, gcmd):
+        """Delete temperature profile"""
+        name = gcmd.get('NAME')
+
+        if name not in self._temp_profiles:
+            raise gcmd.error(f"Profile '{name}' not found")
+
+        # Delete from memory
+        del self._temp_profiles[name]
+        if self._active_temp_profile == name:
+            self._active_temp_profile = None
+
+        self._save_temp_profiles_settings()
+
+        gcmd.respond_info(f"Deleted profile '{name}'")
+        gcmd.respond_info("Run SAVE_CONFIG to persist changes")
+
+    def _cmd_select_temp_profile(self, gcmd):
+        """Select active temperature profile"""
+        name = gcmd.get('NAME', None)
+
+        if name == 'AUTO':
+            selected = self._select_profile_by_temperature()
+            if selected:
+                gcmd.respond_info(f"Auto-selected profile '{selected}'")
+            else:
+                gcmd.respond_info("No suitable profile found for current temperature")
+        elif name:
+            if name not in self._temp_profiles:
+                raise gcmd.error(f"Profile '{name}' not found")
+            self._activate_temperature_profile(name)
+            self._save_temp_profiles_settings()
+            gcmd.respond_info(f"Activated profile '{name}'")
+            gcmd.respond_info("Run SAVE_CONFIG to make active profile persistent")
+        else:
+            raise gcmd.error("NAME parameter required")
+
+    def _cmd_save_temp_calibration(self, gcmd):
+        """Save current calibration to active temperature profile"""
+        if not self._active_temp_profile:
+            raise gcmd.error("No active profile. Select a profile first.")
+
+        current_temp = self._get_current_temperature()
+        profile = self._temp_profiles[self._active_temp_profile]
+
+        # Check if temperature is within acceptable range
+        if not (profile.temp_min - self._temp_profiles_tolerance <= current_temp <=
+                profile.temp_max + self._temp_profiles_tolerance):
+            gcmd.respond_info(
+                f"WARNING: Current temperature {current_temp:.1f}°C is outside "
+                f"the profile range {profile.temp_min:.1f}-{profile.temp_max:.1f}°C"
+            )
+            if not gcmd.get_int('FORCE', 0):
+                raise gcmd.error("Use FORCE=1 to save anyway")
+
+        self._save_current_calibration_to_profile(self._active_temp_profile)
+
+        gcmd.respond_info(
+            f"Saved calibration to profile '{self._active_temp_profile}' "
+            f"at {current_temp:.1f}°C"
+        )
+        gcmd.respond_info("Run SAVE_CONFIG to persist calibration")
+
+
+    def _cmd_temp_profiles_status(self, gcmd):
+        """Show current temperature profile system status"""
+        current_temp = self._get_current_temperature()
+
+        gcmd.respond_info("=== BTT Eddy Temperature Profile Status ===")
+        gcmd.respond_info(f"Sensor temperature: {current_temp:.2f}°C")
+        gcmd.respond_info(f"Active profile: {self._active_temp_profile or 'None'}")
+        gcmd.respond_info(f"Temperature tolerance: ±{self._temp_profiles_tolerance:.1f}°C")
+        gcmd.respond_info(f"Total profiles: {len(self._temp_profiles)}")
+
+        if self._active_temp_profile and self._active_temp_profile in self._temp_profiles:
+            profile = self._temp_profiles[self._active_temp_profile]
+            gcmd.respond_info(f"Profile range: {profile.temp_min:.1f}-{profile.temp_max:.1f}°C")
+            if profile.calibrated_at_temp is not None:
+                gcmd.respond_info(f"Calibrated at: {profile.calibrated_at_temp:.1f}°C")
+            gcmd.respond_info(f"TAP adjust Z: {profile.tap_adjust_z:.3f}")
+
+            # Show calibration data
+            if profile.calibrations:
+                gcmd.respond_info(f"Stored calibrations: {list(profile.calibrations.keys())}")
+
+        # Show current values from probe
+        gcmd.respond_info(f"Current reg_drive_current: {self._reg_drive_current}")
+        gcmd.respond_info(f"Current tap_drive_current: {self._tap_drive_current}")
+        gcmd.respond_info(f"Current tap_adjust_z: {self._tap_adjust_z:.3f}")
+
+
 # Probe interface that does only scanning, no up/down movement.
 # It scans at whatever height the probe is, but returns values
 # as if the probing happened (i.e. relative to
@@ -2359,6 +2858,7 @@ class ProbeEddyEndstopWrapper:
     def _handle_homing_move_begin(self, hmove):
         if self not in hmove.get_mcu_endstops():
             return
+
         self._sampler = self.eddy.start_sampler()
         self._homing_in_progress = True
         # if we're doing a tap, we're already in the right position;

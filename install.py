@@ -13,6 +13,7 @@ FILES_TO_COPY = {
     "eddy-ng/sensor_ldc1612_ng.c": "src",
     "probe_eddy_ng.py": "klippy/extras",
     "ldc1612_ng.py": "klippy/extras"
+
 }
 
 
