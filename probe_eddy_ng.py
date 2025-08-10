@@ -2004,21 +2004,42 @@ class ProbeEddy:
                         self._log_debug(f"Z={current_z:.3f}, freq={current_freq:.1f}, δf={freq_delta:.1f}, "
                                       f"rate={current_rate:.0f}, accel={avg_accel:.0f}")
 
-                        # Contact detection criteria:
-                        # 1. Significant frequency increase (at least 2% from baseline)
-                        # 2. High positive acceleration (rapid increase in rate of change)
-                        # 3. Must be close enough to surface (below 0.2mm)
-                        min_freq_increase = baseline_freq * 0.02  # 2% minimum increase
-                        min_acceleration = 300000.0  # Minimum acceleration threshold
-                        max_height_for_contact = 0.2  # Maximum height to consider for contact
-
-                        if (freq_delta > min_freq_increase and
-                            avg_accel > min_acceleration and
-                            current_z < max_height_for_contact):
+                        # Contact detection using sliding median filter approach:
+                        min_freq_increase = baseline_freq * 0.015  # 1.5% minimum increase
+                        
+                        # Sliding median filter detection after we have enough data points
+                        if len(freq_derivatives) >= 10:
+                            # Compare recent vs previous rate medians (5 points each)
+                            recent_rates = freq_derivatives[-5:]  # Last 5 rates
+                            prev_rates = freq_derivatives[-10:-5]  # Previous 5 rates
+                            
+                            recent_median = float(np.median(recent_rates))
+                            prev_median = float(np.median(prev_rates))
+                            
+                            self._log_debug(f"Z={current_z:.3f}, δf={freq_delta:.1f}, "
+                                          f"prev_rate_med={prev_median:.0f}, recent_rate_med={recent_median:.0f}")
+                            
+                            # Detection criteria:
+                            # 1. Minimum frequency increase
+                            # 2. Significant slowdown: previous median > recent median * factor
+                            slowdown_factor = 1.5  # 50% slowdown threshold
+                            
+                            if (freq_delta > min_freq_increase and
+                                prev_median > 20000 and  # Previous growth was significant 
+                                recent_median < prev_median / slowdown_factor):  # Strong slowdown detected
+                                
+                                touch_height = current_z
+                                self._log_debug(f"Contact detected: z={current_z:.3f}, δf={freq_delta:.1f}, "
+                                              f"slowdown {prev_median:.0f}→{recent_median:.0f}")
+                                break
+                        
+                        # Fallback detection for early stages or emergency cases
+                        elif (freq_delta > min_freq_increase and
+                            (current_rate < 10000 or abs(avg_accel) > 300000)):
 
                             touch_height = current_z
                             self._log_debug(f"Contact detected: z={current_z:.3f}, δf={freq_delta:.1f}, "
-                                          f"accel={avg_accel:.0f}")
+                                          f"rate={current_rate:.0f}, accel={avg_accel:.0f}")
                             break
 
                         # Emergency break if frequency increase is massive (avoid crashes)
