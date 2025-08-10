@@ -1806,7 +1806,7 @@ class ProbeEddy:
 
                 if self._survey_threshold is not None and self._survey_threshold_confidence > 0.5:
                     # Use dynamically found threshold
-                    actual_z = probe_z - self._survey_threshold
+                    actual_z = probe_z + self._survey_threshold
                     self._log_debug(f"Using dynamic threshold: {self._survey_threshold:.3f}")
                 else:
                     # Fall back to static trigger height
