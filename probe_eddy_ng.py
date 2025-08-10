@@ -1762,6 +1762,7 @@ class ProbeEddy:
         tolerance = gcmd.get_float("TOLERANCE", 0.010, above=0.0)
         start_z = gcmd.get_float("START_Z", 5.0, above=2.0)
         home_z = gcmd.get_int("HOME_Z", 1) == 1
+        z_offset = gcmd.get_float("Z_OFFSET", 0.0)  # Manual offset adjustment for survey
 
         th = self._printer.lookup_object("toolhead")
         results = []
@@ -1807,15 +1808,20 @@ class ProbeEddy:
             if stddev > tolerance:
                 self._log_warning(f"Survey stddev {stddev:.4f} exceeds tolerance {tolerance:.4f}")
 
+            # Apply manual Z_OFFSET adjustment
+            adjusted_z = median_z + z_offset
+            
             self._log_msg(f"Survey complete: median actual z={median_z:.3f} (stddev={stddev:.4f})")
+            if z_offset != 0.0:
+                self._log_msg(f"Applying Z_OFFSET={z_offset:.3f}, adjusted z={adjusted_z:.3f}")
 
             if home_z:
-                # Set the Z position to the actual bed surface
+                # Set the Z position to the actual bed surface with offset
                 th_pos = th.get_position()
-                # Current position minus the median gives us the true zero
-                th_pos[2] = th_pos[2] - median_z
+                # Current position minus the adjusted z gives us the true zero
+                th_pos[2] = th_pos[2] - adjusted_z
                 self._set_toolhead_position(th_pos, [2])
-                self._log_msg(f"Homed Z to 0.0 (was at {median_z:.3f})")
+                self._log_msg(f"Homed Z to 0.0 (was at {adjusted_z:.3f})")
 
             # No tap_offset adjustment for survey mode
             self._tap_offset = 0.0
