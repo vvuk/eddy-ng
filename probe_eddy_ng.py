@@ -527,6 +527,10 @@ class ProbeEddy:
 
         # runtime configurable
         self._tap_adjust_z = self.params.tap_adjust_z
+        
+        # Dynamic threshold for survey mode
+        self._survey_threshold = None
+        self._survey_threshold_confidence = 0.0
 
         # define our own commands
         self._dummy_gcode_cmd: GCodeCommand = self._gcode.create_gcode_command("", "", {})
@@ -601,6 +605,16 @@ class ProbeEddy:
             "PROBE_EDDY_NG_CALIBRATE_POLY",
             self.cmd_CALIBRATE_POLY,
             "Calibrate with polynomial model for survey mode"
+        )
+        gcode.register_command(
+            "PROBE_EDDY_NG_THRESHOLD_SCAN",
+            self.cmd_THRESHOLD_SCAN,
+            "Find optimal touch threshold automatically"
+        )
+        gcode.register_command(
+            "PROBE_EDDY_NG_THRESHOLD_STATUS",
+            self.cmd_THRESHOLD_STATUS,
+            "Show current threshold status"
         )
         gcode.register_command(
             "PROBE_EDDY_NG_SET_TAP_OFFSET",
@@ -1589,6 +1603,8 @@ class ProbeEddy:
                 "tap_adjust_z": float(self._tap_adjust_z),
                 "last_probe_result": float(self._last_probe_result),
                 "last_tap_z": float(self._last_tap_z),
+                "survey_threshold": float(self._survey_threshold) if self._survey_threshold is not None else None,
+                "survey_threshold_confidence": float(self._survey_threshold_confidence),
             }
         )
         return status
@@ -1785,9 +1801,18 @@ class ProbeEddy:
                     raise self._printer.command_error("Probe triggered prior to movement")
 
                 # The probe triggers at home_trigger_height, but we want actual Z=0
-                # So we need to subtract the trigger height
+                # Use dynamic threshold if available, otherwise fall back to home_trigger_height
                 probe_z = probe_position[2]
-                actual_z = probe_z - self.params.home_trigger_height
+                
+                if self._survey_threshold is not None and self._survey_threshold_confidence > 0.5:
+                    # Use dynamically found threshold
+                    actual_z = probe_z - self._survey_threshold
+                    self._log_debug(f"Using dynamic threshold: {self._survey_threshold:.3f}")
+                else:
+                    # Fall back to static trigger height
+                    actual_z = probe_z - self.params.home_trigger_height
+                    self._log_debug(f"Using static trigger height: {self.params.home_trigger_height:.3f}")
+                
                 results.append(actual_z)
 
                 self._log_msg(f"Survey sample {i+1}: trigger at z={probe_z:.3f}, actual z={actual_z:.3f}")
@@ -1833,6 +1858,169 @@ class ProbeEddy:
 
         else:
             raise self._printer.command_error("Survey failed: no valid samples")
+
+    def cmd_THRESHOLD_SCAN(self, gcmd: GCodeCommand):
+        """Automatically find optimal touch threshold for survey mode"""
+        if not self._z_homed():
+            raise self._printer.command_error("Z axis must be homed before threshold scan")
+        
+        if not self.calibrated():
+            raise self._printer.command_error("Eddy probe not calibrated!")
+        
+        # Check polynomial calibration
+        current_map = self.map_for_drive_current()
+        if not hasattr(current_map, '_use_polynomial') or not current_map._use_polynomial:
+            raise self._printer.command_error("Threshold scan requires polynomial calibration. Run PROBE_EDDY_NG_CALIBRATE_POLY first.")
+        
+        # Parameters
+        start_z = gcmd.get_float("START_Z", 3.0, above=1.0)
+        approach_speed = gcmd.get_float("APPROACH_SPEED", 1.0, above=0.1)
+        scan_speed = gcmd.get_float("SCAN_SPEED", 0.5, above=0.1)
+        retries = gcmd.get_int("RETRIES", 3, minval=1)
+        min_change_rate = gcmd.get_float("MIN_CHANGE_RATE", 100.0, above=10.0)
+        
+        # Log with modified name for threshold scanning
+        orig_name = self._name
+        self._name = f"{orig_name}_thr"
+        
+        try:
+            threshold_results = []
+            
+            for attempt in range(retries):
+                self._log_info(f"Threshold scan attempt {attempt + 1}/{retries}")
+                
+                # Perform threshold scan
+                threshold = self._do_threshold_scan(
+                    start_z, approach_speed, scan_speed, min_change_rate
+                )
+                
+                if threshold is not None:
+                    threshold_results.append(threshold)
+                    self._log_info(f"Found threshold: {threshold:.3f}mm")
+                else:
+                    self._log_warning(f"Attempt {attempt + 1} failed to find threshold")
+            
+            # Analyze results
+            if len(threshold_results) >= 2:
+                median_threshold = float(np.median(threshold_results))
+                std_dev = float(np.std(threshold_results))
+                confidence = max(0.0, 1.0 - (std_dev / median_threshold))
+                
+                self._survey_threshold = median_threshold
+                self._survey_threshold_confidence = confidence
+                
+                self._log_info(f"Threshold scan complete: {median_threshold:.3f}mm "
+                            f"(std: {std_dev:.4f}, confidence: {confidence:.2f})")
+                
+                if confidence < 0.8:
+                    self._log_warning("Low confidence threshold. Consider adjusting scan parameters.")
+                    
+            elif len(threshold_results) == 1:
+                self._survey_threshold = threshold_results[0]
+                self._survey_threshold_confidence = 0.5
+                self._log_warning(f"Only one successful scan. Threshold: {self._survey_threshold:.3f}mm")
+            else:
+                raise self._printer.command_error("All threshold scan attempts failed")
+                
+        finally:
+            self._name = orig_name
+    
+    def _do_threshold_scan(self, start_z: float, approach_speed: float, 
+                          scan_speed: float, min_change_rate: float) -> float:
+        """Perform single threshold scan attempt"""
+        th = self._printer.lookup_object("toolhead")
+        
+        # Move to start position
+        self.probe_to_start_position(start_z)
+        
+        # Data collection arrays
+        heights = []
+        freqs = []
+        times = []
+        
+        # Start sampling and approach
+        with self.start_sampler(calculate_heights=False) as sampler:
+            start_time = th.get_last_move_time()
+            
+            # Approach bed slowly
+            target_pos = th.get_position()
+            target_pos[2] = -1.0  # Go below bed level
+            
+            try:
+                # Start moving down at scan speed
+                th.manual_move(target_pos, scan_speed)
+                
+                # Collect samples during movement
+                current_time = start_time
+                last_freq = None
+                max_change_rate = 0.0
+                touch_height = None
+                
+                # Wait for movement to complete or detect touch
+                while not sampler.finished:
+                    th.dwell(0.01)  # Small delay
+                    current_time = th.get_last_move_time()
+                    
+                    if sampler.raw_count > 0:
+                        # Get latest sample
+                        latest_freq = sampler.freqs[-1]
+                        latest_time = sampler.times[-1]
+                        
+                        # Calculate current position
+                        pos, vel = self._get_trapq_position(latest_time)
+                        if pos is not None:
+                            current_height = pos[2]
+                            
+                            # Calculate frequency change rate
+                            if last_freq is not None and len(freqs) > 0:
+                                freq_change = abs(latest_freq - last_freq)
+                                time_diff = latest_time - times[-1] if times else 0.01
+                                change_rate = freq_change / time_diff if time_diff > 0 else 0
+                                
+                                # Check for significant change (touch detection)
+                                if change_rate > min_change_rate:
+                                    if change_rate > max_change_rate:
+                                        max_change_rate = change_rate
+                                        touch_height = current_height
+                                        
+                                        # Stop movement when touch detected
+                                        if touch_height is not None:
+                                            break
+                            
+                            heights.append(current_height)
+                            freqs.append(latest_freq)
+                            times.append(latest_time)
+                            last_freq = latest_freq
+                
+                sampler.finish()
+                
+            except Exception as e:
+                self._log_error(f"Threshold scan failed: {e}")
+                return None
+        
+        # Lift back up
+        th.manual_move([None, None, start_z], 10.0)
+        th.wait_moves()
+        
+        return touch_height
+    
+    def cmd_THRESHOLD_STATUS(self, gcmd: GCodeCommand):
+        """Show current dynamic threshold status"""
+        if self._survey_threshold is not None:
+            self._log_msg(f"Dynamic threshold: {self._survey_threshold:.3f}mm")
+            self._log_msg(f"Confidence: {self._survey_threshold_confidence:.2f}")
+            
+            if self._survey_threshold_confidence > 0.8:
+                status = "HIGH (recommended for use)"
+            elif self._survey_threshold_confidence > 0.5:
+                status = "MEDIUM (usable but consider re-scanning)"
+            else:
+                status = "LOW (not recommended, re-scan required)"
+                
+            self._log_msg(f"Status: {status}")
+        else:
+            self._log_msg("No dynamic threshold found. Run PROBE_EDDY_NG_THRESHOLD_SCAN first.")
+            self._log_msg(f"Falling back to static trigger height: {self.params.home_trigger_height:.3f}mm")
 
     def cmd_TAP(self, gcmd: GCodeCommand):
         drive_current = self._sensor.get_drive_current()
