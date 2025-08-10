@@ -1882,6 +1882,9 @@ class ProbeEddy:
         # Log with modified name for threshold scanning
         orig_name = self._name
         self._name = f"{orig_name}_thr"
+        orig_debug = self.params.debug
+        # Enable debug for threshold scanning
+        self.params.debug = True
         
         try:
             threshold_results = []
@@ -1924,6 +1927,7 @@ class ProbeEddy:
                 
         finally:
             self._name = orig_name
+            self.params.debug = orig_debug
     
     def _do_threshold_scan(self, start_z: float, approach_speed: float, 
                           scan_speed: float, min_change_rate: float) -> float:
@@ -1938,65 +1942,60 @@ class ProbeEddy:
         freqs = []
         times = []
         
-        # Start sampling and approach
-        with self.start_sampler(calculate_heights=False) as sampler:
-            start_time = th.get_last_move_time()
-            
-            # Approach bed slowly
-            target_pos = th.get_position()
-            target_pos[2] = -1.0  # Go below bed level
-            
-            try:
-                # Start moving down at scan speed
-                th.manual_move(target_pos, scan_speed)
+        # Use a step-by-step approach instead of continuous sampling
+        step_size = 0.01  # 0.01mm steps
+        current_z = start_z
+        last_freq = None
+        max_change_rate = 0.0
+        touch_height = None
+        
+        try:
+            while current_z > -0.5:  # Safety limit
+                # Move to current position
+                th.manual_move([None, None, current_z], scan_speed)
+                th.wait_moves()
                 
-                # Collect samples during movement
-                current_time = start_time
-                last_freq = None
-                max_change_rate = 0.0
-                touch_height = None
+                # Take a reading at this position
+                with self.start_sampler(calculate_heights=False) as sampler:
+                    th.dwell(0.1)  # Wait for samples
+                    th.wait_moves()
+                    sampler.finish()
                 
-                # Wait for movement to complete or detect touch
-                while not sampler.finished:
-                    th.dwell(0.01)  # Small delay
-                    current_time = th.get_last_move_time()
+                if sampler.raw_count > 0:
+                    current_freq = sampler.freqs[-1]
                     
-                    if sampler.raw_count > 0:
-                        # Get latest sample
-                        latest_freq = sampler.freqs[-1]
-                        latest_time = sampler.times[-1]
+                    heights.append(current_z)
+                    freqs.append(current_freq)
+                    times.append(sampler.times[-1])
+                    
+                    # Calculate frequency change rate
+                    if last_freq is not None and len(freqs) >= 2:
+                        freq_change = abs(current_freq - last_freq)
+                        z_change = heights[-2] - current_z  # Previous z - current z
+                        change_rate = freq_change / z_change if z_change > 0 else 0
                         
-                        # Calculate current position
-                        pos, vel = self._get_trapq_position(latest_time)
-                        if pos is not None:
-                            current_height = pos[2]
-                            
-                            # Calculate frequency change rate
-                            if last_freq is not None and len(freqs) > 0:
-                                freq_change = abs(latest_freq - last_freq)
-                                time_diff = latest_time - times[-1] if times else 0.01
-                                change_rate = freq_change / time_diff if time_diff > 0 else 0
+                        self._log_debug(f"Z={current_z:.3f}, freq={current_freq:.1f}, rate={change_rate:.1f}")
+                        
+                        # Check for significant change (touch detection)
+                        if change_rate > min_change_rate:
+                            if change_rate > max_change_rate:
+                                max_change_rate = change_rate
+                                touch_height = current_z
                                 
-                                # Check for significant change (touch detection)
-                                if change_rate > min_change_rate:
-                                    if change_rate > max_change_rate:
-                                        max_change_rate = change_rate
-                                        touch_height = current_height
-                                        
-                                        # Stop movement when touch detected
-                                        if touch_height is not None:
-                                            break
-                            
-                            heights.append(current_height)
-                            freqs.append(latest_freq)
-                            times.append(latest_time)
-                            last_freq = latest_freq
+                            # If we found a strong signal, we can stop
+                            if change_rate > min_change_rate * 2:
+                                self._log_debug(f"Strong contact detected at z={current_z:.3f}")
+                                break
+                    
+                    last_freq = current_freq
+                else:
+                    self._log_warning("No samples collected at this position")
                 
-                sampler.finish()
+                current_z -= step_size
                 
-            except Exception as e:
-                self._log_error(f"Threshold scan failed: {e}")
-                return None
+        except Exception as e:
+            self._log_error(f"Threshold scan failed: {e}")
+            return None
         
         # Lift back up
         th.manual_move([None, None, start_z], 10.0)
