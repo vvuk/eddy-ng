@@ -1939,19 +1939,19 @@ class ProbeEddy:
         times = []
 
         # Use a step-by-step approach instead of continuous sampling
-        step_size = 0.05  # 0.05mm steps for faster scanning
+        step_size = 0.02  # 0.02mm steps for faster scanning
         current_z = start_z
         baseline_freq = None
         last_freq = None
         max_change_rate = 0.0
         touch_height = None
-        
+
         # Collect baseline frequency at start height
         with self.start_sampler(calculate_heights=False) as sampler:
             th.dwell(0.1)
             th.wait_moves()
             sampler.finish()
-            
+
         if sampler.raw_count > 0:
             baseline_freq = sampler.freqs[-1]
             self._log_debug(f"Baseline frequency at z={start_z:.3f}: {baseline_freq:.1f}")
@@ -1961,9 +1961,9 @@ class ProbeEddy:
         # Arrays for acceleration-based analysis
         freq_derivatives = []  # First derivative (rate of change)
         freq_accelerations = []  # Second derivative (acceleration)
-        
+
         try:
-            while current_z > 0.2:  # Safety limit - don't go too close to avoid crash
+            while current_z > 0.05:  # Safety limit - stop just before bed contact
                 # Move to current position
                 th.manual_move([None, None, current_z], scan_speed)
                 th.wait_moves()
@@ -1986,41 +1986,41 @@ class ProbeEddy:
                         # Calculate first derivative (frequency change rate per mm)
                         freq_rate = (freqs[-1] - freqs[-2]) / step_size
                         freq_derivatives.append(freq_rate)
-                        
+
                         # Calculate second derivative (acceleration) after we have enough derivatives
                         if len(freq_derivatives) >= 2:
                             freq_accel = (freq_derivatives[-1] - freq_derivatives[-2]) / step_size
                             freq_accelerations.append(freq_accel)
 
                     freq_delta = current_freq - baseline_freq
-                    
+
                     # Analyze for contact detection after collecting enough data
                     if len(freq_accelerations) >= 3:
                         # Use last 3 acceleration values for stability
                         recent_accel = freq_accelerations[-3:]
                         avg_accel = float(np.mean(recent_accel))
                         current_rate = freq_derivatives[-1] if freq_derivatives else 0
-                        
+
                         self._log_debug(f"Z={current_z:.3f}, freq={current_freq:.1f}, δf={freq_delta:.1f}, "
                                       f"rate={current_rate:.0f}, accel={avg_accel:.0f}")
-                        
+
                         # Contact detection criteria:
-                        # 1. Significant frequency increase (at least 2% from baseline)  
+                        # 1. Significant frequency increase (at least 2% from baseline)
                         # 2. High positive acceleration (rapid increase in rate of change)
                         # 3. Must be close enough to surface (below 0.2mm)
                         min_freq_increase = baseline_freq * 0.02  # 2% minimum increase
                         min_acceleration = 300000.0  # Minimum acceleration threshold
                         max_height_for_contact = 0.2  # Maximum height to consider for contact
-                        
-                        if (freq_delta > min_freq_increase and 
-                            avg_accel > min_acceleration and 
+
+                        if (freq_delta > min_freq_increase and
+                            avg_accel > min_acceleration and
                             current_z < max_height_for_contact):
-                            
+
                             touch_height = current_z
                             self._log_debug(f"Contact detected: z={current_z:.3f}, δf={freq_delta:.1f}, "
                                           f"accel={avg_accel:.0f}")
                             break
-                        
+
                         # Emergency break if frequency increase is massive (avoid crashes)
                         if freq_delta > baseline_freq * 0.06:  # 6% emergency threshold
                             touch_height = current_z
