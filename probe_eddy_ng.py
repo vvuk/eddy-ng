@@ -1939,7 +1939,7 @@ class ProbeEddy:
         times = []
 
         # Use a step-by-step approach instead of continuous sampling
-        step_size = 0.02  # 0.02mm steps for faster scanning
+        step_size = 0.05  # 0.05mm steps for faster scanning
         current_z = start_z
         baseline_freq = None
         last_freq = None
@@ -1963,14 +1963,14 @@ class ProbeEddy:
         freq_accelerations = []  # Second derivative (acceleration)
         
         try:
-            while current_z > 0.05:  # Safety limit - don't go below 0.05mm to avoid crash
+            while current_z > 0.2:  # Safety limit - don't go too close to avoid crash
                 # Move to current position
                 th.manual_move([None, None, current_z], scan_speed)
                 th.wait_moves()
 
                 # Take a reading at this position
                 with self.start_sampler(calculate_heights=False) as sampler:
-                    th.dwell(0.1)  # Wait for samples
+                    th.dwell(0.05)  # Wait for samples - reduced from 0.1 to 0.05
                     th.wait_moves()
                     sampler.finish()
 
