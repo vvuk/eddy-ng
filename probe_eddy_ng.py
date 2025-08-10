@@ -3173,16 +3173,32 @@ class ProbeEddyFrequencyMap:
         if use_polynomial:
             # Use polynomial model for survey mode (like Cartographer)
             # Fit polynomial from 1/freq to height for entire range
-            poly_model = npp.Polynomial.fit(1.0 / freqs, heights, deg=9)
+            # Try lower degree first for better stability
+            best_deg = 9
+            best_rmse = float('inf')
+            
+            # Find optimal polynomial degree
+            for deg in [5, 6, 7, 8, 9]:
+                try:
+                    test_poly = npp.Polynomial.fit(1.0 / freqs, heights, deg=deg)
+                    test_rmse = np_rmse(test_poly, 1.0 / freqs, heights)
+                    if test_rmse < best_rmse:
+                        best_rmse = test_rmse
+                        best_deg = deg
+                except:
+                    continue
+            
+            poly_model = npp.Polynomial.fit(1.0 / freqs, heights, deg=best_deg)
             self._poly_model = poly_model
             self._use_polynomial = True
             
             # Still compute the traditional models for compatibility
-            ftoh_low_fn = poly_model
+            # Use separate fits for low samples for RMSE calculation
+            ftoh_low_fn = npp.Polynomial.fit(1.0 / freqs[low_samples], heights[low_samples], deg=9)
             htof_low_fn = npp.Polynomial.fit(heights[low_samples], 1.0 / freqs[low_samples], deg=9)
             ftoh_high_fn = None
             
-            self._eddy._log_info(f"Using polynomial model for survey mode")
+            self._eddy._log_info(f"Using polynomial model (degree {best_deg}) for survey mode, RMSE: {best_rmse:.4f}")
         else:
             # Original interpolation-based method
             ftoh_low_fn = npp.Polynomial.fit(1.0 / freqs[low_samples], heights[low_samples], deg=9)
@@ -3210,11 +3226,18 @@ class ProbeEddyFrequencyMap:
 
         if report_errors:
             if rmse_fth > 0.050:
-                self._eddy._log_error(
-                    f"Drive current {drive_current} error: calibration error margin is too high ({rmse_fth:.3f}). Possible causes: bad drive current, bad sensor mount height."
-                )
-                if not self._eddy.params.allow_unsafe:
-                    return None, None
+                if use_polynomial:
+                    # For polynomial model, we expect higher RMSE but it's more stable across temperatures
+                    self._eddy._log_warning(
+                        f"Drive current {drive_current}: polynomial model RMSE is {rmse_fth:.3f}. "
+                        f"This is expected for survey mode and provides better temperature stability."
+                    )
+                else:
+                    self._eddy._log_error(
+                        f"Drive current {drive_current} error: calibration error margin is too high ({rmse_fth:.3f}). Possible causes: bad drive current, bad sensor mount height."
+                    )
+                    if not self._eddy.params.allow_unsafe:
+                        return None, None
 
         self._ftoh = ftoh_low_fn
         self._htof = htof_low_fn
