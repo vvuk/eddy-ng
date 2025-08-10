@@ -69,7 +69,6 @@ try:
 except ImportError:
     scipy = None
 
-
 # In this file, a couple of conventions are used (for sanity).
 # Variables are named according to:
 # - "height" is always a physical height as detected by the probe in mm
@@ -607,16 +606,12 @@ class ProbeEddy:
             self._temperature_sensor = self._printer.lookup_object(sensor_name)
             self._log_info(f"Found temperature sensor: {sensor_name}")
         except:
-            # Try alternative names
+            # Try alternative name
             try:
                 self._temperature_sensor = self._printer.lookup_object("temperature_sensor btt_eddy")
                 self._log_info("Found temperature sensor: temperature_sensor btt_eddy")
             except:
-                try:
-                    self._temperature_sensor = self._printer.lookup_object("temperature_sensor btt_eddy_mcu")
-                    self._log_info("Using MCU temperature as fallback: temperature_sensor btt_eddy_mcu")
-                except:
-                    self._log_warning("Temperature sensor not found for temperature profiles")
+                self._log_warning("Temperature sensor not found for temperature profiles")
 
     def _get_current_temperature(self):
         """Get current BTT Eddy sensor temperature"""
@@ -698,8 +693,6 @@ class ProbeEddy:
         self._tap_adjust_z = profile.tap_adjust_z
         if old_tap_adjust != self._tap_adjust_z:
             self._log_info(f"Changed tap_adjust_z from {old_tap_adjust:.6f} to {profile.tap_adjust_z:.6f}")
-
-        # calibration_version is not applied - handled by the system automatically
 
         # Reload calibration in probe
         if hasattr(self, '_load_calibration'):
@@ -2858,7 +2851,6 @@ class ProbeEddyEndstopWrapper:
     def _handle_homing_move_begin(self, hmove):
         if self not in hmove.get_mcu_endstops():
             return
-
         self._sampler = self.eddy.start_sampler()
         self._homing_in_progress = True
         # if we're doing a tap, we're already in the right position;
