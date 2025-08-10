@@ -1906,7 +1906,8 @@ class ProbeEddy:
                 std_dev = float(np.std(threshold_results))
                 confidence = max(0.0, 1.0 - (std_dev / median_threshold))
 
-                self._survey_threshold = median_threshold
+                # Convert absolute threshold to relative offset from home_trigger_height
+                self._survey_threshold = median_threshold - self.params.home_trigger_height
                 self._survey_threshold_confidence = confidence
 
                 self._log_info(f"Threshold scan complete: {median_threshold:.3f}mm "
