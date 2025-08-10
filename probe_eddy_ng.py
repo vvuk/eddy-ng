@@ -593,6 +593,16 @@ class ProbeEddy:
         )
         gcode.register_command("PROBE_EDDY_NG_TAP", self.cmd_TAP, self.cmd_TAP_help)
         gcode.register_command(
+            "PROBE_EDDY_NG_SURVEY", 
+            self.cmd_SURVEY, 
+            "Temperature-independent probe using polynomial model (experimental)"
+        )
+        gcode.register_command(
+            "PROBE_EDDY_NG_CALIBRATE_POLY",
+            self.cmd_CALIBRATE_POLY,
+            "Calibrate with polynomial model for survey mode"
+        )
+        gcode.register_command(
             "PROBE_EDDY_NG_SET_TAP_OFFSET",
             self.cmd_SET_TAP_OFFSET,
             "Set or clear the tap offset for the bed mesh scan and other probe operations",
@@ -1251,6 +1261,126 @@ class ProbeEddy:
             lambda kin_pos: self.cmd_CALIBRATE_next(gcmd, kin_pos),
         )
 
+    def cmd_CALIBRATE_POLY(self, gcmd: GCodeCommand):
+        """Calibrate using polynomial model for survey mode"""
+        if not self._xy_homed():
+            raise self._printer.command_error("X and Y must be homed before calibrating")
+
+        if self._z_homed():
+            self._z_hop()
+
+        # Now reset the axis so that we have a full range to calibrate with
+        th = self._printer.lookup_object("toolhead")
+        th_pos = th.get_position()
+        zrange = th.get_kinematics().rails[2].get_range()
+        th_pos[2] = zrange[1] - 20.0
+        self._set_toolhead_position(th_pos, [2])
+
+        manual_probe.ManualProbeHelper(
+            self._printer,
+            gcmd,
+            lambda kin_pos: self.cmd_CALIBRATE_POLY_next(gcmd, kin_pos),
+        )
+    
+    def cmd_CALIBRATE_POLY_next(self, gcmd: GCodeCommand, kin_pos: Optional[List[float]]):
+        """Continue polynomial calibration after manual probe"""
+        if kin_pos is None:
+            self._z_not_homed()
+            return
+
+        old_drive_current = self.current_drive_current()
+        drive_current: int = gcmd.get_int("DRIVE_CURRENT", old_drive_current, minval=0, maxval=31)
+        cal_z_max: float = gcmd.get_float("START_Z", self.params.calibration_z_max, above=2.0)
+        z_target: float = gcmd.get_float("TARGET_Z", 0.0)
+
+        probe_speed: float = gcmd.get_float("SPEED", self.params.probe_speed, above=0.0)
+        lift_speed: float = gcmd.get_float("LIFT_SPEED", self.params.lift_speed, above=0.0)
+
+        th = self._printer.lookup_object("toolhead")
+        th_pos = th.get_position()
+        th_pos[2] = 0.0
+        self._set_toolhead_position(th_pos, [2])
+        th.wait_moves()
+
+        # Move to calibration position
+        th.manual_move([None, None, cal_z_max + 3.0], lift_speed)
+        th.manual_move(
+            [
+                th_pos[0] - self.offset["x"],
+                th_pos[1] - self.offset["y"],
+                None,
+            ],
+            self.params.move_speed,
+        )
+
+        # Create mapping with polynomial flag
+        mapping, fth_fit, htf_fit = self._create_mapping_poly(
+            cal_z_max,
+            z_target,
+            probe_speed,
+            lift_speed,
+            drive_current,
+            report_errors=True,
+            write_debug_files=True,
+        )
+        
+        if mapping is None or fth_fit is None or htf_fit is None:
+            self._log_error("Polynomial calibration failed")
+            return
+
+        self._dc_to_fmap[drive_current] = mapping
+        self.save_config()
+        self._z_not_homed()
+        
+        self._log_msg("Polynomial calibration complete. Survey mode is now available.")
+    
+    def _create_mapping_poly(
+        self,
+        z_start: float,
+        z_target: float,
+        probe_speed: float,
+        lift_speed: float,
+        drive_current: int,
+        report_errors: bool,
+        write_debug_files: bool,
+    ) -> Tuple[ProbeEddyFrequencyMap, float, float]:
+        """Create mapping with polynomial model"""
+        th = self._printer.lookup_object("toolhead")
+        th_pos = th.get_position()
+
+        # Move to start position
+        if th_pos[2] < z_start:
+            th.manual_move([None, None, z_start + 3.0], lift_speed)
+        th.manual_move([None, None, z_start], lift_speed)
+
+        old_drive_current = self.current_drive_current()
+        try:
+            self._sensor.set_drive_current(drive_current)
+            times, freqs, heights, vels = self._capture_samples_down_to(z_target, probe_speed)
+            th.manual_move([None, None, z_start + 3.0], lift_speed)
+        finally:
+            self._sensor.set_drive_current(old_drive_current)
+
+        if times is None:
+            if report_errors:
+                self._log_error(f"Drive current {drive_current}: No samples collected.")
+            return None, None, None
+
+        # Build map with polynomial flag
+        mapping = ProbeEddyFrequencyMap(self)
+        fth_fit, htf_fit = mapping.calibrate_from_values(
+            drive_current,
+            times,
+            freqs,
+            heights,
+            vels,
+            report_errors,
+            write_debug_files,
+            use_polynomial=True,  # Use polynomial model
+        )
+
+        return mapping, fth_fit, htf_fit
+
     def cmd_CALIBRATE_next(self, gcmd: GCodeCommand, kin_pos: Optional[List[float]]):
         th = self._printer.lookup_object("toolhead")
         if kin_pos is None:
@@ -1616,6 +1746,74 @@ class ProbeEddy:
     # Tap probe
     #
     cmd_TAP_help = "Calculate a z-offset by touching the build plate."
+    
+    def cmd_SURVEY(self, gcmd: GCodeCommand):
+        """Temperature-independent survey mode (like Cartographer)"""
+        if not self._z_homed():
+            raise self._printer.command_error("Z axis must be homed before survey")
+            
+        if not self.calibrated():
+            raise self._printer.command_error("Eddy probe not calibrated!")
+            
+        # Survey-specific parameters
+        probe_speed = gcmd.get_float("SPEED", self.params.tap_speed, above=0.0)
+        lift_speed = gcmd.get_float("LIFT_SPEED", self.params.lift_speed, above=0.0)
+        samples = gcmd.get_int("SAMPLES", 3, minval=1)
+        tolerance = gcmd.get_float("TOLERANCE", 0.010, above=0.0)
+        start_z = gcmd.get_float("START_Z", 5.0, above=2.0)
+        
+        th = self._printer.lookup_object("toolhead")
+        results = []
+        
+        # Move to start position
+        self.probe_to_start_position(start_z)
+        
+        for i in range(samples):
+            # Do a probe move
+            target_position = th.get_position()
+            target_position[2] = -0.5  # Probe downward
+            
+            try:
+                # Use standard endstop for now
+                endstops = [(self._endstop_wrapper, "probe")]
+                hmove = HomingMove(self._printer, endstops)
+                probe_position = hmove.homing_move(target_position, probe_speed, probe_pos=True)
+                
+                if hmove.check_no_movement() is not None:
+                    raise self._printer.command_error("Probe triggered prior to movement")
+                    
+                probe_z = probe_position[2]
+                results.append(probe_z)
+                
+                self._log_msg(f"Survey sample {i+1}: z={probe_z:.3f}")
+                
+                # Lift back up
+                th.manual_move([None, None, start_z], lift_speed)
+                th.wait_moves()
+                
+            except self._printer.command_error as err:
+                self._log_error(f"Survey failed: {err}")
+                raise
+                
+        # Calculate median result
+        if len(results) > 0:
+            median_z = float(np.median(results))
+            stddev = float(np.std(results)) if len(results) > 1 else 0.0
+            
+            if stddev > tolerance:
+                self._log_warning(f"Survey stddev {stddev:.4f} exceeds tolerance {tolerance:.4f}")
+                
+            # Set Z position without temperature compensation
+            th_pos = th.get_position()
+            th_pos[2] = median_z
+            self._set_toolhead_position(th_pos, [2])
+            
+            self._log_msg(f"Survey complete: z={median_z:.3f} (stddev={stddev:.4f})")
+            
+            # No tap_offset adjustment for survey mode
+            self._tap_offset = 0.0
+        else:
+            raise self._printer.command_error("Survey failed: no valid samples")
 
     def cmd_TAP(self, gcmd: GCodeCommand):
         drive_current = self._sensor.get_drive_current()
@@ -2823,6 +3021,10 @@ class ProbeEddyFrequencyMap:
         self._ftoh: Optional[npp.Polynomial] = None
         self._ftoh_high: Optional[npp.Polynomial] = None
         self._htof: Optional[npp.Polynomial] = None
+        
+        # Polynomial model for survey mode (temperature-independent)
+        self._poly_model: Optional[npp.Polynomial] = None
+        self._use_polynomial = False
 
     def _str_to_exact_floatlist(self, str):
         return [float.fromhex(v) for v in str.split(",")]
@@ -2898,6 +3100,7 @@ class ProbeEddyFrequencyMap:
         raw_vels_list: List[float],
         report_errors: bool,
         write_debug_files: bool,
+        use_polynomial: bool = False,
     ):
         if len(raw_freqs_list) != len(raw_heights_list):
             raise ValueError("freqs and heights must be the same length")
@@ -2967,14 +3170,31 @@ class ProbeEddyFrequencyMap:
         low_samples = heights <= ProbeEddyFrequencyMap.low_z_threshold
         high_samples = heights >= ProbeEddyFrequencyMap.low_z_threshold - 0.5
 
-        ftoh_low_fn = npp.Polynomial.fit(1.0 / freqs[low_samples], heights[low_samples], deg=9)
-        htof_low_fn = npp.Polynomial.fit(heights[low_samples], 1.0 / freqs[low_samples], deg=9)
-
-        if np.count_nonzero(high_samples) > 50:
-            ftoh_high_fn = npp.Polynomial.fit(1.0 / freqs[high_samples], heights[high_samples], deg=9)
-        else:
-            self._eddy._log_debug(f"not computing ftoh_high, not enough high samples")
+        if use_polynomial:
+            # Use polynomial model for survey mode (like Cartographer)
+            # Fit polynomial from 1/freq to height for entire range
+            poly_model = npp.Polynomial.fit(1.0 / freqs, heights, deg=9)
+            self._poly_model = poly_model
+            self._use_polynomial = True
+            
+            # Still compute the traditional models for compatibility
+            ftoh_low_fn = poly_model
+            htof_low_fn = npp.Polynomial.fit(heights[low_samples], 1.0 / freqs[low_samples], deg=9)
             ftoh_high_fn = None
+            
+            self._eddy._log_info(f"Using polynomial model for survey mode")
+        else:
+            # Original interpolation-based method
+            ftoh_low_fn = npp.Polynomial.fit(1.0 / freqs[low_samples], heights[low_samples], deg=9)
+            htof_low_fn = npp.Polynomial.fit(heights[low_samples], 1.0 / freqs[low_samples], deg=9)
+
+            if np.count_nonzero(high_samples) > 50:
+                ftoh_high_fn = npp.Polynomial.fit(1.0 / freqs[high_samples], heights[high_samples], deg=9)
+            else:
+                self._eddy._log_debug(f"not computing ftoh_high, not enough high samples")
+                ftoh_high_fn = None
+            
+            self._use_polynomial = False
 
         # Calculate rms, only for the low values (where error is most relevant)
         rmse_fth = np_rmse(
@@ -3119,6 +3339,12 @@ class ProbeEddyFrequencyMap:
         if self._ftoh is None:
             raise self._eddy._printer.command_error("Calling freq_to_height on uncalibrated map")
         invfreq = 1.0 / freq
+        
+        if self._use_polynomial and self._poly_model is not None:
+            # Use polynomial model for survey mode
+            return float(self._poly_model(invfreq))
+        
+        # Original interpolation method
         if self._ftoh_high is not None and invfreq < self._ftoh.domain[0]:
             return float(self._ftoh_high(invfreq))
         return float(self._ftoh(invfreq))
