@@ -1877,7 +1877,6 @@ class ProbeEddy:
         approach_speed = gcmd.get_float("APPROACH_SPEED", 1.0, above=0.1)
         scan_speed = gcmd.get_float("SCAN_SPEED", 0.5, above=0.1)
         retries = gcmd.get_int("RETRIES", 3, minval=1)
-        min_change_rate = gcmd.get_float("MIN_CHANGE_RATE", 5000.0, above=100.0)  # Much higher threshold
 
         # Log with modified name for threshold scanning
         orig_debug = self.params.debug
@@ -1892,7 +1891,7 @@ class ProbeEddy:
 
                 # Perform threshold scan
                 threshold = self._do_threshold_scan(
-                    start_z, approach_speed, scan_speed, min_change_rate
+                    start_z, approach_speed, scan_speed
                 )
 
                 if threshold is not None:
@@ -1927,8 +1926,8 @@ class ProbeEddy:
             self.params.debug = orig_debug
 
     def _do_threshold_scan(self, start_z: float, approach_speed: float,
-                          scan_speed: float, min_change_rate: float) -> float:
-        """Perform single threshold scan attempt"""
+                          scan_speed: float) -> float:
+        """Perform single threshold scan attempt using acceleration-based detection"""
         th = self._printer.lookup_object("toolhead")
 
         # Move to start position
@@ -1959,8 +1958,12 @@ class ProbeEddy:
         else:
             raise self._printer.command_error("Failed to get baseline frequency")
 
+        # Arrays for acceleration-based analysis
+        freq_derivatives = []  # First derivative (rate of change)
+        freq_accelerations = []  # Second derivative (acceleration)
+        
         try:
-            while current_z > -0.5:  # Safety limit
+            while current_z > 0.05:  # Safety limit - don't go below 0.05mm to avoid crash
                 # Move to current position
                 th.manual_move([None, None, current_z], scan_speed)
                 th.wait_moves()
@@ -1978,21 +1981,50 @@ class ProbeEddy:
                     freqs.append(current_freq)
                     times.append(sampler.times[-1])
 
-                    # Calculate absolute frequency increase from baseline
+                    # Calculate derivatives after we have enough points
+                    if len(freqs) >= 3:
+                        # Calculate first derivative (frequency change rate per mm)
+                        freq_rate = (freqs[-1] - freqs[-2]) / step_size
+                        freq_derivatives.append(freq_rate)
+                        
+                        # Calculate second derivative (acceleration) after we have enough derivatives
+                        if len(freq_derivatives) >= 2:
+                            freq_accel = (freq_derivatives[-1] - freq_derivatives[-2]) / step_size
+                            freq_accelerations.append(freq_accel)
+
                     freq_delta = current_freq - baseline_freq
-                    freq_threshold = baseline_freq * 0.005  # 0.5% increase from baseline
                     
-                    self._log_debug(f"Z={current_z:.3f}, freq={current_freq:.1f}, baseline={baseline_freq:.1f}, δf={freq_delta:.1f}")
-                    
-                    # Look for significant frequency increase from baseline (touch detection)
-                    if freq_delta > freq_threshold:
-                        if freq_delta > max_change_rate:
-                            max_change_rate = freq_delta
-                            touch_height = current_z
+                    # Analyze for contact detection after collecting enough data
+                    if len(freq_accelerations) >= 3:
+                        # Use last 3 acceleration values for stability
+                        recent_accel = freq_accelerations[-3:]
+                        avg_accel = float(np.mean(recent_accel))
+                        current_rate = freq_derivatives[-1] if freq_derivatives else 0
+                        
+                        self._log_debug(f"Z={current_z:.3f}, freq={current_freq:.1f}, δf={freq_delta:.1f}, "
+                                      f"rate={current_rate:.0f}, accel={avg_accel:.0f}")
+                        
+                        # Contact detection criteria:
+                        # 1. Significant frequency increase (at least 2% from baseline)  
+                        # 2. High positive acceleration (rapid increase in rate of change)
+                        # 3. Must be close enough to surface (below 0.2mm)
+                        min_freq_increase = baseline_freq * 0.02  # 2% minimum increase
+                        min_acceleration = 300000.0  # Minimum acceleration threshold
+                        max_height_for_contact = 0.2  # Maximum height to consider for contact
+                        
+                        if (freq_delta > min_freq_increase and 
+                            avg_accel > min_acceleration and 
+                            current_z < max_height_for_contact):
                             
-                        # If we found a very strong signal (1% increase), we can stop
-                        if freq_delta > baseline_freq * 0.01:
-                            self._log_debug(f"Strong contact detected at z={current_z:.3f}, δf={freq_delta:.1f}")
+                            touch_height = current_z
+                            self._log_debug(f"Contact detected: z={current_z:.3f}, δf={freq_delta:.1f}, "
+                                          f"accel={avg_accel:.0f}")
+                            break
+                        
+                        # Emergency break if frequency increase is massive (avoid crashes)
+                        if freq_delta > baseline_freq * 0.06:  # 6% emergency threshold
+                            touch_height = current_z
+                            self._log_debug(f"Emergency stop at z={current_z:.3f}, massive δf={freq_delta:.1f}")
                             break
 
                     last_freq = current_freq
