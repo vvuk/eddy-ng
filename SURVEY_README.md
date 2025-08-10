@@ -2,7 +2,7 @@
 
 ## Overview
 
-Survey mode is a temperature-independent probing method for the BTT Eddy probe, inspired by Cartographer's implementation. Unlike the standard TAP mode which requires temperature compensation (`tap_adjust_z`), Survey mode uses a polynomial model that provides consistent results across different temperatures.
+Survey mode is a temperature-independent probing method for the BTT Eddy probe, inspired by Cartographer's implementation. Unlike the standard TAP mode which requires temperature compensation (`tap_adjust_z`) and heavily depends on exact temperature ranges, Survey mode uses a polynomial model that provides consistent results across different temperatures.
 
 ## Key Differences from TAP Mode
 
@@ -13,6 +13,7 @@ Survey mode is a temperature-independent probing method for the BTT Eddy probe, 
 | Accuracy (RMSE) | ~0.01-0.05mm | ~0.10-0.15mm |
 | Temperature Profiles | Required for consistency | Not needed |
 | Stability | Varies with temperature | Consistent across temperatures |
+| Touch Detection | Manual threshold setting | Automatic threshold detection |
 
 ## Installation
 
@@ -24,36 +25,75 @@ sudo systemctl restart klipper
 
 2. No configuration changes required - uses existing BTT Eddy config
 
-## Usage
+## Complete Calibration Procedure
 
-### Initial Calibration (One-time)
-
+### Step 1: Basic Probe Calibration (if not done)
 ```gcode
-# Home X and Y first
+# Only if probe is not calibrated
 G28 X Y
-
-# Run polynomial calibration
-PROBE_EDDY_NG_CALIBRATE_POLY
-
-# Follow manual probe instructions for Z=0 reference
-# Save configuration
+PROBE_EDDY_NG_SETUP
+# Follow instructions for manual Z=0 positioning
 SAVE_CONFIG
 ```
 
-### Daily Use
-
+### Step 2: Polynomial Calibration
 ```gcode
-# Home all axes using Survey
+# After restart, home again
 G28 X Y
-G28 Z
-PROBE_EDDY_NG_SURVEY
 
-# Or with parameters
-PROBE_EDDY_NG_SURVEY SAMPLES=5 TOLERANCE=0.005 Z_OFFSET=-0.2
+# Polynomial calibration for Survey mode
+PROBE_EDDY_NG_CALIBRATE_POLY
+# Follow instructions for manual Z=0 positioning
+SAVE_CONFIG
 ```
 
-### Parameters
+### Step 3: Automatic Threshold Detection
+```gcode
+# After restart, home again
+G28 X Y
 
+# Automatically find optimal touch threshold
+PROBE_EDDY_NG_THRESHOLD_SCAN
+# Takes ~5-6 minutes, finds accurate bed contact point
+
+# Check results
+PROBE_EDDY_NG_THRESHOLD_STATUS
+```
+
+### Step 4: Survey Testing and Fine-tuning
+```gcode
+# Test Survey mode
+PROBE_EDDY_NG_SURVEY Z_OFFSET=0
+G1 Z0 F300
+# Paper test to verify accuracy
+
+# If adjustment needed (example values):
+PROBE_EDDY_NG_SURVEY Z_OFFSET=-0.05  # For tighter contact
+PROBE_EDDY_NG_SURVEY Z_OFFSET=0.05   # For looser contact
+```
+
+### Step 5: Create Production Macro
+```ini
+# Add to printer.cfg
+[gcode_macro SURVEY]
+gcode:
+    PROBE_EDDY_NG_SURVEY Z_OFFSET=-0.05 {rawparams}  # Your calibrated offset
+```
+
+## Daily Usage
+
+```gcode
+# After printer power-on
+G28 X Y
+PROBE_EDDY_NG_THRESHOLD_SCAN  # Re-detect threshold (5-6 mins)
+SURVEY                        # Use your calibrated macro
+```
+
+**Note:** Threshold detection must be re-run after each power cycle as it's not currently saved to config.
+
+## Commands Reference
+
+### PROBE_EDDY_NG_SURVEY Parameters
 - `SAMPLES`: Number of probe samples (default: 3)
 - `TOLERANCE`: Maximum standard deviation allowed (default: 0.010)
 - `SPEED`: Probing speed (default: from config)
@@ -61,42 +101,32 @@ PROBE_EDDY_NG_SURVEY SAMPLES=5 TOLERANCE=0.005 Z_OFFSET=-0.2
 - `Z_OFFSET`: Manual offset adjustment (default: 0.0)
 - `HOME_Z`: Set Z=0 after probing (default: 1)
 
-### Z_OFFSET Calibration
+### PROBE_EDDY_NG_THRESHOLD_SCAN Parameters
+- `START_Z`: Starting height for scan (default: 2.0)
+- `SCAN_SPEED`: Movement speed during scan (default: 0.5)
+- `RETRIES`: Number of scan attempts (default: 3)
 
-1. Test without offset:
+### Status Commands
 ```gcode
-PROBE_EDDY_NG_SURVEY
-G1 Z0 F300
-# Paper test - note the gap
-```
-
-2. Adjust if needed:
-```gcode
-# If nozzle is 0.2mm too high
-PROBE_EDDY_NG_SURVEY Z_OFFSET=-0.2
-G1 Z0 F300
-# Verify with paper test
-```
-
-3. Save preferred offset in macro:
-```ini
-[gcode_macro SURVEY]
-gcode:
-    PROBE_EDDY_NG_SURVEY Z_OFFSET=-0.2 {rawparams}
-```
-
-## Log Filtering
-
-Polynomial operations are logged with `_pol` suffix for easy filtering:
-- `btt_eddy_pol: Using polynomial model...` - Polynomial operations
-- `btt_eddy: ...` - Standard operations
-
-```bash
-# View only polynomial-related logs
-grep "btt_eddy_pol" /tmp/klippy.log
+PROBE_EDDY_NG_THRESHOLD_STATUS  # Show current threshold and confidence
 ```
 
 ## Technical Details
+
+### Automatic Threshold Detection
+
+The system uses a **sliding median filter algorithm** to detect bed contact:
+
+1. **Frequency Analysis**: Monitors sensor frequency changes as nozzle approaches bed
+2. **Rate Calculation**: Calculates first derivative (rate of frequency change)
+3. **Acceleration Detection**: Calculates second derivative (acceleration of frequency change)
+4. **Contact Detection**: Identifies moment when frequency growth rate significantly slows down
+5. **Statistical Validation**: Uses median filtering to eliminate noise and ensure reliability
+
+**Key Algorithm Features:**
+- Detects contact when frequency growth rate drops by 50% or more
+- Requires minimum frequency increase of 1.5% from baseline
+- Uses 10-point sliding window for stability
 
 ### Polynomial Model
 
@@ -113,10 +143,11 @@ Unlike TAP mode which measures at a specific trigger height and applies temperat
 1. Uses a full-range polynomial model instead of piecewise interpolation
 2. Captures the entire frequency-to-height relationship
 3. Provides consistent results without temperature profiles
+4. Automatically adapts to current conditions through threshold detection
 
-## Project Roadmap
+## Project Status
 
-### Phase 1: Core Implementation (COMPLETED)
+### ✅ Phase 1: Core Implementation (COMPLETED)
 - [x] Polynomial model implementation in ProbeEddyFrequencyMap
 - [x] PROBE_EDDY_NG_CALIBRATE_POLY command
 - [x] PROBE_EDDY_NG_SURVEY command
@@ -124,70 +155,56 @@ Unlike TAP mode which measures at a specific trigger height and applies temperat
 - [x] Multi-sample averaging with deviation checking
 - [x] Z_OFFSET parameter for fine-tuning
 
-### Phase 2: Dynamic Threshold Detection (IN PROGRESS)
-- [ ] Implement PROBE_EDDY_NG_THRESHOLD_SCAN
-- [ ] Dynamic threshold determination algorithm
-- [ ] Automatic threshold optimization based on surface type
+### ✅ Phase 2: Dynamic Threshold Detection (COMPLETED)
+- [x] Implement PROBE_EDDY_NG_THRESHOLD_SCAN with sliding median filter algorithm
+- [x] Dynamic threshold determination with high accuracy (~0.1mm)
+- [x] Automatic bed contact detection without manual calibration
+- [x] Statistical validation with confidence scoring
+- [x] PROBE_EDDY_NG_THRESHOLD_STATUS command for monitoring
 
-### Phase 3: Enhanced Features
-- [ ] Automatic Z_OFFSET detection using multiple surface points
+### 🔄 Phase 3: Enhanced Features (IN PROGRESS)
+- [x] Automatic threshold detection eliminates manual Z_OFFSET guesswork
+- [ ] Persistent threshold storage in config file
 - [ ] Surface type detection (textured/smooth)
 - [ ] Adaptive sampling based on detected variance
 - [ ] Integration with bed mesh for temperature-independent leveling
 
-### Phase 4: Optimization
+### Phase 4: Optimization (PENDING)
 - [ ] Reduce polynomial degree while maintaining accuracy
 - [ ] Implement adaptive polynomial fitting
 - [ ] Speed optimization for rapid probing
 - [ ] Memory usage optimization
 
-### Phase 5: Advanced Features
+### Phase 5: Advanced Features (PENDING)
 - [ ] Multi-point temperature compensation model
 - [ ] Automatic calibration validation
 - [ ] Self-diagnostic capabilities
 
+## Current Todo List
+
+### High Priority
+1. **Implement persistent threshold storage** - Save threshold to config file to eliminate daily re-calibration
+2. **Add configuration parameters for survey mode** - Make algorithm parameters configurable
+3. **Create automated test suite** - Ensure reliability across different printer configurations
+
+### Medium Priority
+4. **Optimize threshold scan speed** - Reduce 5-6 minute scan time
+5. **Add surface detection** - Adapt algorithm for different bed surfaces
+6. **Implement bed mesh integration** - Use Survey for temperature-independent bed leveling
+
+### Low Priority
+7. **Add advanced diagnostics** - More detailed reporting and troubleshooting
+8. **Performance optimization** - Memory usage and calculation speed improvements
+
 ## Known Issues and Limitations
 
-1. **Higher RMSE**: Survey mode typically has RMSE of 0.10-0.15mm vs 0.01-0.05mm for TAP
-2. **Z_OFFSET Required**: May need manual Z_OFFSET adjustment per printer
-
-## Future Development Notes
-
-### Priority Tasks
-
-1. **Threshold Scan Implementation**
-   - Port Cartographer's threshold scanning logic
-   - Implement iterative threshold refinement
-   - Add threshold validation mechanism
-
-2. **Configuration Parameters**
-   - Add `survey_polynomial_degree` config option
-   - Add `survey_default_z_offset` config option
-   - Add `survey_rmse_threshold` for calibration validation
-
-3. **Testing Framework**
-   - Create automated test suite for polynomial fitting
-   - Add temperature cycling tests
-   - Implement calibration validation tests
-
-### Research Areas
-
-1. **Polynomial Optimization**
-   - Investigate lower-degree polynomials for speed
-   - Research piecewise polynomial approaches
-   - Study frequency domain filtering techniques
-
-2. **Temperature Modeling**
-   - Analyze residual temperature effects
-   - Develop hybrid model combining polynomial and temperature data
-
-3. **Surface Detection**
-   - Implement FFT-based texture analysis
-   - Develop surface classification algorithm
-   - Create surface-specific probing strategies
+1. **Threshold Re-calibration Required**: Must run THRESHOLD_SCAN after each power cycle (~5-6 minutes)
+2. **Higher RMSE**: Survey mode typically has RMSE of 0.10-0.15mm vs 0.01-0.05mm for TAP
+3. **Algorithm Tuning**: May need parameter adjustment for different bed surfaces or probe heights
 
 ## Acknowledgments
 
-- Cartographer probe team for the polynomial model approach
+- Cartographer probe team for the polynomial model inspiration
 - BTT for the Eddy probe hardware
 - Klipper community for testing and feedback
+- Advanced sliding median filter algorithm development and implementation
