@@ -1963,7 +1963,7 @@ class ProbeEddy:
         freq_accelerations = []  # Second derivative (acceleration)
 
         try:
-            while current_z > 0.05:  # Safety limit - stop just before bed contact
+            while current_z > -0.250:  # Safety limit - stop just before bed contact
                 # Move to current position
                 th.manual_move([None, None, current_z], scan_speed)
                 th.wait_moves()
