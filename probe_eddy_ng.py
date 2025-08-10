@@ -540,23 +540,23 @@ class ProbeEddy:
             bed_mesh.ProbeManager.start_probe = bed_mesh_ProbeManager_start_probe_override
 
     def _log_error(self, msg):
-        logging.error(f"{self._name}: {msg}")
+        logging.error(f"{self._name}_pol: {msg}")
         self._gcode.respond_raw(f"!! EDDYng: {msg}\n")
 
     def _log_warning(self, msg):
-        logging.warning(f"{self._name}: {msg}")
+        logging.warning(f"{self._name}_pol: {msg}")
         self._gcode.respond_raw(f"!! EDDYng: {msg}\n")
 
     def _log_msg(self, msg):
-        logging.info(f"{self._name}: {msg}")
+        logging.info(f"{self._name}_pol: {msg}")
         self._gcode.respond_info(f"{msg}", log=False)
 
     def _log_info(self, msg):
-        logging.info(f"{self._name}: {msg}")
+        logging.info(f"{self._name}_pol: {msg}")
 
     def _log_debug(self, msg):
         if self.params.debug:
-            logging.info(f"{self._name}: {msg}")
+            logging.info(f"{self._name}_pol: {msg}")
 
     def define_commands(self, gcode):
         gcode.register_command("PROBE_EDDY_NG_STATUS", self.cmd_STATUS, self.cmd_STATUS_help)
@@ -593,8 +593,8 @@ class ProbeEddy:
         )
         gcode.register_command("PROBE_EDDY_NG_TAP", self.cmd_TAP, self.cmd_TAP_help)
         gcode.register_command(
-            "PROBE_EDDY_NG_SURVEY", 
-            self.cmd_SURVEY, 
+            "PROBE_EDDY_NG_SURVEY",
+            self.cmd_SURVEY,
             "Temperature-independent probe using polynomial model (experimental)"
         )
         gcode.register_command(
@@ -1281,7 +1281,7 @@ class ProbeEddy:
             gcmd,
             lambda kin_pos: self.cmd_CALIBRATE_POLY_next(gcmd, kin_pos),
         )
-    
+
     def cmd_CALIBRATE_POLY_next(self, gcmd: GCodeCommand, kin_pos: Optional[List[float]]):
         """Continue polynomial calibration after manual probe"""
         if kin_pos is None:
@@ -1323,7 +1323,7 @@ class ProbeEddy:
             report_errors=True,
             write_debug_files=True,
         )
-        
+
         if mapping is None or fth_fit is None or htf_fit is None:
             self._log_error("Polynomial calibration failed")
             return
@@ -1331,9 +1331,9 @@ class ProbeEddy:
         self._dc_to_fmap[drive_current] = mapping
         self.save_config()
         self._z_not_homed()
-        
+
         self._log_msg("Polynomial calibration complete. Survey mode is now available.")
-    
+
     def _create_mapping_poly(
         self,
         z_start: float,
@@ -1746,72 +1746,85 @@ class ProbeEddy:
     # Tap probe
     #
     cmd_TAP_help = "Calculate a z-offset by touching the build plate."
-    
+
     def cmd_SURVEY(self, gcmd: GCodeCommand):
         """Temperature-independent survey mode (like Cartographer)"""
         if not self._z_homed():
             raise self._printer.command_error("Z axis must be homed before survey")
-            
+
         if not self.calibrated():
             raise self._printer.command_error("Eddy probe not calibrated!")
-            
+
         # Survey-specific parameters
         probe_speed = gcmd.get_float("SPEED", self.params.tap_speed, above=0.0)
         lift_speed = gcmd.get_float("LIFT_SPEED", self.params.lift_speed, above=0.0)
         samples = gcmd.get_int("SAMPLES", 3, minval=1)
         tolerance = gcmd.get_float("TOLERANCE", 0.010, above=0.0)
         start_z = gcmd.get_float("START_Z", 5.0, above=2.0)
-        
+        home_z = gcmd.get_int("HOME_Z", 1) == 1
+
         th = self._printer.lookup_object("toolhead")
         results = []
-        
+
         # Move to start position
         self.probe_to_start_position(start_z)
-        
+
         for i in range(samples):
             # Do a probe move
             target_position = th.get_position()
-            target_position[2] = -0.5  # Probe downward
-            
+            target_position[2] = -1.0  # Probe downward
+
             try:
-                # Use standard endstop for now
+                # Use standard endstop
                 endstops = [(self._endstop_wrapper, "probe")]
                 hmove = HomingMove(self._printer, endstops)
                 probe_position = hmove.homing_move(target_position, probe_speed, probe_pos=True)
-                
+
                 if hmove.check_no_movement() is not None:
                     raise self._printer.command_error("Probe triggered prior to movement")
-                    
+
+                # The probe triggers at home_trigger_height, but we want actual Z=0
+                # So we need to subtract the trigger height
                 probe_z = probe_position[2]
-                results.append(probe_z)
-                
-                self._log_msg(f"Survey sample {i+1}: z={probe_z:.3f}")
-                
+                actual_z = probe_z - self.params.home_trigger_height
+                results.append(actual_z)
+
+                self._log_msg(f"Survey sample {i+1}: trigger at z={probe_z:.3f}, actual z={actual_z:.3f}")
+
                 # Lift back up
                 th.manual_move([None, None, start_z], lift_speed)
                 th.wait_moves()
-                
+
             except self._printer.command_error as err:
                 self._log_error(f"Survey failed: {err}")
                 raise
-                
+
         # Calculate median result
         if len(results) > 0:
             median_z = float(np.median(results))
             stddev = float(np.std(results)) if len(results) > 1 else 0.0
-            
+
             if stddev > tolerance:
                 self._log_warning(f"Survey stddev {stddev:.4f} exceeds tolerance {tolerance:.4f}")
-                
-            # Set Z position without temperature compensation
-            th_pos = th.get_position()
-            th_pos[2] = median_z
-            self._set_toolhead_position(th_pos, [2])
-            
-            self._log_msg(f"Survey complete: z={median_z:.3f} (stddev={stddev:.4f})")
-            
+
+            self._log_msg(f"Survey complete: median actual z={median_z:.3f} (stddev={stddev:.4f})")
+
+            if home_z:
+                # Set the Z position to the actual bed surface
+                th_pos = th.get_position()
+                # Current position minus the median gives us the true zero
+                th_pos[2] = th_pos[2] - median_z
+                self._set_toolhead_position(th_pos, [2])
+                self._log_msg(f"Homed Z to 0.0 (was at {median_z:.3f})")
+
             # No tap_offset adjustment for survey mode
             self._tap_offset = 0.0
+
+            # Update gcode position
+            gcode_move = self._printer.lookup_object("gcode_move")
+            gcode_move.base_position[2] = 0.0
+            gcode_move.homing_position[2] = 0.0
+
         else:
             raise self._printer.command_error("Survey failed: no valid samples")
 
@@ -3021,7 +3034,7 @@ class ProbeEddyFrequencyMap:
         self._ftoh: Optional[npp.Polynomial] = None
         self._ftoh_high: Optional[npp.Polynomial] = None
         self._htof: Optional[npp.Polynomial] = None
-        
+
         # Polynomial model for survey mode (temperature-independent)
         self._poly_model: Optional[npp.Polynomial] = None
         self._use_polynomial = False
@@ -3060,6 +3073,8 @@ class ProbeEddyFrequencyMap:
         dc = data.get("dc", None)
         h_range = data.get("h_range", (math.inf, -math.inf))
         f_range = data.get("f_range", (math.inf, -math.inf))
+        poly_model = data.get("poly_model", None)  # Load polynomial model
+        use_polynomial = data.get("use_polynomial", False)  # Load flag
 
         if dc != drive_current:
             raise configerror(f"ProbeEddyFrequencyMap: drive current mismatch: loaded {dc} != requested {drive_current}")
@@ -3070,8 +3085,14 @@ class ProbeEddyFrequencyMap:
         self.height_range = h_range
         self.freq_range = f_range
         self.drive_current = drive_current
+        self._poly_model = poly_model  # Load polynomial model
+        self._use_polynomial = use_polynomial  # Load flag
 
-        self._eddy._log_info(f"Loaded calibration for drive current {drive_current}")
+        if use_polynomial:
+            # Log with modified name for polynomial mode
+            self._eddy._log_info(f"Loaded polynomial calibration for drive current {drive_current}")
+        else:
+            self._eddy._log_info(f"Loaded standard calibration for drive current {drive_current}")
         return True
 
     def save_calibration(self):
@@ -3087,6 +3108,8 @@ class ProbeEddyFrequencyMap:
             "h_range": self.height_range,
             "f_range": self.freq_range,
             "dc": self.drive_current,
+            "poly_model": self._poly_model,  # Save polynomial model
+            "use_polynomial": self._use_polynomial,  # Save flag
         }
         calibstr = base64.b64encode(pickle.dumps(data)).decode()
         configfile.set(self._eddy._full_name, f"calibration_{self.drive_current}", calibstr)
@@ -3176,7 +3199,7 @@ class ProbeEddyFrequencyMap:
             # Try lower degree first for better stability
             best_deg = 9
             best_rmse = float('inf')
-            
+
             # Find optimal polynomial degree
             for deg in [5, 6, 7, 8, 9]:
                 try:
@@ -3187,17 +3210,18 @@ class ProbeEddyFrequencyMap:
                         best_deg = deg
                 except:
                     continue
-            
+
             poly_model = npp.Polynomial.fit(1.0 / freqs, heights, deg=best_deg)
             self._poly_model = poly_model
             self._use_polynomial = True
-            
+
             # Still compute the traditional models for compatibility
             # Use separate fits for low samples for RMSE calculation
             ftoh_low_fn = npp.Polynomial.fit(1.0 / freqs[low_samples], heights[low_samples], deg=9)
             htof_low_fn = npp.Polynomial.fit(heights[low_samples], 1.0 / freqs[low_samples], deg=9)
             ftoh_high_fn = None
-            
+
+            # Log with modified name for polynomial mode
             self._eddy._log_info(f"Using polynomial model (degree {best_deg}) for survey mode, RMSE: {best_rmse:.4f}")
         else:
             # Original interpolation-based method
@@ -3209,7 +3233,7 @@ class ProbeEddyFrequencyMap:
             else:
                 self._eddy._log_debug(f"not computing ftoh_high, not enough high samples")
                 ftoh_high_fn = None
-            
+
             self._use_polynomial = False
 
         # Calculate rms, only for the low values (where error is most relevant)
@@ -3362,11 +3386,11 @@ class ProbeEddyFrequencyMap:
         if self._ftoh is None:
             raise self._eddy._printer.command_error("Calling freq_to_height on uncalibrated map")
         invfreq = 1.0 / freq
-        
+
         if self._use_polynomial and self._poly_model is not None:
             # Use polynomial model for survey mode
             return float(self._poly_model(invfreq))
-        
+
         # Original interpolation method
         if self._ftoh_high is not None and invfreq < self._ftoh.domain[0]:
             return float(self._ftoh_high(invfreq))
