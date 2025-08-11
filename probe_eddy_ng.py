@@ -2496,9 +2496,9 @@ class ProbeEddy:
         th = self._printer.lookup_object("toolhead")
         baseline_samples = []
         
-        # Take 3 baseline samples for stability
-        for i in range(3):
-            self._log_info(f"        Sample {i+1}/3...")
+        # Take 1 baseline sample for speed (was 3)
+        for i in range(1):
+            self._log_info(f"        Sample {i+1}/1...")
             try:
                 with self.start_sampler(calculate_heights=False) as sampler:
                     self._log_info("        Sampler started, dwelling...")
@@ -2531,10 +2531,10 @@ class ProbeEddy:
     def _calculate_adaptive_thresholds(self, baseline_freq: float, threshold_auto: bool) -> dict:
         """Calculate adaptive thresholds based on baseline frequency and conditions"""
         thresholds = {
-            'coarse_pct': 1.0,    # 1.0% for initial detection (vs old 1.5%)
-            'fine_pct': 0.5,      # 0.5% for precise detection  
-            'peak_pct': 3.0,      # 3.0% for peak detection
-            'emergency_pct': 8.0,  # 8.0% emergency stop (vs old 6%)
+            'coarse_pct': 2.5,    # 2.5% for initial detection (was 1.0%, too sensitive)
+            'fine_pct': 1.5,      # 1.5% for precise detection (was 0.5%, too sensitive)
+            'peak_pct': 4.0,      # 4.0% for peak detection (was 3.0%)
+            'emergency_pct': 8.0,  # 8.0% emergency stop (unchanged)
         }
         
         if threshold_auto:
@@ -2552,7 +2552,7 @@ class ProbeEddy:
         for key in pct_keys:
             thresholds[key.replace('_pct', '_abs')] = baseline_freq * (thresholds[key] / 100.0)
             
-        self._log_debug(f"    Adaptive thresholds: coarse={thresholds['coarse_pct']:.1f}%, "
+        self._log_info(f"    Adaptive thresholds: coarse={thresholds['coarse_pct']:.1f}%, "
                        f"fine={thresholds['fine_pct']:.1f}%, peak={thresholds['peak_pct']:.1f}%")
         
         return thresholds
@@ -2569,7 +2569,7 @@ class ProbeEddy:
         
         # Detection state
         current_z = start_z
-        step_size = 0.01  # Start with finer steps (vs old 0.02mm)
+        step_size = 0.05  # Start with faster steps (was 0.01mm, too slow)
         coarse_detection_z = None
         fine_detection_z = None
         peak_detection_z = None
@@ -2580,7 +2580,7 @@ class ProbeEddy:
             'peak': False
         }
         
-        self._log_debug(f"    Starting precision scan from Z={start_z:.3f}mm")
+        self._log_info(f"    Starting precision scan from Z={start_z:.3f}mm")
         
         while current_z > -0.5:  # Safety limit
             # Move to current position  
@@ -2620,11 +2620,11 @@ class ProbeEddy:
             if not detection_methods['coarse'] and freq_delta > thresholds['coarse_abs']:
                 coarse_detection_z = current_z
                 detection_methods['coarse'] = True
-                self._log_debug(f"    Coarse detection at Z={current_z:.3f}mm ({freq_change_pct:.2f}%)")
+                self._log_info(f"    Coarse detection at Z={current_z:.3f}mm ({freq_change_pct:.2f}%)")
                 
                 # Switch to finer steps after coarse detection
-                if step_size > 0.005:
-                    step_size = 0.005  # Ultra-fine steps
+                if step_size > 0.02:
+                    step_size = 0.02  # Fine steps (was 0.005, too slow)
                     
             # Fine detection using derivative analysis (after coarse)
             if (detection_methods['coarse'] and not detection_methods['fine'] 
@@ -2639,14 +2639,15 @@ class ProbeEddy:
                     prev_median = float(np.median(prev_rates))
                     
                     # Detect significant slowdown (improved from threshold_scan)
-                    if (prev_median > 5000 and  # Significant previous growth
-                        recent_median < prev_median / 2.0 and  # Strong slowdown
+                    # Only trigger if both rates are positive (frequency increasing)
+                    if (prev_median > 1000 and recent_median > 0 and  # Both positive rates
+                        recent_median < prev_median / 2.0 and  # Strong slowdown (50%+)  
                         freq_delta > thresholds['fine_abs']):  # Minimum frequency increase
                         
                         fine_detection_z = current_z
                         detection_methods['fine'] = True
-                        slowdown_ratio = prev_median / recent_median if recent_median != 0 else float('inf')
-                        self._log_debug(f"    Fine detection at Z={current_z:.3f}mm (slowdown: {slowdown_ratio:.1f}x)")
+                        slowdown_ratio = prev_median / recent_median if recent_median > 0 else float('inf')
+                        self._log_info(f"    Fine detection at Z={current_z:.3f}mm (slowdown: {slowdown_ratio:.1f}x)")
             
             # Peak detection - frequency starts decreasing (over-compression)
             if (detection_methods['fine'] and not detection_methods['peak']
@@ -2657,7 +2658,7 @@ class ProbeEddy:
                 if all(rate < -1000 for rate in recent_rates):  # Strong negative trend
                     peak_detection_z = current_z + step_size  # Peak was one step back
                     detection_methods['peak'] = True
-                    self._log_debug(f"    Peak detection at Z={peak_detection_z:.3f}mm (over-compression)")
+                    self._log_info(f"    Peak detection at Z={peak_detection_z:.3f}mm (over-compression)")
                     break
             
             # Emergency stop
@@ -2672,9 +2673,17 @@ class ProbeEddy:
             coarse_detection_z, fine_detection_z, peak_detection_z, detection_methods
         )
         
+        # Sanity check - if detection is too high above bed, it's probably false
+        if touch_z and touch_z > 1.0:  # More than 1mm above bed
+            self._log_warning(f"    Detection at {touch_z:.3f}mm seems too high - possible false positive")
+            # Try using peak detection if available
+            if peak_detection_z and peak_detection_z < touch_z:
+                touch_z = peak_detection_z
+                self._log_info(f"    Using peak detection instead: {touch_z:.3f}mm")
+        
         if touch_z:
             final_freq_change = ((freqs[-1] - baseline_freq) / baseline_freq) * 100
-            self._log_debug(f"    Selected touch at Z={touch_z:.4f}mm "
+            self._log_info(f"    Selected touch at Z={touch_z:.4f}mm "
                            f"(final freq change: {final_freq_change:.1f}%)")
         
         return touch_z
