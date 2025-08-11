@@ -2387,40 +2387,39 @@ class ProbeEddy:
         self._log_info("Probe position reached")
         
         for attempt in range(samples + max_failures):
-            self._log_info(f"=== Attempt {attempt + 1}/{samples + max_failures} ===")
-            
             if len(touch_results) >= samples:
                 self._log_info(f"Sufficient samples collected: {len(touch_results)}/{samples}")
                 break
                 
-            self._log_info(f"Touch attempt {len(touch_results) + 1}/{samples} (attempt #{attempt + 1})")
+            self._log_info(f"=== Touch attempt {len(touch_results) + 1}/{samples} ===")
             
             # Add slight randomization to touch position (±0.5mm) for better statistics
             if len(touch_results) > 0:
-                self._log_info("Adding position randomization...")
                 th_pos = th.get_position()
                 random_x = th_pos[0] + (0.5 - 1.0 * (attempt % 2))  # Simple alternation
                 random_y = th_pos[1] + (0.5 - 1.0 * ((attempt // 2) % 2))
                 th.manual_move([random_x, random_y, None], speed)
                 th.wait_moves()
-                self._log_info(f"Position randomized to X={random_x:.2f}, Y={random_y:.2f}")
+                self._log_info(f"Position randomized: X={random_x:.2f}, Y={random_y:.2f}")
             
             try:
                 # Perform single high-precision touch
-                self._log_info("Calling _single_precision_touch...")
                 touch_z = self._single_precision_touch(start_z, speed, touch_speed, threshold_auto)
-                self._log_info(f"_single_precision_touch returned: {touch_z}")
                 
                 if touch_z is not None:
                     touch_results.append(touch_z)
                     self._log_info(f"  Touch {len(touch_results)}: Z={touch_z:.4f}mm")
                     
                     # Quick statistical check - reject obvious outliers early
-                    if len(touch_results) >= 2:
+                    if len(touch_results) >= 3:  # Need at least 3 samples for meaningful median
                         median_z = float(np.median(touch_results))
-                        if abs(touch_z - median_z) > tolerance * 3:  # 3-sigma rule
-                            self._log_warning(f"  Outlier detected: {touch_z:.4f}mm vs median {median_z:.4f}mm")
+                        # Use more lenient outlier threshold for touch detection (0.2mm instead of 3*tolerance)
+                        outlier_threshold = max(0.2, tolerance * 10)  # At least 0.2mm threshold
+                        if abs(touch_z - median_z) > outlier_threshold:
+                            self._log_warning(f"  Outlier detected: {touch_z:.4f}mm vs median {median_z:.4f}mm (threshold: {outlier_threshold:.3f}mm)")
                             touch_results.pop()  # Remove outlier
+                        else:
+                            self._log_debug(f"  Touch accepted: {touch_z:.4f}mm vs median {median_z:.4f}mm")
                 else:
                     failed_attempts += 1
                     self._log_warning(f"  Touch attempt failed - got None result")
@@ -2446,9 +2445,11 @@ class ProbeEddy:
                         self._log_debug(f"  Early termination: std_dev={std_dev:.4f} <= tolerance={tolerance:.4f}")
                         break
         
-        if len(touch_results) < 2:
+        if len(touch_results) < 1:
             self._log_error(f"Insufficient valid touches: {len(touch_results)}/{samples}")
             return []
+        elif len(touch_results) == 1:
+            self._log_warning(f"Only one valid touch: {len(touch_results)}/{samples} - using single measurement")
             
         self._log_info(f"Completed {len(touch_results)} valid touches (failed: {failed_attempts})")
         return touch_results
@@ -2456,68 +2457,47 @@ class ProbeEddy:
     def _single_precision_touch(self, start_z: float, approach_speed: float, 
                                touch_speed: float, threshold_auto: bool) -> Optional[float]:
         """Perform single high-precision touch with multi-level detection"""
-        self._log_info(f"    _single_precision_touch: start_z={start_z}, approach_speed={approach_speed}")
-        self._log_info(f"      touch_speed={touch_speed}, threshold_auto={threshold_auto}")
-        
         th = self._printer.lookup_object("toolhead")
         
-        # Move to start position
-        self._log_info(f"    Moving to start Z={start_z}")
+        # Move to start position and get baseline
         th.manual_move([None, None, start_z], approach_speed)
         th.wait_moves()
-        self._log_info("    Start position reached")
         
-        # Get baseline frequency with better sampling
-        self._log_info("    Getting baseline frequency...")
         baseline_freq = self._get_stable_baseline_frequency()
         if baseline_freq is None:
-            self._log_error("    Failed to get baseline frequency")
+            self._log_error("Failed to get baseline frequency")
             return None
             
-        self._log_info(f"    Baseline frequency: {baseline_freq:.1f} Hz")
-        
-        # Calculate adaptive thresholds based on baseline
-        self._log_info("    Calculating adaptive thresholds...")
         thresholds = self._calculate_adaptive_thresholds(baseline_freq, threshold_auto)
-        self._log_info(f"    Thresholds calculated: {len(thresholds)} values")
         
-        # High-precision touch detection with multiple methods
-        self._log_info("    Starting multi-method touch detection...")
+        # High-precision touch detection
         touch_z = self._multi_method_touch_detection(
             start_z, touch_speed, baseline_freq, thresholds
         )
-        self._log_info(f"    Touch detection result: {touch_z}")
         
         return touch_z
     
     def _get_stable_baseline_frequency(self) -> Optional[float]:
         """Get stable baseline frequency with multiple samples"""
-        self._log_info("      _get_stable_baseline_frequency: starting...")
         th = self._printer.lookup_object("toolhead")
         baseline_samples = []
         
-        # Take 1 baseline sample for speed (was 3)
-        for i in range(1):
-            self._log_info(f"        Sample {i+1}/1...")
-            try:
-                with self.start_sampler(calculate_heights=False) as sampler:
-                    self._log_info("        Sampler started, dwelling...")
-                    th.dwell(0.1)  # Longer dwell for stability
-                    th.wait_moves()
-                    self._log_info("        Dwell complete, finishing sampler...")
-                    sampler.finish()
-                    self._log_info("        Sampler finished")
-                
-                if sampler.raw_count > 0:
-                    freq = sampler.freqs[-1]
-                    baseline_samples.append(freq)
-                    self._log_info(f"        Sample {i+1}: {freq:.1f} Hz (count: {sampler.raw_count})")
-                else:
-                    self._log_error(f"        Failed to get baseline sample {i+1} - no data")
-                    return None
-            except Exception as e:
-                self._log_error(f"        Exception in baseline sample {i+1}: {e}")
+        # Take 1 baseline sample for speed
+        try:
+            with self.start_sampler(calculate_heights=False) as sampler:
+                th.dwell(0.1)  # Longer dwell for stability
+                th.wait_moves()
+                sampler.finish()
+            
+            if sampler.raw_count > 0:
+                freq = sampler.freqs[-1]
+                baseline_samples.append(freq)
+            else:
+                self._log_error("Failed to get baseline sample - no data")
                 return None
+        except Exception as e:
+            self._log_error(f"Exception in baseline sample: {e}")
+            return None
         
         # Check stability of baseline
         baseline_freq = float(np.median(baseline_samples))
@@ -2617,10 +2597,13 @@ class ProbeEddy:
                     freq_accel = (freq_derivatives[-1] - freq_derivatives[-2]) / step_size
                     freq_second_derivatives.append(freq_accel)
             
-            # Log every step with detailed info
-            self._log_info(f"    Z={current_z:.3f}: freq={current_freq:.0f}Hz "
-                          f"delta={freq_delta:.0f} ({freq_change_pct:.2f}%) "
-                          f"rate={freq_rate:.0f}Hz/mm step={step_size:.3f}")
+            # Log only in critical zone or when significant changes occur
+            if (current_z < 1.0 or  # Below 1mm (critical zone)
+                freq_change_pct > 1.0 or  # Significant frequency change
+                len(heights) % 20 == 0):  # Every 20th step for progress tracking
+                self._log_info(f"    Z={current_z:.3f}: freq={current_freq:.0f}Hz "
+                              f"delta={freq_delta:.0f} ({freq_change_pct:.2f}%) "
+                              f"rate={freq_rate:.0f}Hz/mm")
             
             # Multi-method detection
             if not detection_methods['coarse'] and freq_delta > thresholds['coarse_abs']:
@@ -2656,10 +2639,9 @@ class ProbeEddy:
                         self._log_info(f"    Rate slowdown detection at Z={current_z:.3f}mm "
                                       f"({freq_change_pct:.2f}%, slowdown: {slowdown_pct:.0f}%)")
                     
-                    # Log debug info for troubleshooting (only if close to expected contact zone)
-                    if current_z < 0.8 and len(freq_derivatives) % 10 == 0:  # Every 10th step below 0.8mm
-                        self._log_info(f"      Debug: prev_rate={prev_rate:.0f}, current_rate={current_rate:.0f}, "
-                                      f"slowdown_ok={slowdown_check}, freq_ok={freq_check}")
+                    # Debug info only when needed (every 20th step in critical zone)
+                    if current_z < 0.8 and len(freq_derivatives) % 20 == 0:
+                        self._log_info(f"      Rate debug: prev={prev_rate:.0f}, curr={current_rate:.0f}")
                         
                     # Switch to finer steps (moved outside debug block)
                     if slowdown_check and step_size > 0.02:
@@ -2736,9 +2718,7 @@ class ProbeEddy:
                 break
                 
             # Move to next Z position
-            next_z = current_z - step_size
-            self._log_info(f"    Moving to next Z: {current_z:.3f} → {next_z:.3f} (step={step_size:.3f})")
-            current_z = next_z
+            current_z -= step_size
         
         # End of scanning loop
         self._log_info(f"    Scan completed at Z={current_z:.3f}mm")
