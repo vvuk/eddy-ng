@@ -541,6 +541,9 @@ class ProbeEddy:
             self._survey_threshold = self._saved_survey_threshold
             self._survey_threshold_confidence = self._saved_survey_threshold_confidence
             self._log_info(f"Loaded saved survey threshold: {self._survey_threshold:.3f}mm (confidence: {self._survey_threshold_confidence:.2f})")
+        
+        # High-precision touch detection state
+        self._last_touch_accuracy = 0.0
 
         # define our own commands
         self._dummy_gcode_cmd: GCodeCommand = self._gcode.create_gcode_command("", "", {})
@@ -635,6 +638,11 @@ class ProbeEddy:
             "PROBE_EDDY_NG_THRESHOLD_CLEAR",
             self.cmd_THRESHOLD_CLEAR,
             "Clear saved threshold from config (requires SAVE_CONFIG)"
+        )
+        gcode.register_command(
+            "PROBE_EDDY_NG_TOUCH",
+            self.cmd_TOUCH,
+            "High-precision physical touch detection for accurate Z=0"
         )
         gcode.register_command(
             "PROBE_EDDY_NG_SET_TAP_OFFSET",
@@ -1804,51 +1812,97 @@ class ProbeEddy:
         start_z = gcmd.get_float("START_Z", 5.0, above=2.0)
         home_z = gcmd.get_int("HOME_Z", 1) == 1
         z_offset = gcmd.get_float("Z_OFFSET", 0.0)  # Manual offset adjustment for survey
+        
+        # High-precision TOUCH mode integration
+        use_touch = gcmd.get_int("TOUCH", 0) == 1
+        touch_speed = gcmd.get_float("TOUCH_SPEED", 0.5, above=0.1)
+        touch_samples = gcmd.get_int("TOUCH_SAMPLES", 5, minval=3, maxval=10)
+        auto_touch = gcmd.get_int("AUTO_TOUCH", 0) == 1  # Smart switching based on conditions
 
         th = self._printer.lookup_object("toolhead")
         results = []
 
         # Move to start position
         self.probe_to_start_position(start_z)
+        
+        # Smart mode selection based on conditions
+        if auto_touch and not use_touch:
+            use_touch = self._should_use_touch_mode()
+            if use_touch:
+                self._log_info("AUTO_TOUCH: conditions favor high-precision TOUCH mode")
+            else:
+                self._log_info("AUTO_TOUCH: conditions favor standard Survey mode")
 
-        for i in range(samples):
-            # Do a probe move
-            target_position = th.get_position()
-            target_position[2] = -1.0  # Probe downward
+        if use_touch:
+            # Use high-precision TOUCH mode for ultimate accuracy
+            self._log_info(f"Survey TOUCH mode: {touch_samples} samples at {touch_speed} mm/s")
+            
+            # Get stable baseline frequency
+            baseline_freq = self._get_stable_baseline_frequency()
+            if baseline_freq is None:
+                raise self._printer.command_error("Failed to obtain stable baseline frequency")
+            
+            # Log baseline frequency for debug
+            self._log_debug(f"Using baseline frequency: {baseline_freq:.1f} Hz")
+            
+            # Perform multiple precision touches
+            touch_results = self._perform_precision_touches(
+                samples=touch_samples,
+                tolerance=tolerance,
+                speed=touch_speed,
+                touch_speed=touch_speed,
+                retract=start_z - 0.5,
+                start_z=start_z,
+                threshold_auto=True
+            )
+            
+            if not touch_results or len(touch_results) == 0:
+                raise self._printer.command_error("TOUCH mode failed: no valid touches detected")
+            
+            # Use touch results directly - they're already at Z=0 bed surface
+            results = touch_results
+            self._log_info(f"TOUCH mode complete: {len(results)} valid touches")
+            
+        else:
+            # Standard survey mode with endstop triggering
+            for i in range(samples):
+                # Do a probe move
+                target_position = th.get_position()
+                target_position[2] = -1.0  # Probe downward
 
-            try:
-                # Use standard endstop
-                endstops = [(self._endstop_wrapper, "probe")]
-                hmove = HomingMove(self._printer, endstops)
-                probe_position = hmove.homing_move(target_position, probe_speed, probe_pos=True)
+                try:
+                    # Use standard endstop
+                    endstops = [(self._endstop_wrapper, "probe")]
+                    hmove = HomingMove(self._printer, endstops)
+                    probe_position = hmove.homing_move(target_position, probe_speed, probe_pos=True)
 
-                if hmove.check_no_movement() is not None:
-                    raise self._printer.command_error("Probe triggered prior to movement")
+                    if hmove.check_no_movement() is not None:
+                        raise self._printer.command_error("Probe triggered prior to movement")
 
-                # The probe triggers at home_trigger_height, but we want actual Z=0
-                # Use dynamic threshold if available, otherwise fall back to home_trigger_height
-                probe_z = probe_position[2]
+                    # The probe triggers at home_trigger_height, but we want actual Z=0
+                    # Use dynamic threshold if available, otherwise fall back to home_trigger_height
+                    probe_z = probe_position[2]
 
-                if self._survey_threshold is not None and self._survey_threshold_confidence > 0.5:
-                    # Use dynamically found threshold
-                    actual_z = probe_z + self._survey_threshold
-                    self._log_debug(f"Using dynamic threshold: {self._survey_threshold:.3f}")
-                else:
-                    # Fall back to static trigger height
-                    actual_z = probe_z - self.params.home_trigger_height
-                    self._log_debug(f"Using static trigger height: {self.params.home_trigger_height:.3f}")
+                    if self._survey_threshold is not None and self._survey_threshold_confidence > 0.5:
+                        # Use dynamically found threshold
+                        actual_z = probe_z + self._survey_threshold
+                        self._log_debug(f"Using dynamic threshold: {self._survey_threshold:.3f}")
+                    else:
+                        # Fall back to static trigger height
+                        actual_z = probe_z - self.params.home_trigger_height
+                        self._log_debug(f"Using static trigger height: {self.params.home_trigger_height:.3f}")
 
-                results.append(actual_z)
+                    results.append(actual_z)
 
-                self._log_msg(f"Survey sample {i+1}: trigger at z={probe_z:.3f}, actual z={actual_z:.3f}")
+                    self._log_msg(f"Survey sample {i+1}: trigger at z={probe_z:.3f}, actual z={actual_z:.3f}")
 
-                # Lift back up
-                th.manual_move([None, None, start_z], lift_speed)
-                th.wait_moves()
+                    # Lift back up
+                    th.manual_move([None, None, start_z], lift_speed)
+                    th.wait_moves()
 
-            except self._printer.command_error as err:
-                self._log_error(f"Survey failed: {err}")
-                raise
+                except self._printer.command_error as err:
+                    self._log_error(f"Survey failed: {err}")
+                    raise
 
         # Calculate median result
         if len(results) > 0:
@@ -2233,6 +2287,608 @@ class ProbeEddy:
         # The save_config method will handle not writing None values
         self._log_msg("Survey threshold cleared")
         self._log_msg("Note: Threshold values will be removed on next SAVE_CONFIG")
+
+    def cmd_TOUCH(self, gcmd: GCodeCommand):
+        """High-precision physical touch detection for accurate Z=0"""
+        # Pre-flight checks
+        if not self._xy_homed():
+            raise self._printer.command_error("X and Y must be homed before touch detection")
+        
+        if not self.calibrated():
+            raise self._printer.command_error("Probe not calibrated! Run PROBE_EDDY_NG_CALIBRATE first")
+
+        # Check polynomial calibration for advanced algorithms
+        current_map = self.map_for_drive_current()
+        if not hasattr(current_map, '_use_polynomial') or not current_map._use_polynomial:
+            raise self._printer.command_error("Touch detection requires polynomial calibration. Run PROBE_EDDY_NG_CALIBRATE_POLY first")
+
+        # Parse parameters with Cartographer-inspired defaults
+        samples = gcmd.get_int("SAMPLES", 3, minval=1, maxval=10)
+        tolerance = gcmd.get_float("TOLERANCE", 0.015, above=0.005, maxval=0.1)
+        speed = gcmd.get_float("SPEED", 1.0, above=0.1, maxval=5.0)
+        touch_speed = gcmd.get_float("TOUCH_SPEED", 0.3, above=0.1, maxval=2.0)
+        retract = gcmd.get_float("RETRACT", 2.0, above=0.5, maxval=10.0)
+        start_z = gcmd.get_float("START_Z", 3.0, above=1.0, maxval=20.0)
+        threshold_auto = gcmd.get_int("THRESHOLD_AUTO", 1, minval=0, maxval=1)
+        
+        # Display touch parameters
+        self._log_info("=" * 50)
+        self._log_info("STARTING HIGH-PRECISION TOUCH")
+        self._log_info("=" * 50)
+        self._log_debug(f"Samples: {samples}")
+        self._log_debug(f"Tolerance: {tolerance:.3f}mm")
+        self._log_debug(f"Approach speed: {speed:.1f}mm/s")
+        self._log_debug(f"Touch speed: {touch_speed:.1f}mm/s")
+        self._log_debug(f"Retract distance: {retract:.1f}mm")
+        self._log_debug(f"Start height: {start_z:.1f}mm")
+        
+        try:
+            # Perform high-precision touch detection
+            touch_results = self._perform_precision_touches(
+                samples, tolerance, speed, touch_speed, retract, start_z, threshold_auto
+            )
+            
+            if not touch_results:
+                raise self._printer.command_error("Touch detection failed - no valid measurements")
+            
+            # Calculate final Z=0 position
+            final_z = self._process_touch_results(touch_results, tolerance)
+            
+            # Set Z=0 at the detected position
+            th = self._printer.lookup_object("toolhead")
+            th_pos = th.get_position()
+            th_pos[2] = 0.0
+            self._set_toolhead_position(th_pos, [2])
+            th.wait_moves()
+            
+            self._log_info("=" * 50)
+            self._log_info("HIGH-PRECISION TOUCH COMPLETE")
+            self._log_info(f"Z=0 set at detected position")
+            self._log_info(f"Touch accuracy: ±{self._last_touch_accuracy:.3f}mm")
+            self._log_info("=" * 50)
+            
+        except Exception as e:
+            self._log_error(f"Touch detection failed: {e}")
+            raise
+
+    def _perform_precision_touches(self, samples: int, tolerance: float, speed: float,
+                                  touch_speed: float, retract: float, start_z: float,
+                                  threshold_auto: bool) -> List[float]:
+        """Perform multiple high-precision touches with statistical validation"""
+        th = self._printer.lookup_object("toolhead")
+        touch_results = []
+        failed_attempts = 0
+        max_failures = 2  # Allow 2 failures before giving up
+        
+        # Move to probe position (same as existing Survey)
+        self.probe_to_start_position(start_z + retract)
+        
+        for attempt in range(samples + max_failures):
+            if len(touch_results) >= samples:
+                break
+                
+            self._log_info(f"Touch attempt {len(touch_results) + 1}/{samples}")
+            
+            # Add slight randomization to touch position (±0.5mm) for better statistics
+            if len(touch_results) > 0:
+                th_pos = th.get_position()
+                random_x = th_pos[0] + (0.5 - 1.0 * (attempt % 2))  # Simple alternation
+                random_y = th_pos[1] + (0.5 - 1.0 * ((attempt // 2) % 2))
+                th.manual_move([random_x, random_y, None], speed)
+                th.wait_moves()
+            
+            try:
+                # Perform single high-precision touch
+                touch_z = self._single_precision_touch(start_z, speed, touch_speed, threshold_auto)
+                
+                if touch_z is not None:
+                    touch_results.append(touch_z)
+                    self._log_debug(f"  Touch {len(touch_results)}: Z={touch_z:.4f}mm")
+                    
+                    # Quick statistical check - reject obvious outliers early
+                    if len(touch_results) >= 2:
+                        median_z = float(np.median(touch_results))
+                        if abs(touch_z - median_z) > tolerance * 3:  # 3-sigma rule
+                            self._log_warning(f"  Outlier detected: {touch_z:.4f}mm vs median {median_z:.4f}mm")
+                            touch_results.pop()  # Remove outlier
+                else:
+                    failed_attempts += 1
+                    self._log_warning(f"  Touch attempt failed")
+                    
+            except Exception as e:
+                failed_attempts += 1
+                self._log_error(f"  Touch attempt failed: {e}")
+            
+            # Retract between touches
+            th.manual_move([None, None, start_z + retract], speed * 2)
+            th.wait_moves()
+            
+            # Early termination if we have enough good samples
+            if len(touch_results) >= samples:
+                # Quick convergence check
+                if len(touch_results) >= 2:
+                    std_dev = float(np.std(touch_results))
+                    if std_dev <= tolerance:
+                        self._log_debug(f"  Early termination: std_dev={std_dev:.4f} <= tolerance={tolerance:.4f}")
+                        break
+        
+        if len(touch_results) < 2:
+            self._log_error(f"Insufficient valid touches: {len(touch_results)}/{samples}")
+            return []
+            
+        self._log_info(f"Completed {len(touch_results)} valid touches (failed: {failed_attempts})")
+        return touch_results
+    
+    def _single_precision_touch(self, start_z: float, approach_speed: float, 
+                               touch_speed: float, threshold_auto: bool) -> Optional[float]:
+        """Perform single high-precision touch with multi-level detection"""
+        th = self._printer.lookup_object("toolhead")
+        
+        # Move to start position
+        th.manual_move([None, None, start_z], approach_speed)
+        th.wait_moves()
+        
+        # Get baseline frequency with better sampling
+        baseline_freq = self._get_stable_baseline_frequency()
+        if baseline_freq is None:
+            return None
+            
+        self._log_debug(f"    Baseline frequency: {baseline_freq:.1f} Hz")
+        
+        # Calculate adaptive thresholds based on baseline
+        thresholds = self._calculate_adaptive_thresholds(baseline_freq, threshold_auto)
+        
+        # High-precision touch detection with multiple methods
+        touch_z = self._multi_method_touch_detection(
+            start_z, touch_speed, baseline_freq, thresholds
+        )
+        
+        return touch_z
+    
+    def _get_stable_baseline_frequency(self) -> Optional[float]:
+        """Get stable baseline frequency with multiple samples"""
+        th = self._printer.lookup_object("toolhead")
+        baseline_samples = []
+        
+        # Take 3 baseline samples for stability
+        for i in range(3):
+            with self.start_sampler(calculate_heights=False) as sampler:
+                th.dwell(0.1)  # Longer dwell for stability
+                th.wait_moves()
+                sampler.finish()
+            
+            if sampler.raw_count > 0:
+                baseline_samples.append(sampler.freqs[-1])
+            else:
+                self._log_error("Failed to get baseline sample")
+                return None
+        
+        # Check stability of baseline
+        baseline_freq = float(np.median(baseline_samples))
+        baseline_std = float(np.std(baseline_samples))
+        
+        if baseline_std > baseline_freq * 0.002:  # 0.2% variation tolerance
+            self._log_warning(f"Unstable baseline: std={baseline_std:.1f} ({baseline_std/baseline_freq*100:.2f}%)")
+        
+        return baseline_freq
+    
+    def _calculate_adaptive_thresholds(self, baseline_freq: float, threshold_auto: bool) -> dict:
+        """Calculate adaptive thresholds based on baseline frequency and conditions"""
+        thresholds = {
+            'coarse_pct': 1.0,    # 1.0% for initial detection (vs old 1.5%)
+            'fine_pct': 0.5,      # 0.5% for precise detection  
+            'peak_pct': 3.0,      # 3.0% for peak detection
+            'emergency_pct': 8.0,  # 8.0% emergency stop (vs old 6%)
+        }
+        
+        if threshold_auto:
+            # Adapt thresholds based on baseline frequency
+            # Higher frequencies are more sensitive to changes
+            if baseline_freq > 8000:
+                thresholds['coarse_pct'] *= 0.8    # More sensitive
+                thresholds['fine_pct'] *= 0.8
+            elif baseline_freq < 6000:
+                thresholds['coarse_pct'] *= 1.2    # Less sensitive  
+                thresholds['fine_pct'] *= 1.2
+        
+        # Convert to absolute values
+        for key in thresholds:
+            thresholds[key.replace('_pct', '_abs')] = baseline_freq * (thresholds[key] / 100.0)
+            
+        self._log_debug(f"    Adaptive thresholds: coarse={thresholds['coarse_pct']:.1f}%, "
+                       f"fine={thresholds['fine_pct']:.1f}%, peak={thresholds['peak_pct']:.1f}%")
+        
+        return thresholds
+    
+    def _multi_method_touch_detection(self, start_z: float, touch_speed: float, 
+                                    baseline_freq: float, thresholds: dict) -> Optional[float]:
+        """Multi-method touch detection with cross-validation"""
+        th = self._printer.lookup_object("toolhead")
+        
+        # Data collection arrays
+        heights, freqs, times = [], [], []
+        freq_derivatives = []  # First derivative (rate of change)
+        freq_second_derivatives = []  # Second derivative (acceleration)
+        
+        # Detection state
+        current_z = start_z
+        step_size = 0.01  # Start with finer steps (vs old 0.02mm)
+        coarse_detection_z = None
+        fine_detection_z = None
+        peak_detection_z = None
+        
+        detection_methods = {
+            'coarse': False,
+            'fine': False, 
+            'peak': False
+        }
+        
+        self._log_debug(f"    Starting precision scan from Z={start_z:.3f}mm")
+        
+        while current_z > -0.5:  # Safety limit
+            # Move to current position  
+            th.manual_move([None, None, current_z], touch_speed)
+            th.wait_moves()
+            
+            # Take frequency measurement
+            with self.start_sampler(calculate_heights=False) as sampler:
+                th.dwell(0.03)  # Quick sampling for precision
+                th.wait_moves()
+                sampler.finish()
+                
+            if sampler.raw_count == 0:
+                self._log_warning(f"    No sample at Z={current_z:.3f}")
+                current_z -= step_size
+                continue
+                
+            current_freq = sampler.freqs[-1]
+            freq_delta = current_freq - baseline_freq
+            freq_change_pct = (freq_delta / baseline_freq) * 100
+            
+            # Store data
+            heights.append(current_z)
+            freqs.append(current_freq)
+            times.append(sampler.times[-1])
+            
+            # Calculate derivatives for advanced detection
+            if len(freqs) >= 2:
+                freq_rate = (freqs[-1] - freqs[-2]) / step_size
+                freq_derivatives.append(freq_rate)
+                
+                if len(freq_derivatives) >= 2:
+                    freq_accel = (freq_derivatives[-1] - freq_derivatives[-2]) / step_size
+                    freq_second_derivatives.append(freq_accel)
+            
+            # Multi-method detection
+            if not detection_methods['coarse'] and freq_delta > thresholds['coarse_abs']:
+                coarse_detection_z = current_z
+                detection_methods['coarse'] = True
+                self._log_debug(f"    Coarse detection at Z={current_z:.3f}mm ({freq_change_pct:.2f}%)")
+                
+                # Switch to finer steps after coarse detection
+                if step_size > 0.005:
+                    step_size = 0.005  # Ultra-fine steps
+                    
+            # Fine detection using derivative analysis (after coarse)
+            if (detection_methods['coarse'] and not detection_methods['fine'] 
+                and len(freq_derivatives) >= 5):
+                
+                # Look for slowdown in frequency growth rate
+                recent_rates = freq_derivatives[-3:]
+                prev_rates = freq_derivatives[-6:-3] if len(freq_derivatives) >= 6 else freq_derivatives[:-3]
+                
+                if len(prev_rates) >= 2 and len(recent_rates) >= 2:
+                    recent_median = float(np.median(recent_rates))
+                    prev_median = float(np.median(prev_rates))
+                    
+                    # Detect significant slowdown (improved from threshold_scan)
+                    if (prev_median > 5000 and  # Significant previous growth
+                        recent_median < prev_median / 2.0 and  # Strong slowdown
+                        freq_delta > thresholds['fine_abs']):  # Minimum frequency increase
+                        
+                        fine_detection_z = current_z
+                        detection_methods['fine'] = True
+                        slowdown_ratio = prev_median / recent_median if recent_median != 0 else float('inf')
+                        self._log_debug(f"    Fine detection at Z={current_z:.3f}mm (slowdown: {slowdown_ratio:.1f}x)")
+            
+            # Peak detection - frequency starts decreasing (over-compression)
+            if (detection_methods['fine'] and not detection_methods['peak']
+                and len(freq_derivatives) >= 3):
+                
+                # Look for negative derivative (frequency decreasing)
+                recent_rates = freq_derivatives[-2:]
+                if all(rate < -1000 for rate in recent_rates):  # Strong negative trend
+                    peak_detection_z = current_z + step_size  # Peak was one step back
+                    detection_methods['peak'] = True
+                    self._log_debug(f"    Peak detection at Z={peak_detection_z:.3f}mm (over-compression)")
+                    break
+            
+            # Emergency stop
+            if freq_delta > thresholds['emergency_abs']:
+                self._log_warning(f"    Emergency stop at Z={current_z:.3f}mm ({freq_change_pct:.1f}%)")
+                break
+                
+            current_z -= step_size
+        
+        # Select best detection method
+        touch_z = self._select_best_detection_result(
+            coarse_detection_z, fine_detection_z, peak_detection_z, detection_methods
+        )
+        
+        if touch_z:
+            final_freq_change = ((freqs[-1] - baseline_freq) / baseline_freq) * 100
+            self._log_debug(f"    Selected touch at Z={touch_z:.4f}mm "
+                           f"(final freq change: {final_freq_change:.1f}%)")
+        
+        return touch_z
+    
+    def _select_best_detection_result(self, coarse_z: Optional[float], fine_z: Optional[float], 
+                                    peak_z: Optional[float], methods: dict) -> Optional[float]:
+        """Select the best touch detection result from multiple methods"""
+        # Priority: Fine > Peak > Coarse
+        if methods['fine'] and fine_z is not None:
+            return fine_z
+        elif methods['peak'] and peak_z is not None:
+            return peak_z  
+        elif methods['coarse'] and coarse_z is not None:
+            return coarse_z
+        else:
+            return None
+    
+    def _process_touch_results(self, results: List[float], tolerance: float) -> float:
+        """Process touch results with advanced statistical methods"""
+        if len(results) < 2:
+            raise ValueError("Insufficient touch results for statistical processing")
+        
+        # Convert to numpy array for easier processing
+        touch_array = np.array(results)
+        
+        self._log_debug(f"    Processing {len(results)} touch results:")
+        self._log_debug(f"    Raw results: {[f'{z:.4f}' for z in results]}")
+        
+        # Step 1: Outlier detection using Modified Z-Score (more robust than standard Z-score)
+        filtered_results = self._remove_statistical_outliers(touch_array, threshold=3.5)
+        
+        if len(filtered_results) < 2:
+            self._log_warning("Too many outliers detected, using all results")
+            filtered_results = touch_array
+        
+        # Step 2: Calculate robust statistics
+        median_z = float(np.median(filtered_results))
+        mad = float(np.median(np.abs(filtered_results - median_z)))  # Median Absolute Deviation
+        std_dev = float(np.std(filtered_results))
+        
+        # MAD-based standard deviation estimate (more robust)
+        mad_std = 1.4826 * mad  # Scale factor for normal distribution
+        
+        # Use the more conservative estimate
+        robust_std = max(std_dev, mad_std)
+        
+        self._log_debug(f"    Filtered results: {[f'{z:.4f}' for z in filtered_results]}")
+        self._log_debug(f"    Median: {median_z:.4f}mm")
+        self._log_debug(f"    Std dev: {std_dev:.4f}mm, MAD-based: {mad_std:.4f}mm")
+        self._log_debug(f"    Robust std: {robust_std:.4f}mm")
+        
+        # Step 3: Quality assessment
+        quality_metrics = self._assess_touch_quality(filtered_results, tolerance)
+        
+        # Step 4: Select final Z position
+        # Use median for robustness against outliers
+        final_z = median_z
+        
+        # Store accuracy metrics
+        self._last_touch_accuracy = robust_std
+        
+        # Step 5: Validate against tolerance
+        if robust_std > tolerance:
+            self._log_warning(f"Touch accuracy ({robust_std:.4f}mm) exceeds tolerance ({tolerance:.4f}mm)")
+            self._log_warning("Consider:")
+            self._log_warning("  - Checking bed/nozzle cleanliness")
+            self._log_warning("  - Reducing TOUCH_SPEED")
+            self._log_warning("  - Increasing SAMPLES")
+            
+            # Don't fail - just warn and continue with best result
+            
+        # Step 6: Log final results
+        confidence_level = self._calculate_confidence_level(robust_std, tolerance)
+        
+        self._log_info(f"Touch analysis complete:")
+        self._log_info(f"  Final Z position: {final_z:.4f}mm")
+        self._log_info(f"  Accuracy (±1σ): {robust_std:.4f}mm")
+        self._log_info(f"  Confidence: {quality_metrics['confidence_rating']}")
+        self._log_info(f"  Quality score: {quality_metrics['quality_score']:.1f}/10.0")
+        
+        return final_z
+    
+    def _remove_statistical_outliers(self, data: np.ndarray, threshold: float = 3.5) -> np.ndarray:
+        """Remove outliers using Modified Z-Score method"""
+        if len(data) < 3:
+            return data  # Can't detect outliers with less than 3 points
+            
+        median = np.median(data)
+        mad = np.median(np.abs(data - median))
+        
+        if mad == 0:
+            # All values are identical - no outliers
+            return data
+            
+        modified_z_scores = 0.6745 * (data - median) / mad
+        outlier_mask = np.abs(modified_z_scores) < threshold
+        
+        filtered_data = data[outlier_mask]
+        
+        if len(filtered_data) < len(data):
+            outliers = data[~outlier_mask]
+            self._log_debug(f"    Removed {len(outliers)} outliers: {[f'{z:.4f}' for z in outliers]}")
+            
+        return filtered_data
+    
+    def _assess_touch_quality(self, results: np.ndarray, tolerance: float) -> dict:
+        """Assess quality of touch measurements"""
+        std_dev = float(np.std(results))
+        range_span = float(np.max(results) - np.min(results))
+        
+        # Quality metrics
+        metrics = {
+            'sample_count': len(results),
+            'std_dev': std_dev,
+            'range_span': range_span,
+            'precision_ratio': std_dev / tolerance if tolerance > 0 else float('inf'),
+        }
+        
+        # Quality score (0-10 scale)
+        quality_score = 10.0
+        
+        # Penalize high standard deviation
+        if std_dev > tolerance:
+            quality_score -= 5.0 * (std_dev / tolerance - 1.0)
+            
+        # Penalize wide range
+        if range_span > tolerance * 2:
+            quality_score -= 3.0 * (range_span / (tolerance * 2) - 1.0)
+            
+        # Penalize low sample count
+        if len(results) < 3:
+            quality_score -= 2.0
+            
+        quality_score = max(0.0, min(10.0, quality_score))
+        metrics['quality_score'] = quality_score
+        
+        # Confidence rating
+        if quality_score >= 8.0:
+            confidence_rating = "EXCELLENT"
+        elif quality_score >= 6.0:
+            confidence_rating = "GOOD"
+        elif quality_score >= 4.0:
+            confidence_rating = "FAIR"
+        elif quality_score >= 2.0:
+            confidence_rating = "POOR"
+        else:
+            confidence_rating = "VERY POOR"
+            
+        metrics['confidence_rating'] = confidence_rating
+        
+        return metrics
+    
+    def _calculate_confidence_level(self, std_dev: float, tolerance: float) -> float:
+        """Calculate confidence level (0-1) based on measurement precision"""
+        if tolerance <= 0:
+            return 0.0
+            
+        # Confidence decreases as std_dev approaches tolerance
+        confidence = max(0.0, 1.0 - (std_dev / tolerance))
+        
+        return confidence
+
+    def _should_use_touch_mode(self) -> bool:
+        """
+        Smart decision logic for AUTO_TOUCH mode
+        
+        Returns True if conditions favor high-precision TOUCH mode:
+        - First layer printing (high accuracy required)  
+        - Saved threshold available and reliable
+        - Temperature conditions are stable
+        
+        Returns False for standard Survey mode:
+        - Quick probing needed
+        - No saved threshold (needs threshold scan first)
+        - Unstable conditions
+        """
+        # Check if we have a reliable saved threshold
+        has_reliable_threshold = (
+            self._survey_threshold is not None and 
+            self._survey_threshold_confidence > 0.7
+        )
+        
+        # If no reliable threshold, prefer standard Survey (needs THRESHOLD_SCAN first)
+        if not has_reliable_threshold:
+            self._log_debug("AUTO_TOUCH: No reliable threshold, using standard Survey")
+            return False
+        
+        # Check temperature stability (if temperature sensor available)
+        try:
+            temp_stable = self._is_temperature_stable()
+            if not temp_stable:
+                self._log_debug("AUTO_TOUCH: Temperature unstable, using standard Survey") 
+                return False
+        except:
+            # If no temperature sensor, assume stable
+            pass
+        
+        # Default to TOUCH mode if conditions are good
+        self._log_debug("AUTO_TOUCH: Conditions good for high-precision TOUCH mode")
+        return True
+    
+    def _is_temperature_stable(self) -> bool:
+        """
+        Check if bed temperature is stable for high-precision probing
+        
+        Returns:
+            True if temperature is stable, False if changing rapidly
+        """
+        try:
+            # Try to get bed heater
+            pheaters = self._printer.lookup_object("heaters", None)
+            if pheaters is None:
+                return True  # No heater info, assume stable
+                
+            bed_heater = pheaters.lookup_heater("heater_bed", None)
+            if bed_heater is None:
+                return True  # No bed heater, assume stable
+            
+            current_temp, target_temp = bed_heater.get_temp(0)
+            
+            # If actively heating (more than 5C difference), less stable
+            temp_diff = abs(target_temp - current_temp)
+            if temp_diff > 5.0:
+                return False
+                
+            # Temperature is stable
+            return True
+            
+        except Exception:
+            # On any error, assume stable
+            return True
+    
+    def create_start_print_integration(self) -> str:
+        """
+        Generate START_PRINT macro integration code for Survey TOUCH mode
+        
+        Returns:
+            String with G-code macro for integrating into START_PRINT
+        """
+        return '''
+# Survey TOUCH integration for START_PRINT
+# Add this to your START_PRINT macro after bed heating and before mesh/first layer
+
+[gcode_macro _SURVEY_TOUCH_HOME]
+gcode:
+    {% set bed_temp = printer.heater_bed.target %}
+    {% set use_touch = params.TOUCH|default(1)|int %}
+    
+    # Home if needed
+    {% if not printer.toolhead.homed_axes %}
+        G28
+    {% endif %}
+    
+    # Wait for bed temperature stability
+    {% if bed_temp > 0 %}
+        M190 S{bed_temp}  # Wait for bed temp
+        G4 P30000         # Wait 30s for thermal stability
+    {% endif %}
+    
+    # Use Survey TOUCH mode for ultimate accuracy
+    {% if use_touch %}
+        PROBE_EDDY_NG_SURVEY TOUCH=1 TOUCH_SAMPLES=5 TOUCH_SPEED=0.5
+        {action_respond_info("Survey TOUCH complete - ready for printing")}
+    {% else %}
+        PROBE_EDDY_NG_SURVEY
+        {action_respond_info("Standard Survey complete")}
+    {% endif %}
+
+# Usage in START_PRINT:
+# Add this line after bed heating: _SURVEY_TOUCH_HOME TOUCH=1
+'''
 
     def cmd_TAP(self, gcmd: GCodeCommand):
         drive_current = self._sensor.get_drive_current()
