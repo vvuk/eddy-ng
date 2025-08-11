@@ -2479,9 +2479,8 @@ class ProbeEddy:
     
     def _cartographer_style_detection(self, start_z: float, touch_speed: float,
                                     baseline_freq: float, thresholds: dict) -> Optional[float]:
-        """True continuous movement using Klipper homing system (like Cartographer)"""
+        """True continuous movement using Klipper homing system (like TAP)"""
         th = self._printer.lookup_object("toolhead")
-        homing = self._printer.lookup_object("homing")
         
         self._log_info(f"    Starting TRUE continuous detection from Z={start_z:.3f}mm")
         
@@ -2509,27 +2508,32 @@ class ProbeEddy:
             sampler = self.start_sampler(calculate_heights=True)
             self._log_debug("Touch detection sampler started")
             
-            # Get the existing endstop wrapper from our ProbeEddy instance
-            endstop_wrapper = self._endstop_wrapper
+            # Configure endstop wrapper for touch detection (similar to TAP mode)
+            touch_config = ProbeEddy.TouchConfig(
+                baseline_freq=baseline_freq,
+                thresholds=thresholds
+            )
+            self._endstop_wrapper.touch_config = touch_config
             
-            # Configure touch detection with current parameters
-            endstop_wrapper.setup_touch_detection(baseline_freq, thresholds)
-            
-            # Get target position for continuous movement
+            # Get target position for continuous movement  
             current_pos = th.get_position()
             target_pos = [current_pos[0], current_pos[1], target_z]
             
             self._log_info(f"    Continuous movement: Z{start_z:.3f} → Z{target_z:.3f} at {scan_speed:.1f}mm/s")
             
-            # Use Klipper's homing system for TRUE continuous movement
-            # This moves continuously until endstop_wrapper.query_endstop() returns triggered state  
-            end_pos = homing.probing_move(endstop_wrapper, target_pos, scan_speed)
+            # Use HomingMove like TAP does - this is the correct approach
+            endstops = [(self._endstop_wrapper, "probe")]
+            hmove = HomingMove(self._printer, endstops)
             
+            # TRUE continuous movement - Klipper handles endstop checking in real-time
+            probe_position = hmove.homing_move(target_pos, scan_speed, probe_pos=True)
+            
+            if hmove.check_no_movement() is not None:
+                self._log_warning("Touch detection failed - probe triggered prior to movement")
+                return None
+                
             # Get the exact Z position where touch was detected
-            touch_z = end_pos[2]
-            
-            # Clear touch detection mode
-            endstop_wrapper._touch_mode = False
+            touch_z = probe_position[2]
             
             self._log_info(f"    ✓ TRUE CONTINUOUS TOUCH at Z={touch_z:.4f}mm")
             self._log_info(f"    Movement stopped automatically by Klipper homing system")
@@ -2549,11 +2553,13 @@ class ProbeEddy:
             return None
             
         finally:
-            # Always clean up
+            # Clear touch detection mode (similar to TAP cleanup)
+            self._endstop_wrapper.touch_config = None
+            
+            # Always clean up sampler
             try:
                 if sampler:
                     sampler.finish()
-                self._endstop_wrapper._touch_mode = False
             except Exception as cleanup_e:
                 self._log_debug(f"Cleanup error: {cleanup_e}")
     
@@ -3143,6 +3149,11 @@ gcode:
         mode: str
         threshold: float
         sos: Optional[List[List[float]]] = None
+
+    @dataclass  
+    class TouchConfig:
+        baseline_freq: float
+        thresholds: dict
 
     def do_one_tap(
         self,
@@ -3813,8 +3824,9 @@ class ProbeEddyEndstopWrapper:
         self._mcu = eddy._mcu
         self._reactor = eddy._reactor
 
-        # these two are filled in by the outside.
+        # these configs are filled in by the outside.
         self.tap_config: Optional[ProbeEddy.TapConfig] = None
+        self.touch_config: Optional[ProbeEddy.TouchConfig] = None
         # if not None, after a probe session is finished we'll
         # write all samples here
         self.save_samples_path: Optional[str] = None
@@ -3865,7 +3877,7 @@ class ProbeEddyEndstopWrapper:
             return
             
         # Check if we're in touch detection mode and sampler is already active
-        if hasattr(self, '_touch_mode') and self._touch_mode and self.eddy._sampler:
+        if self.touch_config is not None and self.eddy._sampler:
             # Use existing sampler for touch detection
             self._sampler = self.eddy._sampler
             self.eddy._log_debug("Using existing sampler for touch detection homing")
@@ -3876,10 +3888,10 @@ class ProbeEddyEndstopWrapper:
         self._homing_in_progress = True
         # if we're doing a tap, we're already in the right position;
         # otherwise move there
-        if self.tap_config is None and not (hasattr(self, '_touch_mode') and self._touch_mode):
+        if self.tap_config is None and self.touch_config is None:
             # Skip probe_to_start_position in touch mode - we're already positioned correctly
             self.eddy._probe_to_start_position_unhomed(move_home=True)
-        elif hasattr(self, '_touch_mode') and self._touch_mode:
+        elif self.touch_config is not None:
             self.eddy._log_debug("Touch detection mode - skipping probe positioning")
 
     def _handle_homing_move_end(self, hmove):
@@ -3887,7 +3899,7 @@ class ProbeEddyEndstopWrapper:
             return
             
         # Don't finish sampler if we're in touch detection mode - let the calling code handle it
-        if hasattr(self, '_touch_mode') and self._touch_mode:
+        if self.touch_config is not None:
             self.eddy._log_debug("Touch detection mode - not finishing sampler in homing_move_end")
         else:
             # Normal homing - finish the sampler
@@ -3942,30 +3954,23 @@ class ProbeEddyEndstopWrapper:
         self.last_tap_start_time = 0.0
 
         # Check if we're in touch detection mode
-        if hasattr(self, '_touch_mode') and self._touch_mode:
+        if self.touch_config is not None:
             # Touch detection mode - use current frequency and position for safe operation
             th = self.eddy._printer.lookup_object("toolhead")
             current_pos = th.get_position()
             current_z = current_pos[2]
             
-            # Get current frequency for safety calculations
-            try:
-                current_freq = self.eddy.get_frequency()
-                # Set trigger frequency to touch threshold
-                trigger_freq = self._baseline_freq * (1.0 - self._thresholds['fine'] / 100.0)
-                # Use current frequency as safe frequency (no safety height restrictions)
-                safe_freq = current_freq
-                safe_time = 0  # No time-based safety restrictions for touch detection
-                
-                self.eddy._log_debug(
-                    f"Touch detection home_start: current_z={current_z:.3f} current_freq={current_freq:.2f} trigger_freq={trigger_freq:.2f}"
-                )
-            except Exception as e:
-                self.eddy._log_debug(f"Touch detection home_start: failed to get current frequency: {e}")
-                # Fallback to baseline frequency
-                trigger_freq = self._baseline_freq * (1.0 - self._thresholds['fine'] / 100.0)
-                safe_freq = self._baseline_freq
-                safe_time = 0
+            # Set trigger frequency to touch threshold
+            baseline_freq = self.touch_config.baseline_freq
+            thresholds = self.touch_config.thresholds
+            trigger_freq = baseline_freq * (1.0 - thresholds['fine'] / 100.0)
+            # Use baseline frequency as safe frequency (no safety height restrictions needed)
+            safe_freq = baseline_freq
+            safe_time = 0  # No time-based safety restrictions for touch detection
+            
+            self.eddy._log_debug(
+                f"Touch detection home_start: current_z={current_z:.3f} baseline_freq={baseline_freq:.2f} trigger_freq={trigger_freq:.2f}"
+            )
         else:
             # Standard homing mode
             trigger_height = self._home_trigger_height
@@ -4000,7 +4005,7 @@ class ProbeEddyEndstopWrapper:
             else:
                 raise self._printer.command_error(f"Invalid tap mode: {self.tap_config.mode}")
             tap_threshold = self.tap_config.threshold
-        elif hasattr(self, '_touch_mode') and self._touch_mode:
+        elif self.touch_config is not None:
             mode = "touch"  # Special mode for touch detection
             tap_threshold = None
         else:
@@ -4090,22 +4095,16 @@ class ProbeEddyEndstopWrapper:
 
     def query_endstop(self, print_time):
         # Check if we're in touch detection mode
-        if hasattr(self, '_touch_mode') and self._touch_mode:
+        if self.touch_config is not None:
             return self._query_touch_endstop(print_time)
         else:
             # Standard endstop behavior for homing - always returns 0 (not triggered)
             return 0
         
-    def setup_touch_detection(self, baseline_freq: float, thresholds: dict):
-        """Configure this endstop wrapper for touch detection mode"""
-        self._touch_mode = True
-        self._baseline_freq = baseline_freq
-        self._thresholds = thresholds
-        self._touch_detected = False
         
     def _query_touch_endstop(self, print_time):
         """Internal method for touch detection during continuous movement"""
-        if self._touch_detected:
+        if hasattr(self, '_touch_detected') and self._touch_detected:
             return 1  # Already detected - triggered state
             
         # Use the current active sampler from the ProbeEddy instance
@@ -4118,21 +4117,23 @@ class ProbeEddyEndstopWrapper:
                 return 0  # No data yet - not triggered
             
             current_freq = self.eddy._sampler.freqs[-1]
-            freq_change_pct = ((current_freq - self._baseline_freq) / self._baseline_freq) * 100
+            baseline_freq = self.touch_config.baseline_freq
+            thresholds = self.touch_config.thresholds
+            freq_change_pct = ((current_freq - baseline_freq) / baseline_freq) * 100
             
             # Multi-level detection for better accuracy
             detection_level = None
             
             # Level 1: Fine threshold (most sensitive)  
-            if freq_change_pct > self._thresholds['fine_pct']:
+            if freq_change_pct > thresholds['fine']:
                 detection_level = "fine"
             
             # Level 2: Coarse threshold (standard)
-            elif freq_change_pct > self._thresholds['coarse_pct']:
+            elif freq_change_pct > thresholds['coarse']:
                 detection_level = "coarse"
             
             # Level 3: Emergency threshold (safety)
-            if freq_change_pct > self._thresholds['emergency_pct']:
+            if freq_change_pct > thresholds['emergency']:
                 detection_level = "emergency"
                 
             if detection_level:
