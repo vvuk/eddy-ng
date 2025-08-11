@@ -2494,8 +2494,8 @@ class ProbeEddy:
         th.wait_moves()
         
         try:
-            # Get the existing endstop wrapper and configure it for touch detection
-            endstop_wrapper = self._printer.lookup_object("probe_eddy_endstop")
+            # Get the existing endstop wrapper from our ProbeEddy instance
+            endstop_wrapper = self._endstop_wrapper
             
             # Start sampling before configuring touch detection
             # The sampler should already be running from the wrapper's home_start method
@@ -2528,8 +2528,7 @@ class ProbeEddy:
         except self._printer.command_error as e:
             # Clear touch detection mode on error
             try:
-                endstop_wrapper = self._printer.lookup_object("probe_eddy_endstop")
-                endstop_wrapper._touch_mode = False
+                self._endstop_wrapper._touch_mode = False
             except:
                 pass
                 
@@ -2543,8 +2542,7 @@ class ProbeEddy:
         except Exception as e:
             # Clear touch detection mode on error
             try:
-                endstop_wrapper = self._printer.lookup_object("probe_eddy_endstop")
-                endstop_wrapper._touch_mode = False
+                self._endstop_wrapper._touch_mode = False
             except:
                 pass
                 
