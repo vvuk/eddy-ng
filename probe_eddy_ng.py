@@ -2491,8 +2491,9 @@ class ProbeEddy:
                 thresholds['coarse_pct'] *= 1.2    # Less sensitive  
                 thresholds['fine_pct'] *= 1.2
         
-        # Convert to absolute values
-        for key in thresholds:
+        # Convert to absolute values (copy keys to avoid modification during iteration)
+        pct_keys = list(thresholds.keys())  # Create list copy to avoid iteration issues
+        for key in pct_keys:
             thresholds[key.replace('_pct', '_abs')] = baseline_freq * (thresholds[key] / 100.0)
             
         self._log_debug(f"    Adaptive thresholds: coarse={thresholds['coarse_pct']:.1f}%, "
