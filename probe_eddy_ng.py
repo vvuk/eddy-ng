@@ -4343,6 +4343,9 @@ class ProbeEddySampler:
 
         self.times.extend(times)
         self.raw_freqs.extend(raw_freqs)
+        
+        # Update samples immediately for real-time access
+        self._update_samples()
 
         return True
 
