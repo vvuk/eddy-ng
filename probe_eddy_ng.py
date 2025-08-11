@@ -3876,8 +3876,11 @@ class ProbeEddyEndstopWrapper:
         self._homing_in_progress = True
         # if we're doing a tap, we're already in the right position;
         # otherwise move there
-        if self.tap_config is None:
+        if self.tap_config is None and not (hasattr(self, '_touch_mode') and self._touch_mode):
+            # Skip probe_to_start_position in touch mode - we're already positioned correctly
             self.eddy._probe_to_start_position_unhomed(move_home=True)
+        elif hasattr(self, '_touch_mode') and self._touch_mode:
+            self.eddy._log_debug("Touch detection mode - skipping probe positioning")
 
     def _handle_homing_move_end(self, hmove):
         if self not in hmove.get_mcu_endstops():
