@@ -1818,7 +1818,7 @@ class ProbeEddy:
         # High-precision TOUCH mode integration
         use_touch = gcmd.get_int("TOUCH", 0) == 1
         touch_speed = gcmd.get_float("TOUCH_SPEED", 0.5, above=0.1)
-        touch_samples = gcmd.get_int("TOUCH_SAMPLES", 3, minval=2, maxval=10)  # Reduced from 5 for speed
+        touch_samples = gcmd.get_int("TOUCH_SAMPLES", 5, minval=3, maxval=10)  # Increased for better accuracy
         auto_touch = gcmd.get_int("AUTO_TOUCH", 0) == 1  # Smart switching based on conditions
         
         self._log_info(f"SURVEY parameters: samples={samples}, tolerance={tolerance:.4f}, use_touch={use_touch}, auto_touch={auto_touch}")
@@ -2321,7 +2321,7 @@ class ProbeEddy:
             raise self._printer.command_error("Touch detection requires polynomial calibration. Run PROBE_EDDY_NG_CALIBRATE_POLY first")
 
         # Parse parameters with Cartographer-inspired defaults
-        samples = gcmd.get_int("SAMPLES", 3, minval=1, maxval=10)
+        samples = gcmd.get_int("SAMPLES", 5, minval=3, maxval=10)  # More samples for better accuracy
         tolerance = gcmd.get_float("TOLERANCE", 0.015, above=0.005, maxval=0.1)
         speed = gcmd.get_float("SPEED", 1.0, above=0.1, maxval=5.0)
         touch_speed = gcmd.get_float("TOUCH_SPEED", 0.3, above=0.1, maxval=2.0)
@@ -2393,14 +2393,14 @@ class ProbeEddy:
                 
             self._log_info(f"=== Touch attempt {len(touch_results) + 1}/{samples} ===")
             
-            # Add slight randomization to touch position (±0.5mm) for better statistics
+            # Add minimal randomization to touch position (±0.1mm) for repeatability
             if len(touch_results) > 0:
                 th_pos = th.get_position()
-                random_x = th_pos[0] + (0.5 - 1.0 * (attempt % 2))  # Simple alternation
-                random_y = th_pos[1] + (0.5 - 1.0 * ((attempt // 2) % 2))
+                random_x = th_pos[0] + (0.1 - 0.2 * (attempt % 2))  # Smaller randomization
+                random_y = th_pos[1] + (0.1 - 0.2 * ((attempt // 2) % 2))
                 th.manual_move([random_x, random_y, None], speed)
                 th.wait_moves()
-                self._log_info(f"Position randomized: X={random_x:.2f}, Y={random_y:.2f}")
+                self._log_info(f"Position micro-adjusted: X={random_x:.2f}, Y={random_y:.2f}")
             
             try:
                 # Perform single high-precision touch
@@ -2413,8 +2413,8 @@ class ProbeEddy:
                     # Quick statistical check - reject obvious outliers early
                     if len(touch_results) >= 3:  # Need at least 3 samples for meaningful median
                         median_z = float(np.median(touch_results))
-                        # Use more lenient outlier threshold for touch detection (0.2mm instead of 3*tolerance)
-                        outlier_threshold = max(0.2, tolerance * 10)  # At least 0.2mm threshold
+                        # Use strict outlier threshold for high accuracy (0.03mm instead of 0.2mm)
+                        outlier_threshold = max(0.03, tolerance * 5)  # Much stricter threshold
                         if abs(touch_z - median_z) > outlier_threshold:
                             self._log_warning(f"  Outlier detected: {touch_z:.4f}mm vs median {median_z:.4f}mm (threshold: {outlier_threshold:.3f}mm)")
                             touch_results.pop()  # Remove outlier
@@ -2484,7 +2484,7 @@ class ProbeEddy:
         # Ultra-fast baseline collection - single sample only
         try:
             with self.start_sampler(calculate_heights=False) as sampler:
-                th.dwell(0.02)  # Ultra-short dwell for maximum speed (was 0.05s)
+                th.dwell(0.05)  # Higher accuracy baseline
                 th.wait_moves()
                 sampler.finish()
             
@@ -2553,14 +2553,19 @@ class ProbeEddy:
         self._log_info(f"    Starting precision scan from Z={start_z:.3f}mm")
         
         while current_z > -0.3:  # Reduced safety limit for speed (was -0.5mm)
-            # Move to current position with speed optimization
-            move_speed = min(touch_speed * 1.5, 3.0) if current_z > 0.5 else touch_speed  # Faster above 0.5mm
+            # Move to current position with precision optimization
+            if current_z > 0.8:
+                move_speed = min(touch_speed * 2.0, 3.0)  # Fast above 0.8mm
+            elif current_z > 0.3:
+                move_speed = touch_speed * 0.8  # Slower when approaching contact
+            else:
+                move_speed = touch_speed * 0.5  # Very slow near contact for accuracy
             th.manual_move([None, None, current_z], move_speed)
             th.wait_moves()
             
             # Take frequency measurement
             with self.start_sampler(calculate_heights=False) as sampler:
-                th.dwell(0.02)  # Ultra-quick sampling for speed
+                th.dwell(0.05)  # Higher accuracy sampling
                 th.wait_moves()
                 sampler.finish()
                 
@@ -2711,12 +2716,12 @@ class ProbeEddy:
             # Adaptive step size based on frequency change for speed optimization
             if len(freqs) >= 2:
                 freq_change_pct = (freq_delta / baseline_freq) * 100
-                if freq_change_pct > 1.2:  # Close to contact - use fine steps
-                    step_size = 0.02
-                elif freq_change_pct > 0.6:  # Approaching contact - medium steps
+                if freq_change_pct > 1.0:  # Close to contact - ultra-fine steps
+                    step_size = 0.005  # Ultra-fine steps for maximum accuracy
+                elif freq_change_pct > 0.5:  # Approaching contact - fine steps
+                    step_size = 0.01   # Fine steps for better accuracy
+                elif freq_change_pct > 0.2:  # Slight change - medium steps  
                     step_size = 0.05
-                elif freq_change_pct > 0.2:  # Slight change - smaller steps  
-                    step_size = 0.08
                 else:  # Far from contact - large steps for speed
                     step_size = 0.1
                     
