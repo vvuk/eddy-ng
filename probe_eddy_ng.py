@@ -1301,39 +1301,47 @@ class ProbeEddy:
         )
 
     def cmd_CALIBRATE_POLY(self, gcmd: GCodeCommand):
-        """Calibrate using polynomial model for survey mode with automatic touch detection"""
+        """Calibrate using polynomial model for survey mode"""
         if not self._xy_homed():
             raise self._printer.command_error("X and Y must be homed before calibrating")
 
         if self._z_homed():
             self._z_hop()
 
-        # Parameters
-        old_drive_current = self.current_drive_current()
-        drive_current: int = gcmd.get_int("DRIVE_CURRENT", old_drive_current, minval=0, maxval=31)
-        cal_z_max: float = gcmd.get_float("START_Z", self.params.calibration_z_max, above=2.0)
-        probe_speed: float = gcmd.get_float("SPEED", self.params.probe_speed, above=0.0)
-        lift_speed: float = gcmd.get_float("LIFT_SPEED", self.params.lift_speed, above=0.0)
-        approach_speed: float = gcmd.get_float("APPROACH_SPEED", 1.0, above=0.1)
-        touch_speed: float = gcmd.get_float("TOUCH_SPEED", 0.5, above=0.1)
-        
-        # Display calibration parameters
-        self._log_info("=" * 50)
-        self._log_info("STARTING POLYNOMIAL CALIBRATION")
-        self._log_info("=" * 50)
-        self._log_debug(f"Drive current: {drive_current}")
-        self._log_debug(f"Calibration range: 0 to {cal_z_max:.1f}mm")
-        self._log_debug(f"Probe speed: {probe_speed:.1f}mm/s")
-        
-        # Get toolhead and reset Z axis range
+        # Now reset the axis so that we have a full range to calibrate with
         th = self._printer.lookup_object("toolhead")
         th_pos = th.get_position()
         zrange = th.get_kinematics().rails[2].get_range()
         th_pos[2] = zrange[1] - 20.0
         self._set_toolhead_position(th_pos, [2])
-        
-        # Move to safe height
-        self._log_info("Moving to calibration position...")
+
+        manual_probe.ManualProbeHelper(
+            self._printer,
+            gcmd,
+            lambda kin_pos: self.cmd_CALIBRATE_POLY_next(gcmd, kin_pos),
+        )
+
+    def cmd_CALIBRATE_POLY_next(self, gcmd: GCodeCommand, kin_pos: Optional[List[float]]):
+        """Continue polynomial calibration after manual probe"""
+        if kin_pos is None:
+            self._z_not_homed()
+            return
+
+        old_drive_current = self.current_drive_current()
+        drive_current: int = gcmd.get_int("DRIVE_CURRENT", old_drive_current, minval=0, maxval=31)
+        cal_z_max: float = gcmd.get_float("START_Z", self.params.calibration_z_max, above=2.0)
+        z_target: float = gcmd.get_float("TARGET_Z", 0.0)
+
+        probe_speed: float = gcmd.get_float("SPEED", self.params.probe_speed, above=0.0)
+        lift_speed: float = gcmd.get_float("LIFT_SPEED", self.params.lift_speed, above=0.0)
+
+        th = self._printer.lookup_object("toolhead")
+        th_pos = th.get_position()
+        th_pos[2] = 0.0
+        self._set_toolhead_position(th_pos, [2])
+        th.wait_moves()
+
+        # Move to calibration position
         th.manual_move([None, None, cal_z_max + 3.0], lift_speed)
         th.manual_move(
             [
@@ -1343,32 +1351,11 @@ class ProbeEddy:
             ],
             self.params.move_speed,
         )
-        th.wait_moves()
-        
-        # Detect bed touch automatically
-        self._log_info("Detecting bed contact point...")
-        touch_z = self._auto_detect_touch(cal_z_max, approach_speed, touch_speed, drive_current)
-        
-        if touch_z is None:
-            raise self._printer.command_error("Failed to detect bed contact during calibration")
-        
-        self._log_info(f"Bed contact detected at Z={touch_z:.3f}mm")
-        
-        # Set Z=0 at touch point
-        th_pos = th.get_position()
-        th_pos[2] = 0.0
-        self._set_toolhead_position(th_pos, [2])
-        th.wait_moves()
-        
-        # Move back up to start calibration
-        th.manual_move([None, None, cal_z_max + 3.0], lift_speed)
-        th.wait_moves()
-        
+
         # Create mapping with polynomial flag
-        self._log_info("Collecting calibration data...")
         mapping, fth_fit, htf_fit = self._create_mapping_poly(
             cal_z_max,
-            0.0,  # z_target is now 0 since we set Z=0 at touch
+            z_target,
             probe_speed,
             lift_speed,
             drive_current,
@@ -1384,89 +1371,7 @@ class ProbeEddy:
         self.save_config()
         self._z_not_homed()
 
-        self._log_info("=" * 50)
-        self._log_info("POLYNOMIAL CALIBRATION COMPLETE")
-        self._log_info("Survey mode is now available")
-        self._log_info("=" * 50)
-        
-    def _auto_detect_touch(self, start_z: float, approach_speed: float, 
-                          touch_speed: float, drive_current: int) -> Optional[float]:
-        """Automatically detect bed touch during calibration"""
-        th = self._printer.lookup_object("toolhead")
-        
-        # Save current drive current and set calibration current
-        old_drive_current = self.current_drive_current()
-        try:
-            self._sensor.set_drive_current(drive_current)
-            
-            # Move to start position
-            th.manual_move([None, None, start_z], approach_speed)
-            th.wait_moves()
-            
-            # Get baseline frequency
-            with self.start_sampler(calculate_heights=False) as sampler:
-                th.dwell(0.1)
-                th.wait_moves()
-                sampler.finish()
-            
-            if sampler.raw_count == 0:
-                self._log_error("Failed to get baseline frequency")
-                return None
-                
-            baseline_freq = sampler.freqs[-1]
-            self._log_debug(f"Baseline frequency: {baseline_freq:.1f} Hz at Z={start_z:.3f}mm")
-            
-            # Start moving down slowly and monitor frequency
-            current_z = start_z
-            step_size = 0.05  # 0.05mm steps for initial approach
-            min_freq_increase_pct = 1.5  # 1.5% minimum increase to detect touch
-            
-            while current_z > -0.5:  # Safety limit
-                th.manual_move([None, None, current_z], touch_speed)
-                th.wait_moves()
-                
-                # Take frequency reading
-                with self.start_sampler(calculate_heights=False) as sampler:
-                    th.dwell(0.05)
-                    th.wait_moves()
-                    sampler.finish()
-                
-                if sampler.raw_count > 0:
-                    current_freq = sampler.freqs[-1]
-                    freq_change_pct = ((current_freq - baseline_freq) / baseline_freq) * 100
-                    
-                    # Log progress every 0.5mm
-                    if int(current_z * 2) != int((current_z + step_size) * 2):
-                        self._log_debug(f"  Z={current_z:.3f}mm, freq change: {freq_change_pct:+.1f}%")
-                    
-                    # Detect significant frequency increase indicating contact
-                    if freq_change_pct > min_freq_increase_pct:
-                        # Refined detection with smaller steps
-                        if step_size > 0.01:
-                            # Back up a bit and approach more slowly
-                            th.manual_move([None, None, current_z + step_size * 2], touch_speed)
-                            th.wait_moves()
-                            step_size = 0.01  # Finer steps for accurate detection
-                            current_z += step_size * 2
-                            continue
-                        
-                        # Confirmed touch
-                        self._log_debug(f"Touch detected: Z={current_z:.3f}mm, freq change: {freq_change_pct:.1f}%")
-                        return current_z
-                    
-                    # Emergency stop if frequency increases too much
-                    if freq_change_pct > 10.0:
-                        self._log_warning(f"Emergency stop: Large frequency change {freq_change_pct:.1f}%")
-                        return current_z
-                
-                current_z -= step_size
-            
-            self._log_error("No touch detected within safe range")
-            return None
-            
-        finally:
-            # Restore original drive current
-            self._sensor.set_drive_current(old_drive_current)
+        self._log_msg("Polynomial calibration complete. Survey mode is now available.")
 
     def _create_mapping_poly(
         self,
