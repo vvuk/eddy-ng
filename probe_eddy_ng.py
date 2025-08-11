@@ -2493,15 +2493,16 @@ class ProbeEddy:
         th.manual_move([None, None, start_z], scan_speed * 2)
         th.wait_moves()
         
+        # Start sampler BEFORE probing movement (required by Klipper)
+        sampler = None
         try:
+            # Start the sampler first (required by endstop wrapper)
+            sampler = self.start_sampler(calculate_heights=True)
+            
             # Get the existing endstop wrapper from our ProbeEddy instance
             endstop_wrapper = self._endstop_wrapper
             
-            # Start sampling before configuring touch detection
-            # The sampler should already be running from the wrapper's home_start method
-            if not endstop_wrapper._sampler or not endstop_wrapper._sampler.active():
-                endstop_wrapper._sampler = self.start_sampler(calculate_heights=True)
-                
+            # Configure touch detection with current parameters
             endstop_wrapper.setup_touch_detection(baseline_freq, thresholds)
             
             # Get target position for continuous movement
@@ -2526,12 +2527,6 @@ class ProbeEddy:
             return touch_z
             
         except self._printer.command_error as e:
-            # Clear touch detection mode on error
-            try:
-                self._endstop_wrapper._touch_mode = False
-            except:
-                pass
-                
             if "Probe completed movement before triggering" in str(e):
                 self._log_warning("No touch detected during continuous movement")
                 return None
@@ -2540,14 +2535,17 @@ class ProbeEddy:
                 return None
                 
         except Exception as e:
-            # Clear touch detection mode on error
-            try:
-                self._endstop_wrapper._touch_mode = False
-            except:
-                pass
-                
             self._log_error(f"Continuous detection error: {e}")
             return None
+            
+        finally:
+            # Always clean up
+            try:
+                if sampler:
+                    sampler.finish()
+                self._endstop_wrapper._touch_mode = False
+            except Exception as cleanup_e:
+                self._log_debug(f"Cleanup error: {cleanup_e}")
     
     
     def _get_stable_baseline_frequency(self) -> Optional[float]:
@@ -4039,15 +4037,16 @@ class ProbeEddyEndstopWrapper:
         if self._touch_detected:
             return 1  # Already detected - triggered state
             
-        if not self._sampler or not self._sampler.active():
+        # Use the current active sampler from the ProbeEddy instance
+        if not self.eddy._sampler or not self.eddy._sampler.active():
             return 0  # No active sampler - not triggered
             
         try:
             # Get latest frequency reading
-            if not self._sampler.freqs:
+            if not self.eddy._sampler.freqs:
                 return 0  # No data yet - not triggered
             
-            current_freq = self._sampler.freqs[-1]
+            current_freq = self.eddy._sampler.freqs[-1]
             freq_change_pct = ((current_freq - self._baseline_freq) / self._baseline_freq) * 100
             
             # Multi-level detection for better accuracy
