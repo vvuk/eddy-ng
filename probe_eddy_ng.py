@@ -2531,9 +2531,9 @@ class ProbeEddy:
     def _calculate_adaptive_thresholds(self, baseline_freq: float, threshold_auto: bool) -> dict:
         """Calculate adaptive thresholds based on baseline frequency and conditions"""
         thresholds = {
-            'coarse_pct': 2.5,    # 2.5% for initial detection (was 1.0%, too sensitive)
-            'fine_pct': 1.5,      # 1.5% for precise detection (was 0.5%, too sensitive)
-            'peak_pct': 4.0,      # 4.0% for peak detection (was 3.0%)
+            'coarse_pct': 1.6,    # 1.6% for initial detection (physical contact was 1.69%)
+            'fine_pct': 1.4,      # 1.4% for precise detection (slightly below physical contact)
+            'peak_pct': 1.8,      # 1.8% for peak detection (just above physical contact)
             'emergency_pct': 8.0,  # 8.0% emergency stop (unchanged)
         }
         
@@ -2633,6 +2633,62 @@ class ProbeEddy:
                     old_step = step_size
                     step_size = 0.02  # Fine steps (was 0.005, too slow)
                     self._log_info(f"    Switching to finer steps: {old_step:.3f} → {step_size:.3f}mm")
+            
+            # Alternative detection: Rate slowdown detection (more sensitive for soft contact)
+            if (not detection_methods['coarse'] and len(freq_derivatives) >= 3):
+                recent_rates = freq_derivatives[-2:]  # Last 2 rates
+                if len(recent_rates) >= 2:
+                    current_rate = recent_rates[-1]
+                    prev_rate = recent_rates[-2] 
+                    
+                    # Debug rate slowdown check
+                    slowdown_check = current_rate < prev_rate * 0.6
+                    freq_check = freq_delta > baseline_freq * 0.012
+                    
+                    # Detect significant slowdown in frequency growth rate
+                    if (prev_rate > 5000 and current_rate > 0 and  # Both positive rates
+                        slowdown_check and                        # 40%+ slowdown
+                        freq_check):                              # At least 1.2% change
+                        
+                        coarse_detection_z = current_z
+                        detection_methods['coarse'] = True
+                        slowdown_pct = ((prev_rate - current_rate) / prev_rate) * 100
+                        self._log_info(f"    Rate slowdown detection at Z={current_z:.3f}mm "
+                                      f"({freq_change_pct:.2f}%, slowdown: {slowdown_pct:.0f}%)")
+                    
+                    # Log debug info for troubleshooting (only if close to expected contact zone)
+                    if current_z < 0.8 and len(freq_derivatives) % 10 == 0:  # Every 10th step below 0.8mm
+                        self._log_info(f"      Debug: prev_rate={prev_rate:.0f}, current_rate={current_rate:.0f}, "
+                                      f"slowdown_ok={slowdown_check}, freq_ok={freq_check}")
+                        
+                    # Switch to finer steps (moved outside debug block)
+                    if slowdown_check and step_size > 0.02:
+                        old_step = step_size
+                        step_size = 0.02
+                        self._log_info(f"    Switching to finer steps: {old_step:.3f} → {step_size:.3f}mm")
+            
+            # Third detection method: Low rate detection (for very soft contact)  
+            if (not detection_methods['coarse'] and len(freq_derivatives) >= 5):
+                # Look for sustained low frequency growth rate
+                recent_rates = freq_derivatives[-3:]  # Last 3 rates
+                if len(recent_rates) >= 3:
+                    avg_recent_rate = sum(recent_rates) / len(recent_rates)
+                    
+                    # If frequency is still growing but very slowly, might be soft contact
+                    if (avg_recent_rate > 0 and avg_recent_rate < 5000 and  # Low but positive growth
+                        freq_delta > baseline_freq * 0.015 and             # At least 1.5% total change
+                        current_z < 1.0):                                   # Below 1mm height
+                        
+                        coarse_detection_z = current_z
+                        detection_methods['coarse'] = True
+                        self._log_info(f"    Low rate detection at Z={current_z:.3f}mm "
+                                      f"({freq_change_pct:.2f}%, avg_rate: {avg_recent_rate:.0f}Hz/mm)")
+                        
+                        # Switch to finer steps
+                        if step_size > 0.02:
+                            old_step = step_size
+                            step_size = 0.02
+                            self._log_info(f"    Switching to finer steps: {old_step:.3f} → {step_size:.3f}mm")
                     
             # Fine detection using derivative analysis (after coarse)
             if (detection_methods['coarse'] and not detection_methods['fine'] 
@@ -2646,10 +2702,6 @@ class ProbeEddy:
                     recent_median = float(np.median(recent_rates))
                     prev_median = float(np.median(prev_rates))
                     
-                    # Debug fine detection conditions
-                    self._log_info(f"      Fine check: prev_med={prev_median:.0f}, recent_med={recent_median:.0f}, "
-                                  f"freq_delta={freq_delta:.0f}, fine_thresh={thresholds['fine_abs']:.0f}")
-                    
                     # Detect significant slowdown (improved from threshold_scan)
                     # Only trigger if both rates are positive (frequency increasing)
                     if (prev_median > 1000 and recent_median > 0 and  # Both positive rates
@@ -2660,18 +2712,6 @@ class ProbeEddy:
                         detection_methods['fine'] = True
                         slowdown_ratio = prev_median / recent_median if recent_median > 0 else float('inf')
                         self._log_info(f"    Fine detection at Z={current_z:.3f}mm (slowdown: {slowdown_ratio:.1f}x)")
-                    else:
-                        # Log why fine detection didn't trigger
-                        reasons = []
-                        if prev_median <= 1000:
-                            reasons.append(f"prev_median({prev_median:.0f}) <= 1000")
-                        if recent_median <= 0:
-                            reasons.append(f"recent_median({recent_median:.0f}) <= 0") 
-                        if recent_median >= prev_median / 2.0:
-                            reasons.append(f"no slowdown({recent_median:.0f} >= {prev_median/2.0:.0f})")
-                        if freq_delta <= thresholds['fine_abs']:
-                            reasons.append(f"freq_delta({freq_delta:.0f}) <= fine_thresh({thresholds['fine_abs']:.0f})")
-                        self._log_info(f"      Fine detection blocked: {', '.join(reasons)}")
             
             # Peak detection - frequency starts decreasing (over-compression)
             if (detection_methods['fine'] and not detection_methods['peak']
