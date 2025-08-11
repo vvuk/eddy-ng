@@ -2608,6 +2608,7 @@ class ProbeEddy:
             times.append(sampler.times[-1])
             
             # Calculate derivatives for advanced detection
+            freq_rate = 0
             if len(freqs) >= 2:
                 freq_rate = (freqs[-1] - freqs[-2]) / step_size
                 freq_derivatives.append(freq_rate)
@@ -2615,6 +2616,11 @@ class ProbeEddy:
                 if len(freq_derivatives) >= 2:
                     freq_accel = (freq_derivatives[-1] - freq_derivatives[-2]) / step_size
                     freq_second_derivatives.append(freq_accel)
+            
+            # Log every step with detailed info
+            self._log_info(f"    Z={current_z:.3f}: freq={current_freq:.0f}Hz "
+                          f"delta={freq_delta:.0f} ({freq_change_pct:.2f}%) "
+                          f"rate={freq_rate:.0f}Hz/mm step={step_size:.3f}")
             
             # Multi-method detection
             if not detection_methods['coarse'] and freq_delta > thresholds['coarse_abs']:
@@ -2624,7 +2630,9 @@ class ProbeEddy:
                 
                 # Switch to finer steps after coarse detection
                 if step_size > 0.02:
+                    old_step = step_size
                     step_size = 0.02  # Fine steps (was 0.005, too slow)
+                    self._log_info(f"    Switching to finer steps: {old_step:.3f} → {step_size:.3f}mm")
                     
             # Fine detection using derivative analysis (after coarse)
             if (detection_methods['coarse'] and not detection_methods['fine'] 
@@ -2638,6 +2646,10 @@ class ProbeEddy:
                     recent_median = float(np.median(recent_rates))
                     prev_median = float(np.median(prev_rates))
                     
+                    # Debug fine detection conditions
+                    self._log_info(f"      Fine check: prev_med={prev_median:.0f}, recent_med={recent_median:.0f}, "
+                                  f"freq_delta={freq_delta:.0f}, fine_thresh={thresholds['fine_abs']:.0f}")
+                    
                     # Detect significant slowdown (improved from threshold_scan)
                     # Only trigger if both rates are positive (frequency increasing)
                     if (prev_median > 1000 and recent_median > 0 and  # Both positive rates
@@ -2648,6 +2660,18 @@ class ProbeEddy:
                         detection_methods['fine'] = True
                         slowdown_ratio = prev_median / recent_median if recent_median > 0 else float('inf')
                         self._log_info(f"    Fine detection at Z={current_z:.3f}mm (slowdown: {slowdown_ratio:.1f}x)")
+                    else:
+                        # Log why fine detection didn't trigger
+                        reasons = []
+                        if prev_median <= 1000:
+                            reasons.append(f"prev_median({prev_median:.0f}) <= 1000")
+                        if recent_median <= 0:
+                            reasons.append(f"recent_median({recent_median:.0f}) <= 0") 
+                        if recent_median >= prev_median / 2.0:
+                            reasons.append(f"no slowdown({recent_median:.0f} >= {prev_median/2.0:.0f})")
+                        if freq_delta <= thresholds['fine_abs']:
+                            reasons.append(f"freq_delta({freq_delta:.0f}) <= fine_thresh({thresholds['fine_abs']:.0f})")
+                        self._log_info(f"      Fine detection blocked: {', '.join(reasons)}")
             
             # Peak detection - frequency starts decreasing (over-compression)
             if (detection_methods['fine'] and not detection_methods['peak']
@@ -2665,8 +2689,21 @@ class ProbeEddy:
             if freq_delta > thresholds['emergency_abs']:
                 self._log_warning(f"    Emergency stop at Z={current_z:.3f}mm ({freq_change_pct:.1f}%)")
                 break
+            
+            # Check if we have both coarse and fine detections (early termination)    
+            if detection_methods['coarse'] and detection_methods['fine']:
+                self._log_info(f"    Both coarse and fine detection complete, stopping scan")
+                break
                 
-            current_z -= step_size
+            # Move to next Z position
+            next_z = current_z - step_size
+            self._log_info(f"    Moving to next Z: {current_z:.3f} → {next_z:.3f} (step={step_size:.3f})")
+            current_z = next_z
+        
+        # End of scanning loop
+        self._log_info(f"    Scan completed at Z={current_z:.3f}mm")
+        self._log_info(f"    Scan results: coarse={coarse_detection_z}, fine={fine_detection_z}, peak={peak_detection_z}")
+        self._log_info(f"    Detection methods: {detection_methods}")
         
         # Select best detection method
         touch_z = self._select_best_detection_result(
