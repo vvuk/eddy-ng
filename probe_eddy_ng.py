@@ -2506,25 +2506,37 @@ class ProbeEddy:
                     th.manual_move([None, None, current_z], scan_speed)
                     
                     # Brief pause for data collection (simulate continuous sampling)
-                    th.dwell(0.02)  # 20ms sampling interval
+                    th.dwell(0.05)  # 50ms sampling interval for better data collection
                     th.wait_moves()
                     
-                    # Collect data if available
+                    # Always try to collect data
                     if len(sampler.freqs) > sample_count:
                         current_freq = sampler.freqs[-1]
                         current_time = sampler.times[-1] if sampler.times else 0
-                        
-                        # Store data with actual position
-                        positions.append(current_z)
-                        frequencies.append(current_freq)
-                        timestamps.append(current_time)
-                        sample_count += 1
-                        
-                        # Emergency stop check during movement
-                        freq_change_pct = ((current_freq - baseline_freq) / baseline_freq) * 100
-                        if freq_change_pct > thresholds['emergency_pct']:
-                            self._log_warning(f"    Emergency stop at {freq_change_pct:.1f}% frequency change")
-                            break
+                    elif len(sampler.freqs) > 0:
+                        # Use last available frequency if no new data
+                        current_freq = sampler.freqs[-1]
+                        current_time = sampler.times[-1] if sampler.times else 0
+                    else:
+                        # No data available, continue to next position
+                        self._log_debug(f"    Z={current_z:.3f}: no frequency data available")
+                        current_z -= step_size
+                        continue
+                    
+                    # Store data with actual position
+                    positions.append(current_z)
+                    frequencies.append(current_freq)
+                    timestamps.append(current_time if current_time else 0)
+                    sample_count = len(sampler.freqs)  # Update sample count
+                    
+                    # Debug output
+                    freq_change_pct = ((current_freq - baseline_freq) / baseline_freq) * 100
+                    self._log_info(f"    Z={current_z:.3f}: freq={current_freq:.0f}Hz change={freq_change_pct:.2f}%")
+                    
+                    # Emergency stop check during movement
+                    if freq_change_pct > thresholds['emergency_pct']:
+                        self._log_warning(f"    Emergency stop at {freq_change_pct:.1f}% frequency change")
+                        break
                     
                     current_z -= step_size
                 
