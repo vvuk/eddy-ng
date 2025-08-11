@@ -1811,14 +1811,14 @@ class ProbeEddy:
         lift_speed = gcmd.get_float("LIFT_SPEED", self.params.lift_speed, above=0.0)
         samples = gcmd.get_int("SAMPLES", 3, minval=1)
         tolerance = gcmd.get_float("TOLERANCE", 0.010, above=0.0)
-        start_z = gcmd.get_float("START_Z", 5.0, above=2.0)
+        start_z = gcmd.get_float("START_Z", 3.0, above=2.0)  # Reduced range for speed
         home_z = gcmd.get_int("HOME_Z", 1) == 1
         z_offset = gcmd.get_float("Z_OFFSET", 0.0)  # Manual offset adjustment for survey
         
         # High-precision TOUCH mode integration
         use_touch = gcmd.get_int("TOUCH", 0) == 1
         touch_speed = gcmd.get_float("TOUCH_SPEED", 0.5, above=0.1)
-        touch_samples = gcmd.get_int("TOUCH_SAMPLES", 5, minval=3, maxval=10)
+        touch_samples = gcmd.get_int("TOUCH_SAMPLES", 3, minval=2, maxval=10)  # Reduced from 5 for speed
         auto_touch = gcmd.get_int("AUTO_TOUCH", 0) == 1  # Smart switching based on conditions
         
         self._log_info(f"SURVEY parameters: samples={samples}, tolerance={tolerance:.4f}, use_touch={use_touch}, auto_touch={auto_touch}")
@@ -1970,9 +1970,9 @@ class ProbeEddy:
             raise self._printer.command_error("Threshold scan requires polynomial calibration. Run PROBE_EDDY_NG_CALIBRATE_POLY first.")
 
         # Parameters
-        start_z = gcmd.get_float("START_Z", 2.0, above=0.5)
+        start_z = gcmd.get_float("START_Z", 1.5, above=0.5)  # Optimized for speed
         approach_speed = gcmd.get_float("APPROACH_SPEED", 1.0, above=0.1)
-        scan_speed = gcmd.get_float("SCAN_SPEED", 0.5, above=0.1)
+        scan_speed = gcmd.get_float("SCAN_SPEED", 1.0, above=0.1)  # 2x faster
         retries = gcmd.get_int("RETRIES", 3, minval=1)
 
         # Display scan parameters
@@ -2133,7 +2133,7 @@ class ProbeEddy:
 
                 # Take a reading at this position
                 with self.start_sampler(calculate_heights=False) as sampler:
-                    th.dwell(0.05)  # Wait for samples - reduced from 0.1 to 0.05
+                    th.dwell(0.03)  # Ultra-fast sampling - reduced from 0.05
                     th.wait_moves()
                     sampler.finish()
 
@@ -2478,35 +2478,25 @@ class ProbeEddy:
         return touch_z
     
     def _get_stable_baseline_frequency(self) -> Optional[float]:
-        """Get stable baseline frequency with multiple samples"""
+        """Get stable baseline frequency with ultra-fast sampling for speed"""
         th = self._printer.lookup_object("toolhead")
-        baseline_samples = []
         
-        # Take 1 baseline sample for speed
+        # Ultra-fast baseline collection - single sample only
         try:
             with self.start_sampler(calculate_heights=False) as sampler:
-                th.dwell(0.1)  # Longer dwell for stability
+                th.dwell(0.02)  # Ultra-short dwell for maximum speed (was 0.05s)
                 th.wait_moves()
                 sampler.finish()
             
             if sampler.raw_count > 0:
-                freq = sampler.freqs[-1]
-                baseline_samples.append(freq)
+                baseline_freq = sampler.freqs[-1]
+                return baseline_freq
             else:
                 self._log_error("Failed to get baseline sample - no data")
                 return None
         except Exception as e:
             self._log_error(f"Exception in baseline sample: {e}")
             return None
-        
-        # Check stability of baseline
-        baseline_freq = float(np.median(baseline_samples))
-        baseline_std = float(np.std(baseline_samples))
-        
-        if baseline_std > baseline_freq * 0.002:  # 0.2% variation tolerance
-            self._log_warning(f"Unstable baseline: std={baseline_std:.1f} ({baseline_std/baseline_freq*100:.2f}%)")
-        
-        return baseline_freq
     
     def _calculate_adaptive_thresholds(self, baseline_freq: float, threshold_auto: bool) -> dict:
         """Calculate adaptive thresholds based on baseline frequency and conditions"""
@@ -2549,7 +2539,7 @@ class ProbeEddy:
         
         # Detection state
         current_z = start_z
-        step_size = 0.05  # Start with faster steps (was 0.01mm, too slow)
+        step_size = 0.1  # Start with larger steps for speed (was 0.05mm)
         coarse_detection_z = None
         fine_detection_z = None
         peak_detection_z = None
@@ -2562,14 +2552,15 @@ class ProbeEddy:
         
         self._log_info(f"    Starting precision scan from Z={start_z:.3f}mm")
         
-        while current_z > -0.5:  # Safety limit
-            # Move to current position  
-            th.manual_move([None, None, current_z], touch_speed)
+        while current_z > -0.3:  # Reduced safety limit for speed (was -0.5mm)
+            # Move to current position with speed optimization
+            move_speed = min(touch_speed * 1.5, 3.0) if current_z > 0.5 else touch_speed  # Faster above 0.5mm
+            th.manual_move([None, None, current_z], move_speed)
             th.wait_moves()
             
             # Take frequency measurement
             with self.start_sampler(calculate_heights=False) as sampler:
-                th.dwell(0.03)  # Quick sampling for precision
+                th.dwell(0.02)  # Ultra-quick sampling for speed
                 th.wait_moves()
                 sampler.finish()
                 
@@ -2717,6 +2708,18 @@ class ProbeEddy:
                 self._log_info(f"    Both coarse and fine detection complete, stopping scan")
                 break
                 
+            # Adaptive step size based on frequency change for speed optimization
+            if len(freqs) >= 2:
+                freq_change_pct = (freq_delta / baseline_freq) * 100
+                if freq_change_pct > 1.2:  # Close to contact - use fine steps
+                    step_size = 0.02
+                elif freq_change_pct > 0.6:  # Approaching contact - medium steps
+                    step_size = 0.05
+                elif freq_change_pct > 0.2:  # Slight change - smaller steps  
+                    step_size = 0.08
+                else:  # Far from contact - large steps for speed
+                    step_size = 0.1
+                    
             # Move to next Z position
             current_z -= step_size
         
