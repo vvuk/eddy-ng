@@ -2470,12 +2470,142 @@ class ProbeEddy:
             
         thresholds = self._calculate_adaptive_thresholds(baseline_freq, threshold_auto)
         
-        # High-precision touch detection
-        touch_z = self._multi_method_touch_detection(
+        # Try Cartographer-style continuous detection first (faster)
+        touch_z = self._cartographer_continuous_detection(
             start_z, touch_speed, baseline_freq, thresholds
         )
         
+        # Fallback to step-wise detection if continuous fails
+        if touch_z is None:
+            self._log_info("    Continuous detection failed, falling back to step-wise method")
+            touch_z = self._multi_method_touch_detection(
+                start_z, touch_speed, baseline_freq, thresholds
+            )
+        
         return touch_z
+    
+    def _cartographer_continuous_detection(self, start_z: float, touch_speed: float,
+                                         baseline_freq: float, thresholds: dict) -> Optional[float]:
+        """Cartographer-style continuous movement with real-time touch detection"""
+        th = self._printer.lookup_object("toolhead")
+        
+        self._log_info(f"    Starting Cartographer-style continuous scan from Z={start_z:.3f}mm")
+        
+        # Calculate movement parameters
+        target_z = -0.2  # Emergency stop depth
+        scan_speed = min(touch_speed * 0.8, 1.5)  # Controlled speed for accuracy
+        
+        # Data collection arrays
+        positions, frequencies, timestamps = [], [], []
+        detection_z = None
+        
+        try:
+            # Start continuous data collection
+            with self.start_sampler(calculate_heights=True) as sampler:
+                # Begin continuous movement (non-blocking)
+                th.manual_move([None, None, target_z], scan_speed, sync=False)
+                
+                # Collect data during movement with real-time analysis
+                sample_count = 0
+                last_analysis_time = 0
+                
+                while detection_z is None:
+                    current_pos = th.get_position()
+                    current_z = current_pos[2]
+                    
+                    # Emergency stop check
+                    if current_z <= target_z + 0.01:
+                        self._log_warning("    Reached emergency depth without contact detection")
+                        break
+                    
+                    # Very brief pause for stable sampling
+                    th.dwell(0.01)  # Minimal delay for continuous operation
+                    
+                    # Check for new frequency data
+                    if len(sampler.freqs) > sample_count:
+                        # Get latest data
+                        current_freq = sampler.freqs[-1]
+                        current_time = sampler.times[-1] if sampler.times else 0
+                        
+                        # Store data
+                        positions.append(current_z)
+                        frequencies.append(current_freq)
+                        timestamps.append(current_time)
+                        sample_count += 1
+                        
+                        # Perform real-time analysis every few samples
+                        if len(frequencies) >= 5 and sample_count % 3 == 0:
+                            detection_z = self._analyze_continuous_data(
+                                positions, frequencies, baseline_freq, thresholds, current_z
+                            )
+                            
+                            if detection_z:
+                                self._log_info(f"    ✓ CONTINUOUS TOUCH DETECTED at Z={detection_z:.4f}mm")
+                                break
+                
+                # Stop movement when touch is detected
+                if detection_z:
+                    th.flush_step_generation()  # Stop current movement
+                    
+                sampler.finish()
+                
+        except Exception as e:
+            self._log_error(f"Continuous detection failed: {e}")
+            return None
+        
+        # Wait for movement to complete
+        th.wait_moves()
+        
+        return detection_z
+    
+    def _analyze_continuous_data(self, positions: List[float], frequencies: List[float],
+                               baseline_freq: float, thresholds: dict, current_z: float) -> Optional[float]:
+        """Analyze continuous data stream for touch detection"""
+        if len(frequencies) < 5:
+            return None
+        
+        # Current frequency change
+        current_freq = frequencies[-1]
+        freq_change_pct = ((current_freq - baseline_freq) / baseline_freq) * 100
+        
+        # Calculate frequency derivative (rate of change)
+        if len(positions) >= 3:
+            # Use last 3 points for stability
+            recent_pos = positions[-3:]
+            recent_freq = frequencies[-3:]
+            
+            # Calculate average rate of frequency change
+            rates = []
+            for i in range(1, len(recent_pos)):
+                dz = recent_pos[i-1] - recent_pos[i]  # Position difference (negative, moving down)
+                df = recent_freq[i] - recent_freq[i-1]  # Frequency difference
+                if abs(dz) > 0.001:  # Avoid division by zero
+                    rates.append(df / dz)  # Hz per mm
+            
+            if len(rates) >= 2:
+                current_rate = rates[-1]
+                avg_rate = sum(rates) / len(rates)
+                
+                # Detect significant frequency increase with rate slowdown
+                if (freq_change_pct > thresholds['fine_pct'] and 
+                    len(rates) >= 2 and current_rate < avg_rate * 0.6):  # 40% rate slowdown
+                    
+                    # Additional validation: check for sustained contact
+                    if len(frequencies) >= 5:
+                        last_5_changes = []
+                        for i in range(len(frequencies)-5, len(frequencies)):
+                            change = ((frequencies[i] - baseline_freq) / baseline_freq) * 100
+                            last_5_changes.append(change)
+                        
+                        # Ensure frequency is consistently above threshold
+                        if all(change > thresholds['coarse_pct'] for change in last_5_changes[-3:]):
+                            return current_z
+        
+        # Emergency detection
+        if freq_change_pct > thresholds['emergency_pct']:
+            return current_z
+        
+        return None
     
     def _get_stable_baseline_frequency(self) -> Optional[float]:
         """Get stable baseline frequency with ultra-fast sampling for speed"""
