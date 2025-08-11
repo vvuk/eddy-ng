@@ -3863,7 +3863,16 @@ class ProbeEddyEndstopWrapper:
     def _handle_homing_move_begin(self, hmove):
         if self not in hmove.get_mcu_endstops():
             return
-        self._sampler = self.eddy.start_sampler()
+            
+        # Check if we're in touch detection mode and sampler is already active
+        if hasattr(self, '_touch_mode') and self._touch_mode and self.eddy._sampler:
+            # Use existing sampler for touch detection
+            self._sampler = self.eddy._sampler
+            self.eddy._log_debug("Using existing sampler for touch detection homing")
+        else:
+            # Normal homing - start new sampler
+            self._sampler = self.eddy.start_sampler()
+            
         self._homing_in_progress = True
         # if we're doing a tap, we're already in the right position;
         # otherwise move there
@@ -3873,7 +3882,14 @@ class ProbeEddyEndstopWrapper:
     def _handle_homing_move_end(self, hmove):
         if self not in hmove.get_mcu_endstops():
             return
-        self._sampler.finish()
+            
+        # Don't finish sampler if we're in touch detection mode - let the calling code handle it
+        if hasattr(self, '_touch_mode') and self._touch_mode:
+            self.eddy._log_debug("Touch detection mode - not finishing sampler in homing_move_end")
+        else:
+            # Normal homing - finish the sampler
+            self._sampler.finish()
+            
         self._homing_in_progress = False
 
     def _handle_home_rails_end(self, homing_state, rails):
