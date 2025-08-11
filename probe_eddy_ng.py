@@ -2496,6 +2496,12 @@ class ProbeEddy:
         # Start sampler BEFORE probing movement (required by Klipper)
         sampler = None
         try:
+            # Ensure no previous sampler is still active
+            if self._sampler:
+                self._log_debug("Finishing previous sampler before starting touch detection")
+                self._sampler.finish()
+                self._sampler = None
+            
             # Start the sampler first (required by endstop wrapper)
             sampler = self.start_sampler(calculate_heights=True)
             
@@ -2557,7 +2563,7 @@ class ProbeEddy:
             with self.start_sampler(calculate_heights=False) as sampler:
                 th.dwell(0.05)  # Higher accuracy baseline
                 th.wait_moves()
-                sampler.finish()
+                # Don't call sampler.finish() here - the 'with' block will handle it
             
             if sampler.raw_count > 0:
                 baseline_freq = sampler.freqs[-1]
