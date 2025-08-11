@@ -3941,23 +3941,50 @@ class ProbeEddyEndstopWrapper:
         self.last_trigger_time = 0.0
         self.last_tap_start_time = 0.0
 
-        trigger_height = self._home_trigger_height
-        safe_height = trigger_height + self._home_trigger_safe_start_offset
-
-        if self.tap_config is None:
-            safe_time = print_time + self.eddy.params.home_trigger_safe_time_offset
-            trigger_freq = self.eddy.height_to_freq(trigger_height)
-            safe_freq = self.eddy.height_to_freq(safe_height)
+        # Check if we're in touch detection mode
+        if hasattr(self, '_touch_mode') and self._touch_mode:
+            # Touch detection mode - use current frequency and position for safe operation
+            th = self.eddy._printer.lookup_object("toolhead")
+            current_pos = th.get_position()
+            current_z = current_pos[2]
+            
+            # Get current frequency for safety calculations
+            try:
+                current_freq = self.eddy.get_frequency()
+                # Set trigger frequency to touch threshold
+                trigger_freq = self._baseline_freq * (1.0 - self._thresholds['fine'] / 100.0)
+                # Use current frequency as safe frequency (no safety height restrictions)
+                safe_freq = current_freq
+                safe_time = 0  # No time-based safety restrictions for touch detection
+                
+                self.eddy._log_debug(
+                    f"Touch detection home_start: current_z={current_z:.3f} current_freq={current_freq:.2f} trigger_freq={trigger_freq:.2f}"
+                )
+            except Exception as e:
+                self.eddy._log_debug(f"Touch detection home_start: failed to get current frequency: {e}")
+                # Fallback to baseline frequency
+                trigger_freq = self._baseline_freq * (1.0 - self._thresholds['fine'] / 100.0)
+                safe_freq = self._baseline_freq
+                safe_time = 0
         else:
-            # TODO: the home trigger safe time won't work, because we'll pass
-            # the home_trigger_height maybe by default given where tap might
-            # start
-            safe_time = 0
-            # initial freq to pass through
-            safe_freq = self.eddy.height_to_freq(self._home_trigger_height)
-            # second freq to pass through; toolhead acceleration
-            # must be smooth after this point
-            trigger_freq = self.eddy.height_to_freq(self.eddy.params.tap_trigger_safe_start_height)
+            # Standard homing mode
+            trigger_height = self._home_trigger_height
+            safe_height = trigger_height + self._home_trigger_safe_start_offset
+
+            if self.tap_config is None:
+                safe_time = print_time + self.eddy.params.home_trigger_safe_time_offset
+                trigger_freq = self.eddy.height_to_freq(trigger_height)
+                safe_freq = self.eddy.height_to_freq(safe_height)
+            else:
+                # TODO: the home trigger safe time won't work, because we'll pass
+                # the home_trigger_height maybe by default given where tap might
+                # start
+                safe_time = 0
+                # initial freq to pass through
+                safe_freq = self.eddy.height_to_freq(self._home_trigger_height)
+                # second freq to pass through; toolhead acceleration
+                # must be smooth after this point
+                trigger_freq = self.eddy.height_to_freq(self.eddy.params.tap_trigger_safe_start_height)
 
         trigger_completion = self._dispatch.start(print_time)
 
@@ -3973,6 +4000,9 @@ class ProbeEddyEndstopWrapper:
             else:
                 raise self._printer.command_error(f"Invalid tap mode: {self.tap_config.mode}")
             tap_threshold = self.tap_config.threshold
+        elif hasattr(self, '_touch_mode') and self._touch_mode:
+            mode = "touch"  # Special mode for touch detection
+            tap_threshold = None
         else:
             mode = "home"
             tap_threshold = None
