@@ -3963,7 +3963,7 @@ class ProbeEddyEndstopWrapper:
             # Set trigger frequency to touch threshold
             baseline_freq = self.touch_config.baseline_freq
             thresholds = self.touch_config.thresholds
-            trigger_freq = baseline_freq * (1.0 - thresholds['fine'] / 100.0)
+            trigger_freq = baseline_freq * (1.0 - thresholds['fine_pct'] / 100.0)
             # Use baseline frequency as safe frequency (no safety height restrictions needed)
             safe_freq = baseline_freq
             safe_time = 0  # No time-based safety restrictions for touch detection
@@ -4125,15 +4125,15 @@ class ProbeEddyEndstopWrapper:
             detection_level = None
             
             # Level 1: Fine threshold (most sensitive)  
-            if freq_change_pct > thresholds['fine']:
+            if freq_change_pct > thresholds['fine_pct']:
                 detection_level = "fine"
             
             # Level 2: Coarse threshold (standard)
-            elif freq_change_pct > thresholds['coarse']:
+            elif freq_change_pct > thresholds['coarse_pct']:
                 detection_level = "coarse"
             
             # Level 3: Emergency threshold (safety)
-            if freq_change_pct > thresholds['emergency']:
+            if freq_change_pct > thresholds['emergency_pct']:
                 detection_level = "emergency"
                 
             if detection_level:
