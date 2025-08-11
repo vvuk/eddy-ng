@@ -1,5 +1,7 @@
 .idea/
 .vscode/
+__pycache__/
+.claude/
 .DS_Store
 *~
 *.orig

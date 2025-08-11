@@ -532,6 +532,16 @@ class ProbeEddy:
         self._survey_threshold = None
         self._survey_threshold_confidence = 0.0
 
+        # Load saved threshold from config if available
+        self._saved_survey_threshold = asfc.getfloat(self._full_name, "survey_threshold", fallback=None)
+        self._saved_survey_threshold_confidence = asfc.getfloat(self._full_name, "survey_threshold_confidence", fallback=0.0)
+
+        # Use saved threshold if available and confidence is good
+        if self._saved_survey_threshold is not None and self._saved_survey_threshold_confidence > 0.5:
+            self._survey_threshold = self._saved_survey_threshold
+            self._survey_threshold_confidence = self._saved_survey_threshold_confidence
+            self._log_info(f"Loaded saved survey threshold: {self._survey_threshold:.3f}mm (confidence: {self._survey_threshold_confidence:.2f})")
+
         # define our own commands
         self._dummy_gcode_cmd: GCodeCommand = self._gcode.create_gcode_command("", "", {})
         self.define_commands(self._gcode)
@@ -615,6 +625,16 @@ class ProbeEddy:
             "PROBE_EDDY_NG_THRESHOLD_STATUS",
             self.cmd_THRESHOLD_STATUS,
             "Show current threshold status"
+        )
+        gcode.register_command(
+            "PROBE_EDDY_NG_THRESHOLD_SAVE",
+            self.cmd_THRESHOLD_SAVE,
+            "Save current threshold to config (requires SAVE_CONFIG)"
+        )
+        gcode.register_command(
+            "PROBE_EDDY_NG_THRESHOLD_CLEAR",
+            self.cmd_THRESHOLD_CLEAR,
+            "Clear saved threshold from config (requires SAVE_CONFIG)"
         )
         gcode.register_command(
             "PROBE_EDDY_NG_SET_TAP_OFFSET",
@@ -800,6 +820,11 @@ class ProbeEddy:
 
         if self.params.tap_drive_current != self._tap_drive_current or self.params.tap_drive_current == self._saved_tap_drive_current:
             configfile.set(self._full_name, "tap_drive_current", str(self._tap_drive_current))
+
+        # Save survey threshold if available
+        if self._saved_survey_threshold is not None and self._saved_survey_threshold_confidence > 0.0:
+            configfile.set(self._full_name, "survey_threshold", f"{self._saved_survey_threshold:.6f}")
+            configfile.set(self._full_name, "survey_threshold_confidence", f"{self._saved_survey_threshold_confidence:.3f}")
 
         for _, fmap in self._dc_to_fmap.items():
             fmap.save_calibration()
@@ -1878,6 +1903,17 @@ class ProbeEddy:
         scan_speed = gcmd.get_float("SCAN_SPEED", 0.5, above=0.1)
         retries = gcmd.get_int("RETRIES", 3, minval=1)
 
+        # Display scan parameters
+        self._log_info("=" * 50)
+        self._log_info("STARTING THRESHOLD SCAN")
+        self._log_info("=" * 50)
+        self._log_debug(f"Parameters:")
+        self._log_debug(f"  Start Z: {start_z:.2f}mm")
+        self._log_debug(f"  Scan speed: {scan_speed:.2f}mm/s")
+        self._log_debug(f"  Retries: {retries}")
+        self._log_debug(f"  Current trigger height: {self.params.home_trigger_height:.3f}mm")
+        self._log_debug("-" * 50)
+
         # Log with modified name for threshold scanning
         orig_debug = self.params.debug
         # Enable debug for threshold scanning
@@ -1887,7 +1923,8 @@ class ProbeEddy:
             threshold_results = []
 
             for attempt in range(retries):
-                self._log_info(f"Threshold scan attempt {attempt + 1}/{retries}")
+                self._log_info(f"\n→ Scan attempt {attempt + 1}/{retries}")
+                self._log_debug(f"  Moving to start position Z={start_z:.2f}mm...")
 
                 # Perform threshold scan
                 threshold = self._do_threshold_scan(
@@ -1896,11 +1933,15 @@ class ProbeEddy:
 
                 if threshold is not None:
                     threshold_results.append(threshold)
-                    self._log_info(f"Found threshold: {threshold:.3f}mm")
+                    self._log_info(f"  ✓ Found contact at Z={threshold:.3f}mm")
                 else:
-                    self._log_warning(f"Attempt {attempt + 1} failed to find threshold")
+                    self._log_warning(f"  ✗ Attempt {attempt + 1} failed to detect contact")
 
             # Analyze results
+            self._log_info("\n" + "=" * 50)
+            self._log_info("SCAN RESULTS")
+            self._log_info("=" * 50)
+
             if len(threshold_results) >= 2:
                 median_threshold = float(np.median(threshold_results))
                 std_dev = float(np.std(threshold_results))
@@ -1910,21 +1951,66 @@ class ProbeEddy:
                 self._survey_threshold = median_threshold - self.params.home_trigger_height
                 self._survey_threshold_confidence = confidence
 
-                self._log_info(f"Threshold scan complete: {median_threshold:.3f}mm "
-                            f"(std: {std_dev:.4f}, confidence: {confidence:.2f})")
+                # Display detailed results
+                self._log_debug(f"Successful scans: {len(threshold_results)}/{retries}")
+                self._log_debug(f"Contact points: {[f'{t:.3f}' for t in threshold_results]}")
+                self._log_debug(f"Median contact: {median_threshold:.3f}mm")
+                self._log_debug(f"Standard deviation: {std_dev:.4f}mm")
+                self._log_info(f"Confidence level: {confidence:.2f} ({self._get_confidence_rating(confidence)})")
+                self._log_debug("-" * 50)
+                self._log_info(f"THRESHOLD OFFSET: {self._survey_threshold:.3f}mm")
+                self._log_debug(f"(relative to trigger height {self.params.home_trigger_height:.3f}mm)")
 
                 if confidence < 0.8:
-                    self._log_warning("Low confidence threshold. Consider adjusting scan parameters.")
+                    self._log_warning("\n⚠ WARNING: Low confidence threshold")
+                    self._log_debug("  Consider:")
+                    self._log_debug("  - Cleaning the nozzle and bed surface")
+                    self._log_debug("  - Adjusting scan speed (try SCAN_SPEED=0.3)")
+                    self._log_debug("  - Increasing retries (try RETRIES=5)")
+                else:
+                    self._log_info("\n✓ HIGH CONFIDENCE THRESHOLD DETECTED")
+
+                # Suggest saving if not already saved
+                if self._saved_survey_threshold != self._survey_threshold:
+                    self._log_info("\n Run PROBE_EDDY_NG_THRESHOLD_SAVE to save this threshold")
+                    self._log_info("         Then SAVE_CONFIG to make it permanent")
 
             elif len(threshold_results) == 1:
-                self._survey_threshold = threshold_results[0]
+                self._survey_threshold = threshold_results[0] - self.params.home_trigger_height
                 self._survey_threshold_confidence = 0.5
-                self._log_warning(f"Only one successful scan. Threshold: {self._survey_threshold:.3f}mm")
+                self._log_warning(f"⚠ Only 1 successful scan out of {retries} attempts")
+                self._log_debug(f"Contact point: {threshold_results[0]:.3f}mm")
+                self._log_info(f"Threshold offset: {self._survey_threshold:.3f}mm")
+                self._log_info(f"Confidence: LOW (0.50)")
+                self._log_debug("\nRecommendation: Re-run scan with adjusted parameters")
             else:
+                self._log_error("✗ SCAN FAILED")
+                self._log_error(f"All {retries} attempts failed to detect contact")
+                self._log_debug("\nPossible causes:")
+                self._log_debug("  - Nozzle too far from bed (try lower START_Z)")
+                self._log_debug("  - Dirty nozzle or bed surface")
+                self._log_debug("  - Incorrect probe calibration")
                 raise self._printer.command_error("All threshold scan attempts failed")
+
+            self._log_info("=" * 50)
+            self._log_info("THRESHOLD SCAN COMPLETE")
+            self._log_info("=" * 50)
 
         finally:
             self.params.debug = orig_debug
+
+    def _get_confidence_rating(self, confidence: float) -> str:
+        """Get human-readable confidence rating"""
+        if confidence >= 0.9:
+            return "EXCELLENT"
+        elif confidence >= 0.8:
+            return "HIGH"
+        elif confidence >= 0.6:
+            return "MEDIUM"
+        elif confidence >= 0.4:
+            return "LOW"
+        else:
+            return "VERY LOW"
 
     def _do_threshold_scan(self, start_z: float, approach_speed: float,
                           scan_speed: float) -> float:
@@ -1948,6 +2034,7 @@ class ProbeEddy:
         touch_height = None
 
         # Collect baseline frequency at start height
+        self._log_debug(f"  Collecting baseline frequency...")
         with self.start_sampler(calculate_heights=False) as sampler:
             th.dwell(0.1)
             th.wait_moves()
@@ -1955,13 +2042,16 @@ class ProbeEddy:
 
         if sampler.raw_count > 0:
             baseline_freq = sampler.freqs[-1]
-            self._log_debug(f"Baseline frequency at z={start_z:.3f}: {baseline_freq:.1f}")
+            self._log_debug(f"  Baseline: {baseline_freq:.1f} Hz at Z={start_z:.3f}mm")
         else:
             raise self._printer.command_error("Failed to get baseline frequency")
 
         # Arrays for acceleration-based analysis
         freq_derivatives = []  # First derivative (rate of change)
         freq_accelerations = []  # Second derivative (acceleration)
+
+        self._log_debug(f"  Scanning for bed contact...")
+        progress_counter = 0
 
         try:
             while current_z > -0.250:  # Safety limit - stop just before bed contact
@@ -1981,6 +2071,12 @@ class ProbeEddy:
                     heights.append(current_z)
                     freqs.append(current_freq)
                     times.append(sampler.times[-1])
+
+                    # Show progress every 10 steps (0.2mm)
+                    progress_counter += 1
+                    if progress_counter % 10 == 0:
+                        freq_change = ((current_freq - baseline_freq) / baseline_freq) * 100
+                        self._log_debug(f"    Z={current_z:.3f}mm, Freq change: {freq_change:+.1f}%")
 
                     # Calculate derivatives after we have enough points
                     if len(freqs) >= 3:
@@ -2007,46 +2103,54 @@ class ProbeEddy:
 
                         # Contact detection using sliding median filter approach:
                         min_freq_increase = baseline_freq * 0.015  # 1.5% minimum increase
-                        
+
                         # Sliding median filter detection after we have enough data points
                         if len(freq_derivatives) >= 10:
                             # Compare recent vs previous rate medians (5 points each)
                             recent_rates = freq_derivatives[-5:]  # Last 5 rates
                             prev_rates = freq_derivatives[-10:-5]  # Previous 5 rates
-                            
+
                             recent_median = float(np.median(recent_rates))
                             prev_median = float(np.median(prev_rates))
-                            
+
                             self._log_debug(f"Z={current_z:.3f}, δf={freq_delta:.1f}, "
                                           f"prev_rate_med={prev_median:.0f}, recent_rate_med={recent_median:.0f}")
-                            
+
                             # Detection criteria:
                             # 1. Minimum frequency increase
                             # 2. Significant slowdown: previous median > recent median * factor
                             slowdown_factor = 1.5  # 50% slowdown threshold
-                            
+
                             if (freq_delta > min_freq_increase and
-                                prev_median > 20000 and  # Previous growth was significant 
+                                prev_median > 20000 and  # Previous growth was significant
                                 recent_median < prev_median / slowdown_factor):  # Strong slowdown detected
-                                
+
                                 touch_height = current_z
-                                self._log_debug(f"Contact detected: z={current_z:.3f}, δf={freq_delta:.1f}, "
-                                              f"slowdown {prev_median:.0f}→{recent_median:.0f}")
+                                freq_change_pct = ((current_freq - baseline_freq) / baseline_freq) * 100
+                                self._log_info(f"  ✓ BED CONTACT DETECTED!")
+                                self._log_debug(f"    Z position: {current_z:.3f}mm")
+                                self._log_debug(f"    Frequency change: {freq_change_pct:.1f}%")
+                                self._log_debug(f"    Growth rate slowdown: {prev_median/recent_median:.1f}x")
                                 break
-                        
+
                         # Fallback detection for early stages or emergency cases
                         elif (freq_delta > min_freq_increase and
                             (current_rate < 10000 or abs(avg_accel) > 300000)):
 
                             touch_height = current_z
-                            self._log_debug(f"Contact detected: z={current_z:.3f}, δf={freq_delta:.1f}, "
-                                          f"rate={current_rate:.0f}, accel={avg_accel:.0f}")
+                            freq_change_pct = ((current_freq - baseline_freq) / baseline_freq) * 100
+                            self._log_info(f"  ✓ BED CONTACT DETECTED (fallback method)")
+                            self._log_debug(f"    Z position: {current_z:.3f}mm")
+                            self._log_debug(f"    Frequency change: {freq_change_pct:.1f}%")
                             break
 
                         # Emergency break if frequency increase is massive (avoid crashes)
                         if freq_delta > baseline_freq * 0.06:  # 6% emergency threshold
                             touch_height = current_z
-                            self._log_debug(f"Emergency stop at z={current_z:.3f}, massive δf={freq_delta:.1f}")
+                            freq_change_pct = ((current_freq - baseline_freq) / baseline_freq) * 100
+                            self._log_warning(f"  ⚠ EMERGENCY STOP - Large frequency change detected")
+                            self._log_debug(f"    Z position: {current_z:.3f}mm")
+                            self._log_debug(f"    Frequency change: {freq_change_pct:.1f}%")
                             break
 
                     last_freq = current_freq
@@ -2055,11 +2159,22 @@ class ProbeEddy:
 
                 current_z -= step_size
 
+            # Check if we've gone through the entire scan without detecting contact
+            if touch_height is None:
+                self._log_warning(f"  ✗ No contact detected during scan")
+                self._log_debug(f"    Scanned from Z={start_z:.3f}mm to Z={current_z:.3f}mm")
+                if len(freqs) > 0:
+                    final_freq_change = ((freqs[-1] - baseline_freq) / baseline_freq) * 100
+                    self._log_debug(f"    Final frequency change: {final_freq_change:.1f}%")
+                    if final_freq_change < 1.0:
+                        self._log_debug(f"    Suggestion: Nozzle may be too far from bed, try lower START_Z")
+
         except Exception as e:
             self._log_error(f"Threshold scan failed: {e}")
             return None
 
         # Lift back up
+        self._log_debug(f"  Returning to safe height...")
         th.manual_move([None, None, start_z], 10.0)
         th.wait_moves()
 
@@ -2079,9 +2194,45 @@ class ProbeEddy:
                 status = "LOW (not recommended, re-scan required)"
 
             self._log_msg(f"Status: {status}")
+
+            # Check if saved threshold differs from current
+            if self._saved_survey_threshold != self._survey_threshold:
+                self._log_msg("Note: Current threshold differs from saved value. Run PROBE_EDDY_NG_THRESHOLD_SAVE to update.")
         else:
             self._log_msg("No dynamic threshold found. Run PROBE_EDDY_NG_THRESHOLD_SCAN first.")
             self._log_msg(f"Falling back to static trigger height: {self.params.home_trigger_height:.3f}mm")
+
+    def cmd_THRESHOLD_SAVE(self, gcmd: GCodeCommand):
+        """Save current threshold to config file"""
+        if self._survey_threshold is None:
+            raise self._printer.command_error("No threshold to save. Run PROBE_EDDY_NG_THRESHOLD_SCAN first.")
+
+        if self._survey_threshold_confidence < 0.5:
+            gcmd.respond_info("Warning: Threshold confidence is low. Consider re-scanning for better accuracy.")
+
+        configfile = self._printer.lookup_object("configfile")
+        configfile.set(self._full_name, "survey_threshold", f"{self._survey_threshold:.6f}")
+        configfile.set(self._full_name, "survey_threshold_confidence", f"{self._survey_threshold_confidence:.3f}")
+
+        # Update saved values
+        self._saved_survey_threshold = self._survey_threshold
+        self._saved_survey_threshold_confidence = self._survey_threshold_confidence
+
+        self._log_msg(f"Survey threshold {self._survey_threshold:.3f}mm saved to config (confidence: {self._survey_threshold_confidence:.2f})")
+        self._log_msg("Run SAVE_CONFIG to make it permanent")
+
+    def cmd_THRESHOLD_CLEAR(self, gcmd: GCodeCommand):
+        """Clear saved threshold from config file"""
+        # Clear runtime values
+        self._survey_threshold = None
+        self._survey_threshold_confidence = 0.0
+        self._saved_survey_threshold = None
+        self._saved_survey_threshold_confidence = 0.0
+
+        # Update config by saving config but threshold values will be None
+        # The save_config method will handle not writing None values
+        self._log_msg("Survey threshold cleared")
+        self._log_msg("Note: Threshold values will be removed on next SAVE_CONFIG")
 
     def cmd_TAP(self, gcmd: GCodeCommand):
         drive_current = self._sensor.get_drive_current()

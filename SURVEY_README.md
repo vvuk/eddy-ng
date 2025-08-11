@@ -82,14 +82,24 @@ gcode:
 
 ## Daily Usage
 
+### With Saved Threshold (Recommended)
+```gcode
+# After initial threshold scan and save
+G28 X Y
+SURVEY  # Uses saved threshold from config
+```
+
+### Without Saved Threshold  
 ```gcode
 # After printer power-on
 G28 X Y
-PROBE_EDDY_NG_THRESHOLD_SCAN  # Re-detect threshold (5-6 mins)
-SURVEY                        # Use your calibrated macro
+PROBE_EDDY_NG_THRESHOLD_SCAN  # Detect threshold (5-6 mins)
+PROBE_EDDY_NG_THRESHOLD_SAVE  # Save threshold to config
+SAVE_CONFIG                    # Make permanent (restarts Klipper)
+# After restart:
+G28 X Y
+SURVEY                         # Use saved threshold
 ```
-
-**Note:** Threshold detection must be re-run after each power cycle as it's not currently saved to config.
 
 ## Commands Reference
 
@@ -106,9 +116,11 @@ SURVEY                        # Use your calibrated macro
 - `SCAN_SPEED`: Movement speed during scan (default: 0.5)
 - `RETRIES`: Number of scan attempts (default: 3)
 
-### Status Commands
+### Threshold Management Commands
 ```gcode
 PROBE_EDDY_NG_THRESHOLD_STATUS  # Show current threshold and confidence
+PROBE_EDDY_NG_THRESHOLD_SAVE    # Save current threshold to config
+PROBE_EDDY_NG_THRESHOLD_CLEAR   # Clear saved threshold from config
 ```
 
 ## Technical Details
@@ -164,7 +176,7 @@ Unlike TAP mode which measures at a specific trigger height and applies temperat
 
 ### 🔄 Phase 3: Enhanced Features (IN PROGRESS)
 - [x] Automatic threshold detection eliminates manual Z_OFFSET guesswork
-- [ ] Persistent threshold storage in config file
+- [x] Persistent threshold storage in config file
 - [ ] Surface type detection (textured/smooth)
 - [ ] Adaptive sampling based on detected variance
 - [ ] Integration with bed mesh for temperature-independent leveling
@@ -183,7 +195,7 @@ Unlike TAP mode which measures at a specific trigger height and applies temperat
 ## Current Todo List
 
 ### High Priority
-1. **Implement persistent threshold storage** - Save threshold to config file to eliminate daily re-calibration
+1. ~~**Implement persistent threshold storage**~~ ✅ COMPLETED - Threshold can now be saved to config
 2. **Add configuration parameters for survey mode** - Make algorithm parameters configurable
 3. **Create automated test suite** - Ensure reliability across different printer configurations
 
@@ -198,7 +210,7 @@ Unlike TAP mode which measures at a specific trigger height and applies temperat
 
 ## Known Issues and Limitations
 
-1. **Threshold Re-calibration Required**: Must run THRESHOLD_SCAN after each power cycle (~5-6 minutes)
+1. ~~**Threshold Re-calibration Required**: Must run THRESHOLD_SCAN after each power cycle (~5-6 minutes)~~ - Fixed with persistent storage
 2. **Higher RMSE**: Survey mode typically has RMSE of 0.10-0.15mm vs 0.01-0.05mm for TAP
 3. **Algorithm Tuning**: May need parameter adjustment for different bed surfaces or probe heights
 
