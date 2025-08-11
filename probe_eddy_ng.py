@@ -2320,11 +2320,11 @@ class ProbeEddy:
         if not hasattr(current_map, '_use_polynomial') or not current_map._use_polynomial:
             raise self._printer.command_error("Touch detection requires polynomial calibration. Run PROBE_EDDY_NG_CALIBRATE_POLY first")
 
-        # Parse parameters with Cartographer-inspired defaults
-        samples = gcmd.get_int("SAMPLES", 5, minval=3, maxval=10)  # More samples for better accuracy
-        tolerance = gcmd.get_float("TOLERANCE", 0.015, above=0.005, maxval=0.1)
-        speed = gcmd.get_float("SPEED", 1.0, above=0.1, maxval=5.0)
-        touch_speed = gcmd.get_float("TOUCH_SPEED", 0.3, above=0.1, maxval=2.0)
+        # Parse parameters optimized for high precision
+        samples = gcmd.get_int("SAMPLES", 7, minval=3, maxval=15)  # More samples for higher precision
+        tolerance = gcmd.get_float("TOLERANCE", 0.010, above=0.003, maxval=0.1)  # Tighter tolerance
+        speed = gcmd.get_float("SPEED", 0.8, above=0.1, maxval=5.0)  # Slightly slower approach
+        touch_speed = gcmd.get_float("TOUCH_SPEED", 0.2, above=0.1, maxval=2.0)  # Slower touch for precision
         retract = gcmd.get_float("RETRACT", 2.0, above=0.5, maxval=10.0)
         start_z = gcmd.get_float("START_Z", 3.0, above=1.0, maxval=20.0)
         threshold_auto = gcmd.get_int("THRESHOLD_AUTO", 1, minval=0, maxval=1)
@@ -2484,10 +2484,10 @@ class ProbeEddy:
         
         self._log_info(f"    Starting Cartographer-style detection from Z={start_z:.3f}mm")
         
-        # Movement parameters for realistic speeds
+        # Movement parameters for high precision
         target_z = -0.2  # Emergency stop depth
-        scan_speed = min(touch_speed, 1.0)  # Max 1mm/s for accuracy
-        step_size = 0.05  # Reasonable mechanical step size (50 microns)
+        scan_speed = min(touch_speed * 0.5, 0.5)  # Slower for better accuracy: max 0.5mm/s
+        step_size = 0.02  # Smaller steps for better precision (20 microns)
         
         # Data collection arrays
         positions = []
@@ -2506,7 +2506,7 @@ class ProbeEddy:
                     th.manual_move([None, None, current_z], scan_speed)
                     
                     # Brief pause for data collection (simulate continuous sampling)
-                    th.dwell(0.05)  # 50ms sampling interval for better data collection
+                    th.dwell(0.08)  # 80ms sampling interval for more stable readings
                     th.wait_moves()
                     
                     # Always try to collect data
@@ -2562,116 +2562,214 @@ class ProbeEddy:
     
     def _cartographer_post_process(self, positions: List[float], frequencies: List[float],
                                  baseline_freq: float, thresholds: dict) -> Optional[float]:
-        """Post-process collected data using Cartographer-style algorithms"""
+        """Post-process collected data using advanced Cartographer-style algorithms"""
         
         self._log_info(f"    Post-processing {len(positions)} data points")
         
-        # Calculate frequency changes and derivatives
+        # Calculate frequency changes and smoothed derivatives for better accuracy
         freq_changes = []
-        freq_derivatives = []  # First derivative (rate of change)
-        freq_second_derivatives = []  # Second derivative (acceleration)
+        raw_derivatives = []
+        smoothed_derivatives = []
+        freq_second_derivatives = []
         
         for i, freq in enumerate(frequencies):
             freq_change_pct = ((freq - baseline_freq) / baseline_freq) * 100
             freq_changes.append(freq_change_pct)
         
-        # Calculate derivatives using central differences
+        # Calculate raw derivatives using central differences
         for i in range(1, len(positions) - 1):
-            if i > 0:
-                # First derivative (rate of frequency change per mm)
-                dz = positions[i-1] - positions[i+1]  # Z difference (negative, moving down)
-                df = frequencies[i+1] - frequencies[i-1]  # Frequency difference
-                if abs(dz) > 0.001:  # Avoid division by zero
-                    derivative = df / dz
-                    freq_derivatives.append(derivative)
-                else:
-                    freq_derivatives.append(0.0)
-        
-        # Calculate second derivatives (acceleration of frequency change)
-        for i in range(1, len(freq_derivatives) - 1):
-            dz = positions[i+1] - positions[i+2]  # Approximate Z step
-            dd = freq_derivatives[i+1] - freq_derivatives[i-1]  # Derivative difference
-            if abs(dz) > 0.001:
-                second_derivative = dd / dz
-                freq_second_derivatives.append(second_derivative)
+            # First derivative (rate of frequency change per mm)
+            dz = positions[i-1] - positions[i+1]  # Z difference (negative, moving down)
+            df = frequencies[i+1] - frequencies[i-1]  # Frequency difference
+            if abs(dz) > 0.001:  # Avoid division by zero
+                derivative = df / dz
+                raw_derivatives.append(derivative)
             else:
-                freq_second_derivatives.append(0.0)
+                raw_derivatives.append(0.0)
         
-        # Cartographer-style touch detection using multiple criteria
-        touch_candidates = []
+        # Apply smoothing to derivatives for noise reduction (3-point moving average)
+        for i in range(len(raw_derivatives)):
+            if i == 0 or i == len(raw_derivatives) - 1:
+                # Keep edge values as-is
+                smoothed_derivatives.append(raw_derivatives[i])
+            else:
+                # 3-point moving average for smoother signal
+                smooth_val = (raw_derivatives[i-1] + raw_derivatives[i] + raw_derivatives[i+1]) / 3.0
+                smoothed_derivatives.append(smooth_val)
         
-        # Method 1: Significant frequency increase with rate slowdown
-        for i in range(len(positions) - 3):
+        # Calculate second derivatives using smoothed data
+        for i in range(1, len(smoothed_derivatives) - 1):
+            if i + 1 < len(positions):
+                dz = positions[i] - positions[i+1]  # Z step
+                dd = smoothed_derivatives[i+1] - smoothed_derivatives[i-1]  # Derivative difference
+                if abs(dz) > 0.001:
+                    second_derivative = dd / dz
+                    freq_second_derivatives.append(second_derivative)
+                else:
+                    freq_second_derivatives.append(0.0)
+        
+        # Advanced multi-method touch detection with consensus requirement
+        method_detections = {
+            'rate_slowdown': [],
+            'accel_peak': [],
+            'sustained_increase': [],
+            'gradient_change': []
+        }
+        
+        # Method 1: Rate slowdown detection (improved with smoothed derivatives)
+        for i in range(len(positions) - 4):
             if (i < len(freq_changes) and 
-                i < len(freq_derivatives) and
-                freq_changes[i] > thresholds['coarse_pct']):
+                i < len(smoothed_derivatives) and
+                freq_changes[i] > thresholds['fine_pct']):  # Use fine threshold for better precision
                 
-                # Check for rate slowdown in next few points
-                if i + 2 < len(freq_derivatives):
-                    current_rate = abs(freq_derivatives[i])
-                    future_rate = abs(freq_derivatives[i + 2])
+                # Check for rate slowdown using smoothed derivatives
+                if i + 3 < len(smoothed_derivatives):
+                    current_rate = abs(smoothed_derivatives[i])
+                    future_rate = abs(smoothed_derivatives[i + 3])
                     
-                    # Detect significant slowdown (50% reduction in rate)
-                    if current_rate > 1000 and future_rate < current_rate * 0.5:
-                        touch_candidates.append({
+                    # More precise slowdown detection (40% reduction for higher accuracy)
+                    if current_rate > 3000 and future_rate < current_rate * 0.4:
+                        confidence = (freq_changes[i] / thresholds['fine_pct']) * (current_rate / 10000)
+                        method_detections['rate_slowdown'].append({
                             'position': positions[i],
-                            'method': 'rate_slowdown',
-                            'confidence': freq_changes[i] / thresholds['coarse_pct'],
-                            'freq_change': freq_changes[i]
+                            'confidence': confidence,
+                            'freq_change': freq_changes[i],
+                            'rate_change': (current_rate - future_rate) / current_rate
                         })
         
-        # Method 2: Peak in second derivative (acceleration change)
+        # Method 2: Gradient change detection (new method for high precision)
+        for i in range(2, len(freq_changes) - 2):
+            if freq_changes[i] > thresholds['fine_pct']:
+                # Look for inflection point - where frequency gradient changes significantly
+                before_grad = freq_changes[i] - freq_changes[i-2]
+                after_grad = freq_changes[i+2] - freq_changes[i]
+                
+                # Detect where gradient becomes much steeper (contact point)
+                if before_grad > 0 and after_grad > before_grad * 1.5:
+                    confidence = (freq_changes[i] / thresholds['fine_pct']) * (after_grad / before_grad)
+                    method_detections['gradient_change'].append({
+                        'position': positions[i],
+                        'confidence': confidence,
+                        'freq_change': freq_changes[i],
+                        'grad_ratio': after_grad / before_grad if before_grad > 0 else 1.0
+                    })
+        
+        # Method 3: Acceleration peak detection (improved)
         if len(freq_second_derivatives) >= 3:
             for i in range(1, len(freq_second_derivatives) - 1):
-                # Look for local maxima in second derivative
+                # Look for local maxima in second derivative with higher precision
                 if (freq_second_derivatives[i] > freq_second_derivatives[i-1] and
                     freq_second_derivatives[i] > freq_second_derivatives[i+1] and
-                    freq_second_derivatives[i] > 100000):  # Minimum threshold
+                    freq_second_derivatives[i] > 50000):  # Lowered threshold for sensitivity
                     
                     # Ensure corresponding frequency change is significant
                     pos_index = i + 2  # Adjust for derivative offset
                     if (pos_index < len(freq_changes) and 
                         freq_changes[pos_index] > thresholds['fine_pct']):
-                        touch_candidates.append({
+                        confidence = (freq_changes[pos_index] / thresholds['fine_pct']) * (freq_second_derivatives[i] / 100000)
+                        method_detections['accel_peak'].append({
                             'position': positions[pos_index],
-                            'method': 'accel_peak',
-                            'confidence': freq_changes[pos_index] / thresholds['fine_pct'],
-                            'freq_change': freq_changes[pos_index]
+                            'confidence': confidence,
+                            'freq_change': freq_changes[pos_index],
+                            'accel_peak': freq_second_derivatives[i]
                         })
         
-        # Method 3: Sustained frequency increase above threshold
+        # Method 4: Sustained increase detection (refined)
         sustained_start = None
+        sustained_peak_change = 0
         for i, freq_change in enumerate(freq_changes):
             if freq_change > thresholds['fine_pct']:
                 if sustained_start is None:
                     sustained_start = i
+                    sustained_peak_change = freq_change
+                else:
+                    sustained_peak_change = max(sustained_peak_change, freq_change)
             else:
                 if sustained_start is not None:
-                    # Check if we had sustained increase for at least 3 points
-                    if i - sustained_start >= 3:
-                        touch_candidates.append({
+                    # Check if we had sustained increase for at least 2 points (more sensitive)
+                    if i - sustained_start >= 2:
+                        confidence = sustained_peak_change / thresholds['fine_pct']
+                        method_detections['sustained_increase'].append({
                             'position': positions[sustained_start],
-                            'method': 'sustained_increase',
-                            'confidence': freq_changes[sustained_start] / thresholds['fine_pct'],
-                            'freq_change': freq_changes[sustained_start]
+                            'confidence': confidence,
+                            'freq_change': sustained_peak_change,
+                            'duration': i - sustained_start
                         })
                     sustained_start = None
+                    sustained_peak_change = 0
         
-        # Select best touch candidate
-        if not touch_candidates:
+        # Multi-method consensus analysis for high accuracy
+        all_candidates = []
+        method_count = 0
+        
+        # Collect all candidates from different methods
+        for method, detections in method_detections.items():
+            if detections:
+                method_count += 1
+                for detection in detections:
+                    detection['method'] = method
+                    all_candidates.append(detection)
+        
+        if not all_candidates:
             self._log_warning("    No touch candidates found in post-processing")
             return None
         
-        # Sort by confidence and select highest
-        touch_candidates.sort(key=lambda x: x['confidence'], reverse=True)
-        best_candidate = touch_candidates[0]
+        self._log_info(f"    Found {len(all_candidates)} candidates from {method_count} methods")
         
-        self._log_info(f"    ✓ CARTOGRAPHER TOUCH DETECTED at Z={best_candidate['position']:.4f}mm")
-        self._log_info(f"    Method: {best_candidate['method']}, "
-                       f"Confidence: {best_candidate['confidence']:.2f}, "
-                       f"Freq change: {best_candidate['freq_change']:.2f}%")
+        # Find consensus zones - areas where multiple methods agree
+        consensus_candidates = []
+        position_tolerance = 0.05  # 50 microns tolerance for consensus
         
-        return best_candidate['position']
+        for i, candidate in enumerate(all_candidates):
+            # Count how many other methods detect touch near this position
+            nearby_methods = set([candidate['method']])
+            nearby_positions = [candidate['position']]
+            total_confidence = candidate['confidence']
+            
+            for j, other in enumerate(all_candidates):
+                if i != j and abs(candidate['position'] - other['position']) <= position_tolerance:
+                    nearby_methods.add(other['method'])
+                    nearby_positions.append(other['position'])
+                    total_confidence += other['confidence']
+            
+            # Require at least 2 methods to agree for high confidence
+            if len(nearby_methods) >= 2:
+                avg_position = sum(nearby_positions) / len(nearby_positions)
+                consensus_score = len(nearby_methods) * total_confidence
+                
+                consensus_candidates.append({
+                    'position': avg_position,
+                    'methods': list(nearby_methods),
+                    'method_count': len(nearby_methods),
+                    'consensus_score': consensus_score,
+                    'avg_confidence': total_confidence / len(nearby_positions),
+                    'freq_change': candidate['freq_change']
+                })
+        
+        # Select best consensus candidate
+        if consensus_candidates:
+            # Sort by consensus score (method count * total confidence)
+            consensus_candidates.sort(key=lambda x: x['consensus_score'], reverse=True)
+            best_candidate = consensus_candidates[0]
+            
+            methods_str = '+'.join(best_candidate['methods'])
+            self._log_info(f"    ✓ CONSENSUS TOUCH DETECTED at Z={best_candidate['position']:.4f}mm")
+            self._log_info(f"    Methods: {methods_str} ({best_candidate['method_count']} agree)")
+            self._log_info(f"    Consensus score: {best_candidate['consensus_score']:.2f}, "
+                          f"Freq change: {best_candidate['freq_change']:.2f}%")
+            
+            return best_candidate['position']
+        else:
+            # Fallback: use single best candidate if no consensus
+            all_candidates.sort(key=lambda x: x['confidence'], reverse=True)
+            best_candidate = all_candidates[0]
+            
+            self._log_warning(f"    No consensus found - using single method detection")
+            self._log_info(f"    ✓ SINGLE METHOD TOUCH at Z={best_candidate['position']:.4f}mm")
+            self._log_info(f"    Method: {best_candidate['method']}, "
+                          f"Confidence: {best_candidate['confidence']:.2f}")
+            
+            return best_candidate['position']
     
     def _cartographer_continuous_detection(self, start_z: float, touch_speed: float,
                                          baseline_freq: float, thresholds: dict) -> Optional[float]:
@@ -2828,10 +2926,11 @@ class ProbeEddy:
     
     def _calculate_adaptive_thresholds(self, baseline_freq: float, threshold_auto: bool) -> dict:
         """Calculate adaptive thresholds based on baseline frequency and conditions"""
+        # More precise thresholds for high-accuracy detection
         thresholds = {
-            'coarse_pct': 1.6,    # 1.6% for initial detection (physical contact was 1.69%)
-            'fine_pct': 1.4,      # 1.4% for precise detection (slightly below physical contact)
-            'peak_pct': 1.8,      # 1.8% for peak detection (just above physical contact)
+            'coarse_pct': 1.3,    # 1.3% for initial detection (tighter for better precision)
+            'fine_pct': 1.1,      # 1.1% for precise detection (more sensitive)
+            'peak_pct': 1.5,      # 1.5% for peak detection (more sensitive peak)
             'emergency_pct': 8.0,  # 8.0% emergency stop (unchanged)
         }
         
@@ -3105,11 +3204,17 @@ class ProbeEddy:
         self._log_debug(f"    Processing {len(results)} touch results:")
         self._log_debug(f"    Raw results: {[f'{z:.4f}' for z in results]}")
         
-        # Step 1: Outlier detection using Modified Z-Score (more robust than standard Z-score)
-        filtered_results = self._remove_statistical_outliers(touch_array, threshold=3.5)
+        # Step 1: Advanced outlier detection for high-precision applications
+        # Use stricter threshold for better accuracy (2.5 instead of 3.5)
+        filtered_results = self._remove_statistical_outliers(touch_array, threshold=2.5)
+        
+        # If too strict, relax to standard threshold
+        if len(filtered_results) < max(2, len(touch_array) // 2):
+            self._log_warning("Strict outlier detection removed too many points, relaxing...")
+            filtered_results = self._remove_statistical_outliers(touch_array, threshold=3.0)
         
         if len(filtered_results) < 2:
-            self._log_warning("Too many outliers detected, using all results")
+            self._log_warning("All outlier thresholds too strict, using all results")
             filtered_results = touch_array
         
         # Step 2: Calculate robust statistics

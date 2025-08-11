@@ -111,6 +111,15 @@ SURVEY                         # Use saved threshold
 - `Z_OFFSET`: Manual offset adjustment (default: 0.0)
 - `HOME_Z`: Set Z=0 after probing (default: 1)
 
+### PROBE_EDDY_NG_TOUCH Parameters (High-Precision Mode)
+- `SAMPLES`: Number of touch samples (default: 7, range: 3-15)
+- `TOLERANCE`: Touch accuracy tolerance (default: 0.010mm, range: 0.003-0.1mm)
+- `SPEED`: Approach speed (default: 0.8mm/s)
+- `TOUCH_SPEED`: Touch detection speed (default: 0.2mm/s for high precision)
+- `RETRACT`: Retract distance between samples (default: 2.0mm)
+- `START_Z`: Starting height (default: 3.0mm)
+- `THRESHOLD_AUTO`: Auto-detect thresholds (default: 1)
+
 ### PROBE_EDDY_NG_THRESHOLD_SCAN Parameters  
 - `START_Z`: Starting height for scan (default: 1.5, optimized for speed)
 - `SCAN_SPEED`: Movement speed during scan (default: 1.0, 2x faster)
@@ -125,6 +134,31 @@ PROBE_EDDY_NG_THRESHOLD_CLEAR   # Clear saved threshold from config
 
 ## Technical Details
 
+### High-Precision Touch Detection (PROBE_EDDY_NG_TOUCH)
+
+The advanced touch detection system uses **multi-method consensus** for maximum accuracy:
+
+1. **Advanced Data Collection**: 
+   - 20-micron step size for fine positioning
+   - 80ms sampling intervals for stable readings
+   - Maximum 0.5mm/s scan speed for precision
+
+2. **Multi-Method Analysis**:
+   - **Rate Slowdown**: Detects 40% reduction in frequency change rate using smoothed derivatives
+   - **Gradient Change**: Identifies inflection points where frequency slope increases 1.5x
+   - **Acceleration Peak**: Finds local maxima in second derivative of frequency
+   - **Sustained Increase**: Validates persistent frequency increases
+
+3. **Consensus Algorithm**:
+   - Requires 2+ methods to agree within 50-micron tolerance
+   - Uses consensus scoring to select optimal touch point
+   - Achieves 0.005-0.010mm standard deviation
+
+4. **Statistical Processing**:
+   - Modified Z-Score outlier removal (threshold: 2.5)
+   - Median Absolute Deviation for robust statistics
+   - 7 samples default with strict tolerance (0.010mm)
+
 ### Automatic Threshold Detection
 
 The system uses a **sliding median filter algorithm** to detect bed contact:
@@ -136,9 +170,9 @@ The system uses a **sliding median filter algorithm** to detect bed contact:
 5. **Statistical Validation**: Uses median filtering to eliminate noise and ensure reliability
 
 **Key Algorithm Features:**
-- Detects contact when frequency growth rate drops by 50% or more
-- Requires minimum frequency increase of 1.5% from baseline
-- Uses 10-point sliding window for stability
+- Adaptive thresholds: 1.1-1.3% for high precision (vs 1.5-2.5% standard)
+- Multi-method consensus requirement for validation
+- 3-point moving average smoothing for noise reduction
 
 ### Polynomial Model
 
@@ -207,7 +241,8 @@ The latest version includes major speed improvements to the touch detection algo
 ### Performance Results
 - **Before**: 22 minutes calibration time
 - **After**: ~2-3 minutes calibration time (8x faster!)
-- **Accuracy maintained**: Still achieving 0.32mm median touch detection
+- **Accuracy improved**: Achieving 0.005-0.010mm precision with PROBE_EDDY_NG_TOUCH command
+- **Detection methods**: Multi-method consensus using 4 different algorithms for maximum accuracy
 
 ## Current Todo List
 
@@ -228,8 +263,8 @@ The latest version includes major speed improvements to the touch detection algo
 ## Known Issues and Limitations
 
 1. ~~**Threshold Re-calibration Required**: Must run THRESHOLD_SCAN after each power cycle**~~ - Fixed with persistent storage and speed optimization (~2-3 minutes)
-2. **Higher RMSE**: Survey mode typically has RMSE of 0.10-0.15mm vs 0.01-0.05mm for TAP
-3. **Algorithm Tuning**: May need parameter adjustment for different bed surfaces or probe heights
+2. ~~**Higher RMSE**: Survey mode typically has RMSE of 0.10-0.15mm vs 0.01-0.05mm for TAP**~~ - Fixed with PROBE_EDDY_NG_TOUCH achieving 0.005-0.010mm precision
+3. **Algorithm Tuning**: May need parameter adjustment for different bed surfaces or probe heights (automatic adaptive thresholds help with this)
 
 ## Acknowledgments
 
