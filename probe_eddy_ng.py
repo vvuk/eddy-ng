@@ -2497,13 +2497,17 @@ class ProbeEddy:
         sampler = None
         try:
             # Ensure no previous sampler is still active
+            self._log_debug(f"Before touch detection: _sampler is {self._sampler}")
             if self._sampler:
-                self._log_debug("Finishing previous sampler before starting touch detection")
+                self._log_warning("Previous sampler still active! Finishing it...")
                 self._sampler.finish()
                 self._sampler = None
+                self._log_debug("Previous sampler finished")
             
             # Start the sampler first (required by endstop wrapper)
+            self._log_debug("Starting new sampler for touch detection")
             sampler = self.start_sampler(calculate_heights=True)
+            self._log_debug("Touch detection sampler started")
             
             # Get the existing endstop wrapper from our ProbeEddy instance
             endstop_wrapper = self._endstop_wrapper
@@ -2559,20 +2563,32 @@ class ProbeEddy:
         th = self._printer.lookup_object("toolhead")
         
         # Ultra-fast baseline collection - single sample only
+        self._log_debug("Starting baseline frequency collection...")
         try:
             with self.start_sampler(calculate_heights=False) as sampler:
+                self._log_debug("Baseline sampler started")
                 th.dwell(0.05)  # Higher accuracy baseline
                 th.wait_moves()
+                self._log_debug("Baseline data collected")
                 # Don't call sampler.finish() here - the 'with' block will handle it
             
+            self._log_debug(f"Baseline sampler finished, _sampler is now: {self._sampler}")
             if sampler.raw_count > 0:
                 baseline_freq = sampler.freqs[-1]
+                self._log_debug(f"Baseline frequency: {baseline_freq:.0f}Hz")
                 return baseline_freq
             else:
                 self._log_error("Failed to get baseline sample - no data")
                 return None
         except Exception as e:
             self._log_error(f"Exception in baseline sample: {e}")
+            # Force cleanup on exception
+            if self._sampler:
+                try:
+                    self._log_debug("Force finishing sampler due to exception")
+                    self._sampler.finish()
+                except:
+                    pass
             return None
     
     def _calculate_adaptive_thresholds(self, baseline_freq: float, threshold_auto: bool) -> dict:
