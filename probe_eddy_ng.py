@@ -1798,6 +1798,8 @@ class ProbeEddy:
 
     def cmd_SURVEY(self, gcmd: GCodeCommand):
         """Temperature-independent survey mode (like Cartographer)"""
+        self._log_info("SURVEY command started")
+        
         if not self._z_homed():
             raise self._printer.command_error("Z axis must be homed before survey")
 
@@ -1818,15 +1820,22 @@ class ProbeEddy:
         touch_speed = gcmd.get_float("TOUCH_SPEED", 0.5, above=0.1)
         touch_samples = gcmd.get_int("TOUCH_SAMPLES", 5, minval=3, maxval=10)
         auto_touch = gcmd.get_int("AUTO_TOUCH", 0) == 1  # Smart switching based on conditions
+        
+        self._log_info(f"SURVEY parameters: samples={samples}, tolerance={tolerance:.4f}, use_touch={use_touch}, auto_touch={auto_touch}")
+        if use_touch or auto_touch:
+            self._log_info(f"TOUCH parameters: samples={touch_samples}, speed={touch_speed}")
 
         th = self._printer.lookup_object("toolhead")
         results = []
 
         # Move to start position
+        self._log_info(f"Moving to start position Z={start_z}")
         self.probe_to_start_position(start_z)
+        self._log_info("Start position reached")
         
         # Smart mode selection based on conditions
         if auto_touch and not use_touch:
+            self._log_info("AUTO_TOUCH: evaluating conditions...")
             use_touch = self._should_use_touch_mode()
             if use_touch:
                 self._log_info("AUTO_TOUCH: conditions favor high-precision TOUCH mode")
@@ -1834,27 +1843,36 @@ class ProbeEddy:
                 self._log_info("AUTO_TOUCH: conditions favor standard Survey mode")
 
         if use_touch:
+            self._log_info("=== Entering TOUCH mode ===")
             # Use high-precision TOUCH mode for ultimate accuracy
             self._log_info(f"Survey TOUCH mode: {touch_samples} samples at {touch_speed} mm/s")
             
             # Get stable baseline frequency
+            self._log_info("Getting stable baseline frequency...")
             baseline_freq = self._get_stable_baseline_frequency()
             if baseline_freq is None:
+                self._log_error("Failed to obtain stable baseline frequency")
                 raise self._printer.command_error("Failed to obtain stable baseline frequency")
             
             # Log baseline frequency for debug
-            self._log_debug(f"Using baseline frequency: {baseline_freq:.1f} Hz")
+            self._log_info(f"Baseline frequency obtained: {baseline_freq:.1f} Hz")
             
             # Perform multiple precision touches
-            touch_results = self._perform_precision_touches(
-                samples=touch_samples,
-                tolerance=tolerance,
-                speed=touch_speed,
-                touch_speed=touch_speed,
-                retract=start_z - 0.5,
-                start_z=start_z,
-                threshold_auto=True
-            )
+            self._log_info(f"Starting precision touches: {touch_samples} samples...")
+            try:
+                touch_results = self._perform_precision_touches(
+                    samples=touch_samples,
+                    tolerance=tolerance,
+                    speed=touch_speed,
+                    touch_speed=touch_speed,
+                    retract=start_z - 0.5,
+                    start_z=start_z,
+                    threshold_auto=True
+                )
+                self._log_info(f"Precision touches completed, got {len(touch_results) if touch_results else 0} results")
+            except Exception as e:
+                self._log_error(f"Precision touches failed: {e}")
+                raise
             
             if not touch_results or len(touch_results) == 0:
                 raise self._printer.command_error("TOUCH mode failed: no valid touches detected")
@@ -2355,35 +2373,47 @@ class ProbeEddy:
                                   touch_speed: float, retract: float, start_z: float,
                                   threshold_auto: bool) -> List[float]:
         """Perform multiple high-precision touches with statistical validation"""
+        self._log_info(f"_perform_precision_touches: samples={samples}, tolerance={tolerance}, speed={speed}")
+        self._log_info(f"  touch_speed={touch_speed}, retract={retract}, start_z={start_z}, threshold_auto={threshold_auto}")
+        
         th = self._printer.lookup_object("toolhead")
         touch_results = []
         failed_attempts = 0
         max_failures = 2  # Allow 2 failures before giving up
         
         # Move to probe position (same as existing Survey)
+        self._log_info(f"Moving to probe position: Z={start_z + retract}")
         self.probe_to_start_position(start_z + retract)
+        self._log_info("Probe position reached")
         
         for attempt in range(samples + max_failures):
+            self._log_info(f"=== Attempt {attempt + 1}/{samples + max_failures} ===")
+            
             if len(touch_results) >= samples:
+                self._log_info(f"Sufficient samples collected: {len(touch_results)}/{samples}")
                 break
                 
-            self._log_info(f"Touch attempt {len(touch_results) + 1}/{samples}")
+            self._log_info(f"Touch attempt {len(touch_results) + 1}/{samples} (attempt #{attempt + 1})")
             
             # Add slight randomization to touch position (±0.5mm) for better statistics
             if len(touch_results) > 0:
+                self._log_info("Adding position randomization...")
                 th_pos = th.get_position()
                 random_x = th_pos[0] + (0.5 - 1.0 * (attempt % 2))  # Simple alternation
                 random_y = th_pos[1] + (0.5 - 1.0 * ((attempt // 2) % 2))
                 th.manual_move([random_x, random_y, None], speed)
                 th.wait_moves()
+                self._log_info(f"Position randomized to X={random_x:.2f}, Y={random_y:.2f}")
             
             try:
                 # Perform single high-precision touch
+                self._log_info("Calling _single_precision_touch...")
                 touch_z = self._single_precision_touch(start_z, speed, touch_speed, threshold_auto)
+                self._log_info(f"_single_precision_touch returned: {touch_z}")
                 
                 if touch_z is not None:
                     touch_results.append(touch_z)
-                    self._log_debug(f"  Touch {len(touch_results)}: Z={touch_z:.4f}mm")
+                    self._log_info(f"  Touch {len(touch_results)}: Z={touch_z:.4f}mm")
                     
                     # Quick statistical check - reject obvious outliers early
                     if len(touch_results) >= 2:
@@ -2393,15 +2423,19 @@ class ProbeEddy:
                             touch_results.pop()  # Remove outlier
                 else:
                     failed_attempts += 1
-                    self._log_warning(f"  Touch attempt failed")
+                    self._log_warning(f"  Touch attempt failed - got None result")
                     
             except Exception as e:
                 failed_attempts += 1
                 self._log_error(f"  Touch attempt failed: {e}")
+                import traceback
+                self._log_error(f"  Traceback: {traceback.format_exc()}")
             
             # Retract between touches
+            self._log_info(f"Retracting to Z={start_z + retract}")
             th.manual_move([None, None, start_z + retract], speed * 2)
             th.wait_moves()
+            self._log_info("Retraction complete")
             
             # Early termination if we have enough good samples
             if len(touch_results) >= samples:
@@ -2422,45 +2456,67 @@ class ProbeEddy:
     def _single_precision_touch(self, start_z: float, approach_speed: float, 
                                touch_speed: float, threshold_auto: bool) -> Optional[float]:
         """Perform single high-precision touch with multi-level detection"""
+        self._log_info(f"    _single_precision_touch: start_z={start_z}, approach_speed={approach_speed}")
+        self._log_info(f"      touch_speed={touch_speed}, threshold_auto={threshold_auto}")
+        
         th = self._printer.lookup_object("toolhead")
         
         # Move to start position
+        self._log_info(f"    Moving to start Z={start_z}")
         th.manual_move([None, None, start_z], approach_speed)
         th.wait_moves()
+        self._log_info("    Start position reached")
         
         # Get baseline frequency with better sampling
+        self._log_info("    Getting baseline frequency...")
         baseline_freq = self._get_stable_baseline_frequency()
         if baseline_freq is None:
+            self._log_error("    Failed to get baseline frequency")
             return None
             
-        self._log_debug(f"    Baseline frequency: {baseline_freq:.1f} Hz")
+        self._log_info(f"    Baseline frequency: {baseline_freq:.1f} Hz")
         
         # Calculate adaptive thresholds based on baseline
+        self._log_info("    Calculating adaptive thresholds...")
         thresholds = self._calculate_adaptive_thresholds(baseline_freq, threshold_auto)
+        self._log_info(f"    Thresholds calculated: {len(thresholds)} values")
         
         # High-precision touch detection with multiple methods
+        self._log_info("    Starting multi-method touch detection...")
         touch_z = self._multi_method_touch_detection(
             start_z, touch_speed, baseline_freq, thresholds
         )
+        self._log_info(f"    Touch detection result: {touch_z}")
         
         return touch_z
     
     def _get_stable_baseline_frequency(self) -> Optional[float]:
         """Get stable baseline frequency with multiple samples"""
+        self._log_info("      _get_stable_baseline_frequency: starting...")
         th = self._printer.lookup_object("toolhead")
         baseline_samples = []
         
         # Take 3 baseline samples for stability
         for i in range(3):
-            with self.start_sampler(calculate_heights=False) as sampler:
-                th.dwell(0.1)  # Longer dwell for stability
-                th.wait_moves()
-                sampler.finish()
-            
-            if sampler.raw_count > 0:
-                baseline_samples.append(sampler.freqs[-1])
-            else:
-                self._log_error("Failed to get baseline sample")
+            self._log_info(f"        Sample {i+1}/3...")
+            try:
+                with self.start_sampler(calculate_heights=False) as sampler:
+                    self._log_info("        Sampler started, dwelling...")
+                    th.dwell(0.1)  # Longer dwell for stability
+                    th.wait_moves()
+                    self._log_info("        Dwell complete, finishing sampler...")
+                    sampler.finish()
+                    self._log_info("        Sampler finished")
+                
+                if sampler.raw_count > 0:
+                    freq = sampler.freqs[-1]
+                    baseline_samples.append(freq)
+                    self._log_info(f"        Sample {i+1}: {freq:.1f} Hz (count: {sampler.raw_count})")
+                else:
+                    self._log_error(f"        Failed to get baseline sample {i+1} - no data")
+                    return None
+            except Exception as e:
+                self._log_error(f"        Exception in baseline sample {i+1}: {e}")
                 return None
         
         # Check stability of baseline
