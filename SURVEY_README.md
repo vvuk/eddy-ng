@@ -10,6 +10,7 @@ Survey mode is a temperature-independent probing method for the BTT Eddy probe, 
 |---------|----------|-------------|
 | Temperature Dependency | Yes - requires `tap_adjust_z` | No - temperature independent |
 | Calibration Model | Piecewise interpolation | Full-range polynomial (degree 5-9) |
+| Calibration Process | Manual paper test required | Fully automatic touch detection |
 | Accuracy (RMSE) | ~0.01-0.05mm | ~0.10-0.15mm |
 | Temperature Profiles | Required for consistency | Not needed |
 | Stability | Varies with temperature | Consistent across temperatures |
@@ -36,14 +37,14 @@ PROBE_EDDY_NG_SETUP
 SAVE_CONFIG
 ```
 
-### Step 2: Polynomial Calibration
+### Step 2: Polynomial Calibration (Automatic)
 ```gcode
 # After restart, home again
 G28 X Y
 
-# Polynomial calibration for Survey mode
+# Polynomial calibration for Survey mode - fully automatic!
 PROBE_EDDY_NG_CALIBRATE_POLY
-# Follow instructions for manual Z=0 positioning
+# Automatically detects bed contact - no manual paper test needed
 SAVE_CONFIG
 ```
 
@@ -110,6 +111,14 @@ SURVEY                         # Use saved threshold
 - `START_Z`: Starting height for probing (default: 5.0)
 - `Z_OFFSET`: Manual offset adjustment (default: 0.0)
 - `HOME_Z`: Set Z=0 after probing (default: 1)
+
+### PROBE_EDDY_NG_CALIBRATE_POLY Parameters
+- `DRIVE_CURRENT`: Drive current for calibration (default: current setting, 0-31)
+- `START_Z`: Maximum calibration height (default: from config)
+- `SPEED`: Probe speed during calibration (default: from config)
+- `LIFT_SPEED`: Lift speed between moves (default: from config)
+- `APPROACH_SPEED`: Speed when approaching bed (default: 1.0)
+- `TOUCH_SPEED`: Speed for touch detection (default: 0.5)
 
 ### PROBE_EDDY_NG_THRESHOLD_SCAN Parameters
 - `START_Z`: Starting height for scan (default: 2.0)
