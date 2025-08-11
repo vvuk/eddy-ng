@@ -2470,7 +2470,7 @@ class ProbeEddy:
             
         thresholds = self._calculate_adaptive_thresholds(baseline_freq, threshold_auto)
         
-        # Use Cartographer-style approach: continuous movement with post-processing
+        # Use TRUE Cartographer-style approach: continuous movement with real-time detection
         touch_z = self._cartographer_style_detection(
             start_z, touch_speed, baseline_freq, thresholds
         )
@@ -2479,429 +2479,78 @@ class ProbeEddy:
     
     def _cartographer_style_detection(self, start_z: float, touch_speed: float,
                                     baseline_freq: float, thresholds: dict) -> Optional[float]:
-        """Cartographer-style: continuous movement with data collection and post-processing"""
+        """True continuous movement using Klipper homing system (like Cartographer)"""
         th = self._printer.lookup_object("toolhead")
+        homing = self._printer.lookup_object("homing")
         
-        self._log_info(f"    Starting Cartographer-style detection from Z={start_z:.3f}mm")
+        self._log_info(f"    Starting TRUE continuous detection from Z={start_z:.3f}mm")
         
-        # Movement parameters for high precision
-        target_z = -0.2  # Emergency stop depth
-        scan_speed = min(touch_speed * 0.5, 0.5)  # Slower for better accuracy: max 0.5mm/s
-        step_size = 0.02  # Smaller steps for better precision (20 microns)
+        # Movement parameters
+        target_z = -0.3  # Emergency stop depth  
+        scan_speed = min(touch_speed, 1.0)  # Reasonable speed for continuous movement
         
-        # Data collection arrays
-        positions = []
-        frequencies = []
-        timestamps = []
-        
-        try:
-            # Start data collection with continuous sampling
-            with self.start_sampler(calculate_heights=True) as sampler:
-                current_z = start_z
-                sample_count = 0
-                
-                # Move in moderate steps with continuous data collection
-                while current_z > target_z:
-                    # Move to next position
-                    th.manual_move([None, None, current_z], scan_speed)
-                    
-                    # Brief pause for data collection (simulate continuous sampling)
-                    th.dwell(0.08)  # 80ms sampling interval for more stable readings
-                    th.wait_moves()
-                    
-                    # Always try to collect data
-                    if len(sampler.freqs) > sample_count:
-                        current_freq = sampler.freqs[-1]
-                        current_time = sampler.times[-1] if sampler.times else 0
-                    elif len(sampler.freqs) > 0:
-                        # Use last available frequency if no new data
-                        current_freq = sampler.freqs[-1]
-                        current_time = sampler.times[-1] if sampler.times else 0
-                    else:
-                        # No data available, continue to next position
-                        self._log_debug(f"    Z={current_z:.3f}: no frequency data available")
-                        current_z -= step_size
-                        continue
-                    
-                    # Store data with actual position
-                    positions.append(current_z)
-                    frequencies.append(current_freq)
-                    timestamps.append(current_time if current_time else 0)
-                    sample_count = len(sampler.freqs)  # Update sample count
-                    
-                    # Debug output
-                    freq_change_pct = ((current_freq - baseline_freq) / baseline_freq) * 100
-                    self._log_info(f"    Z={current_z:.3f}: freq={current_freq:.0f}Hz change={freq_change_pct:.2f}%")
-                    
-                    # Emergency stop check during movement
-                    if freq_change_pct > thresholds['emergency_pct']:
-                        self._log_warning(f"    Emergency stop at {freq_change_pct:.1f}% frequency change")
-                        break
-                    
-                    current_z -= step_size
-                
-                sampler.finish()
-                
-        except Exception as e:
-            self._log_error(f"Cartographer-style detection failed: {e}")
-            return None
-        
-        # Wait for movement completion
+        # Move to start position first
+        th.manual_move([None, None, start_z], scan_speed * 2)
         th.wait_moves()
         
-        # Post-process data to find touch point
-        if len(positions) < 5:
-            self._log_warning("Insufficient data collected for analysis")
-            return None
-        
-        touch_z = self._cartographer_post_process(
-            positions, frequencies, baseline_freq, thresholds
-        )
-        
-        return touch_z
-    
-    def _cartographer_post_process(self, positions: List[float], frequencies: List[float],
-                                 baseline_freq: float, thresholds: dict) -> Optional[float]:
-        """Post-process collected data using advanced Cartographer-style algorithms"""
-        
-        self._log_info(f"    Post-processing {len(positions)} data points")
-        
-        # Calculate frequency changes and smoothed derivatives for better accuracy
-        freq_changes = []
-        raw_derivatives = []
-        smoothed_derivatives = []
-        freq_second_derivatives = []
-        
-        for i, freq in enumerate(frequencies):
-            freq_change_pct = ((freq - baseline_freq) / baseline_freq) * 100
-            freq_changes.append(freq_change_pct)
-        
-        # Calculate raw derivatives using central differences
-        for i in range(1, len(positions) - 1):
-            # First derivative (rate of frequency change per mm)
-            dz = positions[i-1] - positions[i+1]  # Z difference (negative, moving down)
-            df = frequencies[i+1] - frequencies[i-1]  # Frequency difference
-            if abs(dz) > 0.001:  # Avoid division by zero
-                derivative = df / dz
-                raw_derivatives.append(derivative)
-            else:
-                raw_derivatives.append(0.0)
-        
-        # Apply smoothing to derivatives for noise reduction (3-point moving average)
-        for i in range(len(raw_derivatives)):
-            if i == 0 or i == len(raw_derivatives) - 1:
-                # Keep edge values as-is
-                smoothed_derivatives.append(raw_derivatives[i])
-            else:
-                # 3-point moving average for smoother signal
-                smooth_val = (raw_derivatives[i-1] + raw_derivatives[i] + raw_derivatives[i+1]) / 3.0
-                smoothed_derivatives.append(smooth_val)
-        
-        # Calculate second derivatives using smoothed data
-        for i in range(1, len(smoothed_derivatives) - 1):
-            if i + 1 < len(positions):
-                dz = positions[i] - positions[i+1]  # Z step
-                dd = smoothed_derivatives[i+1] - smoothed_derivatives[i-1]  # Derivative difference
-                if abs(dz) > 0.001:
-                    second_derivative = dd / dz
-                    freq_second_derivatives.append(second_derivative)
-                else:
-                    freq_second_derivatives.append(0.0)
-        
-        # Advanced multi-method touch detection with consensus requirement
-        method_detections = {
-            'rate_slowdown': [],
-            'accel_peak': [],
-            'sustained_increase': [],
-            'gradient_change': []
-        }
-        
-        # Method 1: Rate slowdown detection (improved with smoothed derivatives)
-        for i in range(len(positions) - 4):
-            if (i < len(freq_changes) and 
-                i < len(smoothed_derivatives) and
-                freq_changes[i] > thresholds['fine_pct']):  # Use fine threshold for better precision
-                
-                # Check for rate slowdown using smoothed derivatives
-                if i + 3 < len(smoothed_derivatives):
-                    current_rate = abs(smoothed_derivatives[i])
-                    future_rate = abs(smoothed_derivatives[i + 3])
-                    
-                    # More precise slowdown detection (40% reduction for higher accuracy)
-                    if current_rate > 3000 and future_rate < current_rate * 0.4:
-                        confidence = (freq_changes[i] / thresholds['fine_pct']) * (current_rate / 10000)
-                        method_detections['rate_slowdown'].append({
-                            'position': positions[i],
-                            'confidence': confidence,
-                            'freq_change': freq_changes[i],
-                            'rate_change': (current_rate - future_rate) / current_rate
-                        })
-        
-        # Method 2: Gradient change detection (new method for high precision)
-        for i in range(2, len(freq_changes) - 2):
-            if freq_changes[i] > thresholds['fine_pct']:
-                # Look for inflection point - where frequency gradient changes significantly
-                before_grad = freq_changes[i] - freq_changes[i-2]
-                after_grad = freq_changes[i+2] - freq_changes[i]
-                
-                # Detect where gradient becomes much steeper (contact point)
-                if before_grad > 0 and after_grad > before_grad * 1.5:
-                    confidence = (freq_changes[i] / thresholds['fine_pct']) * (after_grad / before_grad)
-                    method_detections['gradient_change'].append({
-                        'position': positions[i],
-                        'confidence': confidence,
-                        'freq_change': freq_changes[i],
-                        'grad_ratio': after_grad / before_grad if before_grad > 0 else 1.0
-                    })
-        
-        # Method 3: Acceleration peak detection (improved)
-        if len(freq_second_derivatives) >= 3:
-            for i in range(1, len(freq_second_derivatives) - 1):
-                # Look for local maxima in second derivative with higher precision
-                if (freq_second_derivatives[i] > freq_second_derivatives[i-1] and
-                    freq_second_derivatives[i] > freq_second_derivatives[i+1] and
-                    freq_second_derivatives[i] > 50000):  # Lowered threshold for sensitivity
-                    
-                    # Ensure corresponding frequency change is significant
-                    pos_index = i + 2  # Adjust for derivative offset
-                    if (pos_index < len(freq_changes) and 
-                        freq_changes[pos_index] > thresholds['fine_pct']):
-                        confidence = (freq_changes[pos_index] / thresholds['fine_pct']) * (freq_second_derivatives[i] / 100000)
-                        method_detections['accel_peak'].append({
-                            'position': positions[pos_index],
-                            'confidence': confidence,
-                            'freq_change': freq_changes[pos_index],
-                            'accel_peak': freq_second_derivatives[i]
-                        })
-        
-        # Method 4: Sustained increase detection (refined)
-        sustained_start = None
-        sustained_peak_change = 0
-        for i, freq_change in enumerate(freq_changes):
-            if freq_change > thresholds['fine_pct']:
-                if sustained_start is None:
-                    sustained_start = i
-                    sustained_peak_change = freq_change
-                else:
-                    sustained_peak_change = max(sustained_peak_change, freq_change)
-            else:
-                if sustained_start is not None:
-                    # Check if we had sustained increase for at least 2 points (more sensitive)
-                    if i - sustained_start >= 2:
-                        confidence = sustained_peak_change / thresholds['fine_pct']
-                        method_detections['sustained_increase'].append({
-                            'position': positions[sustained_start],
-                            'confidence': confidence,
-                            'freq_change': sustained_peak_change,
-                            'duration': i - sustained_start
-                        })
-                    sustained_start = None
-                    sustained_peak_change = 0
-        
-        # Multi-method consensus analysis for high accuracy
-        all_candidates = []
-        method_count = 0
-        
-        # Collect all candidates from different methods
-        for method, detections in method_detections.items():
-            if detections:
-                method_count += 1
-                for detection in detections:
-                    detection['method'] = method
-                    all_candidates.append(detection)
-        
-        if not all_candidates:
-            self._log_warning("    No touch candidates found in post-processing")
-            return None
-        
-        self._log_info(f"    Found {len(all_candidates)} candidates from {method_count} methods")
-        
-        # Find consensus zones - areas where multiple methods agree
-        consensus_candidates = []
-        position_tolerance = 0.05  # 50 microns tolerance for consensus
-        
-        for i, candidate in enumerate(all_candidates):
-            # Count how many other methods detect touch near this position
-            nearby_methods = set([candidate['method']])
-            nearby_positions = [candidate['position']]
-            total_confidence = candidate['confidence']
-            
-            for j, other in enumerate(all_candidates):
-                if i != j and abs(candidate['position'] - other['position']) <= position_tolerance:
-                    nearby_methods.add(other['method'])
-                    nearby_positions.append(other['position'])
-                    total_confidence += other['confidence']
-            
-            # Require at least 2 methods to agree for high confidence
-            if len(nearby_methods) >= 2:
-                avg_position = sum(nearby_positions) / len(nearby_positions)
-                consensus_score = len(nearby_methods) * total_confidence
-                
-                consensus_candidates.append({
-                    'position': avg_position,
-                    'methods': list(nearby_methods),
-                    'method_count': len(nearby_methods),
-                    'consensus_score': consensus_score,
-                    'avg_confidence': total_confidence / len(nearby_positions),
-                    'freq_change': candidate['freq_change']
-                })
-        
-        # Select best consensus candidate
-        if consensus_candidates:
-            # Sort by consensus score (method count * total confidence)
-            consensus_candidates.sort(key=lambda x: x['consensus_score'], reverse=True)
-            best_candidate = consensus_candidates[0]
-            
-            methods_str = '+'.join(best_candidate['methods'])
-            self._log_info(f"    ✓ CONSENSUS TOUCH DETECTED at Z={best_candidate['position']:.4f}mm")
-            self._log_info(f"    Methods: {methods_str} ({best_candidate['method_count']} agree)")
-            self._log_info(f"    Consensus score: {best_candidate['consensus_score']:.2f}, "
-                          f"Freq change: {best_candidate['freq_change']:.2f}%")
-            
-            return best_candidate['position']
-        else:
-            # Fallback: use single best candidate if no consensus
-            all_candidates.sort(key=lambda x: x['confidence'], reverse=True)
-            best_candidate = all_candidates[0]
-            
-            self._log_warning(f"    No consensus found - using single method detection")
-            self._log_info(f"    ✓ SINGLE METHOD TOUCH at Z={best_candidate['position']:.4f}mm")
-            self._log_info(f"    Method: {best_candidate['method']}, "
-                          f"Confidence: {best_candidate['confidence']:.2f}")
-            
-            return best_candidate['position']
-    
-    def _cartographer_continuous_detection(self, start_z: float, touch_speed: float,
-                                         baseline_freq: float, thresholds: dict) -> Optional[float]:
-        """Cartographer-style continuous movement with real-time touch detection"""
-        th = self._printer.lookup_object("toolhead")
-        
-        self._log_info(f"    Starting Cartographer-style continuous scan from Z={start_z:.3f}mm")
-        
-        # Calculate movement parameters
-        target_z = -0.2  # Emergency stop depth
-        scan_speed = min(touch_speed * 0.8, 1.5)  # Controlled speed for accuracy
-        
-        # Data collection arrays
-        positions, frequencies, timestamps = [], [], []
-        detection_z = None
-        
         try:
-            # Start continuous data collection
-            with self.start_sampler(calculate_heights=True) as sampler:
-                # Begin continuous movement (Klipper doesn't support sync=False)
-                # Instead, we'll use a different approach with shorter segments
-                current_scan_z = start_z
+            # Get the existing endstop wrapper and configure it for touch detection
+            endstop_wrapper = self._printer.lookup_object("probe_eddy_endstop")
+            
+            # Start sampling before configuring touch detection
+            # The sampler should already be running from the wrapper's home_start method
+            if not endstop_wrapper._sampler or not endstop_wrapper._sampler.active():
+                endstop_wrapper._sampler = self.start_sampler(calculate_heights=True)
                 
-                # Collect data with fast small movements (Cartographer-like)
-                step_size = 0.02  # Small steps for continuous-like operation
-                sample_count = 0
+            endstop_wrapper.setup_touch_detection(baseline_freq, thresholds)
+            
+            # Get target position for continuous movement
+            current_pos = th.get_position()
+            target_pos = [current_pos[0], current_pos[1], target_z]
+            
+            self._log_info(f"    Continuous movement: Z{start_z:.3f} → Z{target_z:.3f} at {scan_speed:.1f}mm/s")
+            
+            # Use Klipper's homing system for TRUE continuous movement
+            # This moves continuously until endstop_wrapper.query_endstop() returns triggered state  
+            end_pos = homing.probing_move(endstop_wrapper, target_pos, scan_speed)
+            
+            # Get the exact Z position where touch was detected
+            touch_z = end_pos[2]
+            
+            # Clear touch detection mode
+            endstop_wrapper._touch_mode = False
+            
+            self._log_info(f"    ✓ TRUE CONTINUOUS TOUCH at Z={touch_z:.4f}mm")
+            self._log_info(f"    Movement stopped automatically by Klipper homing system")
+            
+            return touch_z
+            
+        except self._printer.command_error as e:
+            # Clear touch detection mode on error
+            try:
+                endstop_wrapper = self._printer.lookup_object("probe_eddy_endstop")
+                endstop_wrapper._touch_mode = False
+            except:
+                pass
                 
-                while detection_z is None and current_scan_z > target_z:
-                    # Move in small steps for quasi-continuous operation
-                    th.manual_move([None, None, current_scan_z], scan_speed)
-                    
-                    # Very brief sampling for speed
-                    th.dwell(0.015)  # Minimal delay for fast operation
-                    th.wait_moves()
-                    
-                    # Check for new frequency data
-                    if len(sampler.freqs) > sample_count:
-                        # Get latest data
-                        current_freq = sampler.freqs[-1]
-                        current_time = sampler.times[-1] if sampler.times else 0
-                        
-                        # Store data
-                        positions.append(current_scan_z)
-                        frequencies.append(current_freq)
-                        timestamps.append(current_time)
-                        sample_count += 1
-                        
-                        # Perform real-time analysis every few samples
-                        if len(frequencies) >= 5 and sample_count % 2 == 0:  # Analyze more frequently
-                            detection_z = self._analyze_continuous_data(
-                                positions, frequencies, baseline_freq, thresholds, current_scan_z
-                            )
-                            
-                            if detection_z:
-                                self._log_info(f"    ✓ FAST TOUCH DETECTED at Z={detection_z:.4f}mm")
-                                break
-                    
-                    # Move to next position
-                    current_scan_z -= step_size
-                    
-                    # Adaptive step size based on frequency change
-                    if len(frequencies) >= 2:
-                        freq_change_pct = ((frequencies[-1] - baseline_freq) / baseline_freq) * 100
-                        if freq_change_pct > 0.8:  # Close to contact
-                            step_size = 0.005  # Ultra-fine steps
-                        elif freq_change_pct > 0.4:  # Approaching contact
-                            step_size = 0.01   # Fine steps
-                        else:
-                            step_size = 0.02   # Standard steps
-                
-                if current_scan_z <= target_z:
-                    self._log_warning("    Reached emergency depth without contact detection")
-                    
-                sampler.finish()
+            if "Probe completed movement before triggering" in str(e):
+                self._log_warning("No touch detected during continuous movement")
+                return None
+            else:
+                self._log_error(f"Continuous detection failed: {e}")
+                return None
                 
         except Exception as e:
-            self._log_error(f"Continuous detection failed: {e}")
-            return None
-        
-        # Wait for movement to complete
-        th.wait_moves()
-        
-        return detection_z
-    
-    def _analyze_continuous_data(self, positions: List[float], frequencies: List[float],
-                               baseline_freq: float, thresholds: dict, current_z: float) -> Optional[float]:
-        """Analyze continuous data stream for touch detection"""
-        if len(frequencies) < 5:
-            return None
-        
-        # Current frequency change
-        current_freq = frequencies[-1]
-        freq_change_pct = ((current_freq - baseline_freq) / baseline_freq) * 100
-        
-        # Calculate frequency derivative (rate of change)
-        if len(positions) >= 3:
-            # Use last 3 points for stability
-            recent_pos = positions[-3:]
-            recent_freq = frequencies[-3:]
-            
-            # Calculate average rate of frequency change
-            rates = []
-            for i in range(1, len(recent_pos)):
-                dz = recent_pos[i-1] - recent_pos[i]  # Position difference (negative, moving down)
-                df = recent_freq[i] - recent_freq[i-1]  # Frequency difference
-                if abs(dz) > 0.001:  # Avoid division by zero
-                    rates.append(df / dz)  # Hz per mm
-            
-            if len(rates) >= 2:
-                current_rate = rates[-1]
-                avg_rate = sum(rates) / len(rates)
+            # Clear touch detection mode on error
+            try:
+                endstop_wrapper = self._printer.lookup_object("probe_eddy_endstop")
+                endstop_wrapper._touch_mode = False
+            except:
+                pass
                 
-                # Detect significant frequency increase with rate slowdown
-                if (freq_change_pct > thresholds['fine_pct'] and 
-                    len(rates) >= 2 and current_rate < avg_rate * 0.6):  # 40% rate slowdown
-                    
-                    # Additional validation: check for sustained contact
-                    if len(frequencies) >= 5:
-                        last_5_changes = []
-                        for i in range(len(frequencies)-5, len(frequencies)):
-                            change = ((frequencies[i] - baseline_freq) / baseline_freq) * 100
-                            last_5_changes.append(change)
-                        
-                        # Ensure frequency is consistently above threshold
-                        if all(change > thresholds['coarse_pct'] for change in last_5_changes[-3:]):
-                            return current_z
-        
-        # Emergency detection
-        if freq_change_pct > thresholds['emergency_pct']:
-            return current_z
-        
-        return None
+            self._log_error(f"Continuous detection error: {e}")
+            return None
+    
     
     def _get_stable_baseline_frequency(self) -> Optional[float]:
         """Get stable baseline frequency with ultra-fast sampling for speed"""
@@ -4373,7 +4022,61 @@ class ProbeEddyEndstopWrapper:
         raise self._printer.command_error(f"Unknown homing error: {res}")
 
     def query_endstop(self, print_time):
-        return False
+        # Check if we're in touch detection mode
+        if hasattr(self, '_touch_mode') and self._touch_mode:
+            return self._query_touch_endstop(print_time)
+        else:
+            # Standard endstop behavior for homing - always returns 0 (not triggered)
+            return 0
+        
+    def setup_touch_detection(self, baseline_freq: float, thresholds: dict):
+        """Configure this endstop wrapper for touch detection mode"""
+        self._touch_mode = True
+        self._baseline_freq = baseline_freq
+        self._thresholds = thresholds
+        self._touch_detected = False
+        
+    def _query_touch_endstop(self, print_time):
+        """Internal method for touch detection during continuous movement"""
+        if self._touch_detected:
+            return 1  # Already detected - triggered state
+            
+        if not self._sampler or not self._sampler.active():
+            return 0  # No active sampler - not triggered
+            
+        try:
+            # Get latest frequency reading
+            if not self._sampler.freqs:
+                return 0  # No data yet - not triggered
+            
+            current_freq = self._sampler.freqs[-1]
+            freq_change_pct = ((current_freq - self._baseline_freq) / self._baseline_freq) * 100
+            
+            # Multi-level detection for better accuracy
+            detection_level = None
+            
+            # Level 1: Fine threshold (most sensitive)  
+            if freq_change_pct > self._thresholds['fine_pct']:
+                detection_level = "fine"
+            
+            # Level 2: Coarse threshold (standard)
+            elif freq_change_pct > self._thresholds['coarse_pct']:
+                detection_level = "coarse"
+            
+            # Level 3: Emergency threshold (safety)
+            if freq_change_pct > self._thresholds['emergency_pct']:
+                detection_level = "emergency"
+                
+            if detection_level:
+                self._touch_detected = True
+                self._touch_position = print_time
+                self.eddy._log_info(f"    ✓ CONTINUOUS TOUCH DETECTED ({detection_level}): {freq_change_pct:.2f}% change")
+                return 1  # Touch detected - triggered state!
+                
+        except Exception as e:
+            self.eddy._log_debug(f"Touch query error: {e}")
+            
+        return 0  # No touch detected yet - not triggered
 
     def _setup_sampler(self):
         self._sampler = self.eddy.start_sampler()

@@ -138,20 +138,21 @@ PROBE_EDDY_NG_THRESHOLD_CLEAR   # Clear saved threshold from config
 
 The advanced touch detection system uses **multi-method consensus** for maximum accuracy:
 
-1. **Advanced Data Collection**: 
-   - 20-micron step size for fine positioning
-   - 80ms sampling intervals for stable readings
-   - Maximum 0.5mm/s scan speed for precision
+1. **True Continuous Movement**: 
+   - Uses Klipper's native homing system for uninterrupted movement
+   - Real-time touch detection during movement (no stops)
+   - Maximum 1.0mm/s continuous scan speed
 
-2. **Multi-Method Analysis**:
-   - **Rate Slowdown**: Detects 40% reduction in frequency change rate using smoothed derivatives
-   - **Gradient Change**: Identifies inflection points where frequency slope increases 1.5x
-   - **Acceleration Peak**: Finds local maxima in second derivative of frequency
-   - **Sustained Increase**: Validates persistent frequency increases
+2. **Real-Time Detection**:
+   - **Fine Threshold**: Most sensitive detection (1.1% frequency change)
+   - **Coarse Threshold**: Standard detection (1.3% frequency change)  
+   - **Emergency Threshold**: Safety stop (8.0% frequency change)
+   - Multi-level detection for better accuracy
 
-3. **Consensus Algorithm**:
-   - Requires 2+ methods to agree within 50-micron tolerance
-   - Uses consensus scoring to select optimal touch point
+3. **Klipper Integration**:
+   - Uses existing ProbeEddyEndstopWrapper for compatibility
+   - Leverages Klipper's homing system (`probing_move()`)
+   - Instant movement stop upon touch detection
    - Achieves 0.005-0.010mm standard deviation
 
 4. **Statistical Processing**:
