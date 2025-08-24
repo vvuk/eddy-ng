@@ -437,6 +437,7 @@ class ProbeEddy:
             "btt_eddy": ldc1612_ng.LDC1612_ng,
             "cartographer": ldc1612_ng.LDC1612_ng,
             "mellow_fly": ldc1612_ng.LDC1612_ng,
+            "ldc1612_internal_clk": ldc1612_ng.LDC1612_ng,
         }
         sensor_type = config.getchoice("sensor_type", {s: s for s in sensors})
 
@@ -1116,7 +1117,7 @@ class ProbeEddy:
         )
 
         max_dc_increase = 0
-        if self._sensor_type == "ldc1612" or self._sensor_type == "btt_eddy":
+        if self._sensor_type == "ldc1612" or self._sensor_type == "btt_eddy" or self._sensor_type == "ldc1612_internal_clk":
             max_dc_increase = 5
         max_dc_increase = gcmd.get_int("MAX_DC_INCREASE", max_dc_increase, minval=0, maxval=30)
 
