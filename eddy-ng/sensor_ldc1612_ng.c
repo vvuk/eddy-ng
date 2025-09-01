@@ -349,7 +349,7 @@ config_ldc1612_ng(uint32_t oid, uint32_t i2c_oid, uint8_t product, int32_t intb_
         // pull that out on the python side.
         break;
 #endif
-    case PRODUCT_LDC1612_INTERNALL_CLK:
+    case PRODUCT_LDC1612_INTERNAL_CLK:
         ld->sensor_cvt = 43400000.0f / (float)(1<<28);
         break;
     default:
