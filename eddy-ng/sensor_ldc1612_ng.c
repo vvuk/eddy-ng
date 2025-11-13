@@ -68,7 +68,7 @@ enum {
 // should match ldc1612_ng.py
 #define PRODUCT_UNKNOWN 0
 #define PRODUCT_BTT_EDDY 1
-#define PRODUCT_CARTOGRAPHER 2
+#define PRODUCT_STM32F0 2
 #define PRODUCT_MELLOW_FLY 3
 #define PRODUCT_LDC1612_INTERNAL_CLK 4
 
@@ -330,7 +330,7 @@ config_ldc1612_ng(uint32_t oid, uint32_t i2c_oid, uint8_t product, int32_t intb_
     case PRODUCT_MELLOW_FLY:
         ld->sensor_cvt = 40000000.0f / (float)(1<<28);
         break;
-    case PRODUCT_CARTOGRAPHER:
+    case PRODUCT_STM32F0:
         ld->sensor_cvt = 24000000.0f / (float)(1<<28);
 #if SUPPORT_CARTOGRAPHER
         // Cartographer hardware-specific GPIO setup

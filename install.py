@@ -57,9 +57,6 @@ def uninstall_klipper(target_dir: str):
                 
                 with open(kconfig_path, 'w') as f:
                     f.write(new_content)
-                print("Removed eddy-ng options from src/Kconfig")
-            else:
-                print("No eddy-ng options found in src/Kconfig")
     return
 
 

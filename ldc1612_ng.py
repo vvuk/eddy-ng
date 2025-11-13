@@ -50,7 +50,7 @@ REG_DEVICE_ID = 0x7F
 # Device product (match sensor_ldc1612_ng.c)
 PRODUCT_UNKNOWN = 0
 PRODUCT_BTT_EDDY = 1
-PRODUCT_CARTOGRAPHER = 2
+PRODUCT_STM32F0 = 2
 PRODUCT_MELLOW_FLY = 3
 PRODUCT_LDC1612_INTERNAL_CLK = 4
 
@@ -85,7 +85,7 @@ class LDC1612_ng:
         device_choices = {
             "ldc1612": PRODUCT_UNKNOWN,
             "btt_eddy": PRODUCT_BTT_EDDY,
-            "cartographer": PRODUCT_CARTOGRAPHER,
+            "cartographer": PRODUCT_STM32F0,
             "mellow_fly": PRODUCT_MELLOW_FLY,
             "ldc1612_internal_clk": PRODUCT_LDC1612_INTERNAL_CLK,
         }
@@ -93,7 +93,7 @@ class LDC1612_ng:
 
         # Fin0 = Fsensor0 / FIN_DIVIDER0
         # Fref0 = Fclk / FREF_DIVIDER0
-        if self._device_product == PRODUCT_CARTOGRAPHER:
+        if self._device_product == PRODUCT_STM32F0:
             self._ldc_freq_clk = 24_000_000
             self._ldc_fin_divider = 1
             self._ldc_fref_divider = 1
