@@ -502,6 +502,9 @@ class ProbeEddy:
         self._sampler: ProbeEddySampler = None
         self._last_sampler: ProbeEddySampler = None
         self.save_samples_path = None
+        
+        # Profile management: None/empty string means default profile
+        self._current_profile: Optional[str] = None
 
         # The last tap Z value, in absolute axis terms. Used for status.
         self._last_tap_z = 0.0
@@ -575,6 +578,16 @@ class ProbeEddy:
             "PROBE_EDDY_NG_SETUP",
             self.cmd_SETUP,
             self.cmd_SETUP_help,
+        )
+        gcode.register_command(
+            "PROBE_EDDY_NG_SAVE_SETUP",
+            self.cmd_SAVE_SETUP,
+            self.cmd_SAVE_SETUP_help,
+        )
+        gcode.register_command(
+            "PROBE_EDDY_NG_LOAD_SETUP",
+            self.cmd_LOAD_SETUP,
+            self.cmd_LOAD_SETUP_help,
         )
         gcode.register_command(
             "PROBE_EDDY_NG_CLEAR_CALIBRATION",
@@ -757,31 +770,142 @@ class ProbeEddy:
                     "clear_homing_state failed: please update Klipper, your klipper is from the brief 5 day window where this was broken"
                 )
 
-    def save_config(self):
+    def save_config(self, profile_name: Optional[str] = None):
+        """
+        Save calibration configuration. If profile_name is None, saves to default profile.
+        If profile_name is provided, saves to that named profile in a separate section.
+        Uses 'eddy_ng_profile <name>' section format to avoid Klipper trying to parse it as a module.
+        """
         configfile = self._printer.lookup_object("configfile")
-        configfile.remove_section(self._full_name)
+        
+        # Determine section name: default uses self._full_name, profiles use "eddy_ng_profile <profile_name>"
+        # Using 'eddy_ng_profile' prefix ensures Klipper won't try to parse it as a probe_eddy_ng module
+        if profile_name is not None and profile_name != "":
+            section_name = f"eddy_ng_profile {profile_name}"
+            is_profile = True
+        else:
+            section_name = self._full_name
+            is_profile = False
+            # Remove default section only when saving to default
+            configfile.remove_section(self._full_name)
 
+        # Save calibrated drive currents
         configfile.set(
-            self._full_name,
+            section_name,
             "calibrated_drive_currents",
             str.join(", ", [str(dc) for dc in self._dc_to_fmap.keys()]),
         )
         configfile.set(
-            self._full_name,
+            section_name,
             "calibration_version",
             str(ProbeEddyFrequencyMap.calibration_version),
         )
 
-        if self.params.reg_drive_current != self._reg_drive_current or self.params.reg_drive_current == self._saved_reg_drive_current:
-            configfile.set(self._full_name, "reg_drive_current", str(self._reg_drive_current))
+        # Save drive currents
+        if not is_profile:
+            # For default profile, only save if different from params or if it was previously saved
+            if self.params.reg_drive_current != self._reg_drive_current or self.params.reg_drive_current == self._saved_reg_drive_current:
+                configfile.set(section_name, "reg_drive_current", str(self._reg_drive_current))
 
-        if self.params.tap_drive_current != self._tap_drive_current or self.params.tap_drive_current == self._saved_tap_drive_current:
-            configfile.set(self._full_name, "tap_drive_current", str(self._tap_drive_current))
+            if self.params.tap_drive_current != self._tap_drive_current or self.params.tap_drive_current == self._saved_tap_drive_current:
+                configfile.set(section_name, "tap_drive_current", str(self._tap_drive_current))
+        else:
+            # For profiles, always save drive currents
+            configfile.set(section_name, "reg_drive_current", str(self._reg_drive_current))
+            configfile.set(section_name, "tap_drive_current", str(self._tap_drive_current))
 
+        # Save calibration data for each drive current
         for _, fmap in self._dc_to_fmap.items():
-            fmap.save_calibration()
+            fmap.save_calibration(section_name=section_name)
 
-        self._log_msg("Calibration saved. Issue a SAVE_CONFIG to write the values to your config file and restart Klipper.")
+        if is_profile:
+            self._log_msg(f"Calibration saved to profile '{profile_name}' in section [{section_name}]. Issue a SAVE_CONFIG to write the values to your config file and restart Klipper.")
+        else:
+            self._log_msg("Calibration saved. Issue a SAVE_CONFIG to write the values to your config file and restart Klipper.")
+
+    def load_profile(self, profile_name: Optional[str] = None):
+        """
+        Load calibration configuration from a profile. If profile_name is None, loads from default profile.
+        If profile_name is provided, loads from that named profile section.
+        Uses 'eddy_ng_profile <name>' section format to avoid Klipper trying to parse it as a module.
+        """
+        configfile = self._printer.lookup_object("configfile")
+        asfc = configfile.autosave.fileconfig
+        
+        # Determine section name: default uses self._full_name, profiles use "eddy_ng_profile <profile_name>"
+        # Using 'eddy_ng_profile' prefix ensures Klipper won't try to parse it as a probe_eddy_ng module
+        if profile_name is not None and profile_name != "":
+            section_name = f"eddy_ng_profile {profile_name}"
+            profile_display = f"profile '{profile_name}'"
+        else:
+            section_name = self._full_name
+            profile_display = "default profile"
+        
+        # Check calibration version - this will also verify the section exists
+        version = asfc.getint(section_name, "calibration_version", fallback=-1)
+        
+        calibration_bad = False
+        if version == -1:
+            # Check if profile exists by looking for calibrated_drive_currents
+            if asfc.get(section_name, "calibrated_drive_currents", fallback=None) is not None:
+                calibration_bad = True
+        elif version != ProbeEddyFrequencyMap.calibration_version:
+            calibration_bad = True
+        
+        if calibration_bad:
+            raise self._printer.command_error(
+                f"Profile '{profile_display}' calibration version mismatch or invalid. Please recalibrate."
+            )
+        
+        # Load calibrated drive currents - parse comma-separated string
+        calibrated_dc_str = asfc.get(section_name, "calibrated_drive_currents", fallback=None)
+        
+        if calibrated_dc_str is None:
+            raise self._printer.command_error(
+                f"Profile '{profile_display}' has no calibration data. Please run PROBE_EDDY_NG_SETUP first."
+            )
+        
+        # Parse comma-separated drive currents
+        calibrated_drive_currents = [int(dc.strip()) for dc in calibrated_dc_str.split(",")]
+        
+        if not calibrated_drive_currents:
+            raise self._printer.command_error(
+                f"Profile '{profile_display}' has no calibration data. Please run PROBE_EDDY_NG_SETUP first."
+            )
+        
+        # Load calibration data for each drive current
+        # Use asfc directly since we're reading from autosave.fileconfig
+        self._dc_to_fmap: Dict[int, ProbeEddyFrequencyMap] = {}
+        for dc in calibrated_drive_currents:
+            fmap = ProbeEddyFrequencyMap(self)
+            # Load directly from fileconfig using the section name
+            key = f"calibration_{dc}"
+            calibstr = asfc.get(section_name, key, fallback=None)
+            if calibstr is not None:
+                # Create a minimal config-like object for load_from_config
+                # We'll pass the fileconfig and section_name, and load_from_config will use asfc.get directly
+                if fmap.load_from_fileconfig(asfc, section_name, dc):
+                    self._dc_to_fmap[dc] = fmap
+        
+        if not self._dc_to_fmap:
+            raise self._printer.command_error(
+                f"Profile '{profile_display}' calibration data failed to load. Please recalibrate."
+            )
+        
+        # Load drive currents from profile section
+        loaded_reg_dc = asfc.getint(section_name, "reg_drive_current", fallback=None)
+        loaded_tap_dc = asfc.getint(section_name, "tap_drive_current", fallback=None)
+        
+        # Update drive currents if found in profile
+        if loaded_reg_dc is not None:
+            self._reg_drive_current = loaded_reg_dc
+        if loaded_tap_dc is not None:
+            self._tap_drive_current = loaded_tap_dc
+        
+        # Set current profile
+        self._current_profile = profile_name
+        
+        self._log_msg(f"Loaded {profile_display} from section [{section_name}] with drive currents: reg={self._reg_drive_current}, tap={self._tap_drive_current}")
 
     def start_sampler(self, *args, **kwargs) -> ProbeEddySampler:
         if self._sampler:
@@ -1068,6 +1192,10 @@ class ProbeEddy:
             self._sensor.set_drive_current(old_drive_current)
 
     cmd_SETUP_help = "Setup"
+    
+    cmd_SAVE_SETUP_help = "Save current calibration setup to a named profile. Usage: PROBE_EDDY_NG_SAVE_SETUP PROFILE=<name>"
+    
+    cmd_LOAD_SETUP_help = "Load a calibration setup from a named profile. Usage: PROBE_EDDY_NG_LOAD_SETUP PROFILE=<name>"
 
     def cmd_SETUP(self, gcmd: GCodeCommand):
         if not self._xy_homed():
@@ -1223,6 +1351,44 @@ class ProbeEddy:
             self.save_config()
 
         self._z_not_homed()
+
+    def cmd_SAVE_SETUP(self, gcmd: GCodeCommand):
+        """Save current calibration to a named profile"""
+        profile_name = gcmd.get("PROFILE", None)
+        if profile_name is None or profile_name == "":
+            raise self._printer.command_error("PROFILE parameter is required. Usage: PROBE_EDDY_NG_SAVE_SETUP PROFILE=<name>")
+        
+        # Validate profile name (no spaces, reasonable characters)
+        if not profile_name.replace("_", "").replace("-", "").isalnum():
+            raise self._printer.command_error("Profile name must contain only alphanumeric characters, underscores, or hyphens")
+        
+        if not self._dc_to_fmap:
+            raise self._printer.command_error("No calibration data available. Please run PROBE_EDDY_NG_SETUP first.")
+        
+        self.save_config(profile_name=profile_name)
+        section_name = f"eddy_ng_profile {profile_name}"
+        gcmd.respond_info(
+            f"Current calibration saved to profile '{profile_name}'.\n"
+            f"Profile will be saved to printer.cfg in section [{section_name}] with keys:\n"
+            f"  calibrated_drive_currents\n"
+            f"  calibration_version\n"
+            f"  reg_drive_current\n"
+            f"  tap_drive_current\n"
+            f"  calibration_<dc>\n"
+            f"Issue SAVE_CONFIG to write these values to printer.cfg."
+        )
+
+    def cmd_LOAD_SETUP(self, gcmd: GCodeCommand):
+        """Load calibration from a named profile, or default if no PROFILE specified or PROFILE="default" """
+        profile_name = gcmd.get("PROFILE", None)
+        if profile_name == "" or profile_name == "default":
+            profile_name = None
+        
+        self.load_profile(profile_name=profile_name)
+        if profile_name:
+            gcmd.respond_info(f"Loaded profile '{profile_name}'. Drive currents: reg={self._reg_drive_current}, tap={self._tap_drive_current}")
+        else:
+            gcmd.respond_info(f"Loaded default profile. Drive currents: reg={self._reg_drive_current}, tap={self._tap_drive_current}")
 
     cmd_CALIBRATE_help = (
         "Calibrate the eddy current sensor. Specify DRIVE_CURRENT to calibrate for a different drive current "
@@ -2837,15 +3003,19 @@ class ProbeEddyFrequencyMap:
     def freq_spread(self) -> float:
         return ((self.freq_range[1] / self.freq_range[0]) - 1.0) * 100.0
 
-    def load_from_config(self, config: ConfigWrapper, drive_current: int):
-        calibstr = config.get(f"calibration_{drive_current}", None)
+    def load_from_fileconfig(self, fileconfig, section_name: str, drive_current: int):
+        """
+        Load calibration data directly from a fileconfig object and section name.
+        """
+        key = f"calibration_{drive_current}"
+        calibstr = fileconfig.get(section_name, key, fallback=None)
         if calibstr is None:
             self.drive_current = 0
             self._ftoh = None
             self._htof = None
             self.height_range = (math.inf, -math.inf)
             self.freq_range = (math.inf, -math.inf)
-            return
+            return False
 
         data = pickle.loads(base64.b64decode(calibstr))
         v = data.get("v", None)
@@ -2870,10 +3040,58 @@ class ProbeEddyFrequencyMap:
         self.freq_range = f_range
         self.drive_current = drive_current
 
-        self._eddy._log_info(f"Loaded calibration for drive current {drive_current}")
+        profile_info = f" (section: {section_name})" if section_name and section_name != self._eddy._full_name else ""
+        self._eddy._log_info(f"Loaded calibration for drive current {drive_current}{profile_info}")
         return True
 
-    def save_calibration(self):
+    def load_from_config(self, config: ConfigWrapper, drive_current: int, section_name: Optional[str] = None):
+        """
+        Load calibration data from config. The config should already be scoped to the correct section.
+        section_name is passed for logging purposes only.
+        """
+        key = f"calibration_{drive_current}"
+        
+        calibstr = config.get(key, None)
+        if calibstr is None:
+            self.drive_current = 0
+            self._ftoh = None
+            self._htof = None
+            self.height_range = (math.inf, -math.inf)
+            self.freq_range = (math.inf, -math.inf)
+            return False
+
+        data = pickle.loads(base64.b64decode(calibstr))
+        v = data.get("v", None)
+        if v is None or v < self.calibration_version:
+            self._eddy._log_info(f"Calibration for dc {drive_current} is old ({v}), needs recalibration")
+            return False
+
+        ftoh = data.get("ftoh", None)
+        ftoh_high = data.get("ftoh_high", None)
+        htof = data.get("htof", None)
+        dc = data.get("dc", None)
+        h_range = data.get("h_range", (math.inf, -math.inf))
+        f_range = data.get("f_range", (math.inf, -math.inf))
+
+        if dc != drive_current:
+            raise configerror(f"ProbeEddyFrequencyMap: drive current mismatch: loaded {dc} != requested {drive_current}")
+
+        self._ftoh = ftoh
+        self._ftoh_high = ftoh_high
+        self._htof = htof
+        self.height_range = h_range
+        self.freq_range = f_range
+        self.drive_current = drive_current
+
+        profile_info = f" (section: {section_name})" if section_name and section_name != self._eddy._full_name else ""
+        self._eddy._log_info(f"Loaded calibration for drive current {drive_current}{profile_info}")
+        return True
+
+    def save_calibration(self, section_name: Optional[str] = None):
+        """
+        Save calibration data. section_name should be the full section name (e.g., "probe_eddy_ng btt_eddy" or "probe_eddy_ng btt_eddy cold").
+        If section_name is None, saves to default profile section.
+        """
         if self._ftoh is None or self._htof is None:
             return
 
@@ -2888,7 +3106,13 @@ class ProbeEddyFrequencyMap:
             "dc": self.drive_current,
         }
         calibstr = base64.b64encode(pickle.dumps(data)).decode()
-        configfile.set(self._eddy._full_name, f"calibration_{self.drive_current}", calibstr)
+        
+        # Use provided section_name or default to self._eddy._full_name
+        if section_name is None:
+            section_name = self._eddy._full_name
+        
+        key = f"calibration_{self.drive_current}"
+        configfile.set(section_name, key, calibstr)
 
     def calibrate_from_values(
         self,
