@@ -24,6 +24,7 @@ from functools import cmp_to_key
 
 from dataclasses import dataclass, field
 from typing import (
+    Any,
     Dict,
     List,
     Optional,
@@ -1479,7 +1480,7 @@ class ProbeEddy:
 
     # This is a mishmash of cmd_PROBE and cmd_PROBE_STATIC. This run_probe
     # is the old one, different than the scanning session run_probe.
-    def run_probe(self, gcmd=None):
+    def run_probe(self, gcmd=None, *args: Any, **kwargs: Any):
         z = self.params.home_trigger_height
         duration = 0.100
 
@@ -2224,7 +2225,7 @@ class ProbeEddyScanningProbe:
         start_time = time - self._sample_time / 2.0
         self._notes.append([start_time, time, th_pos])
 
-    def run_probe(self, gcmd):
+    def run_probe(self, gcmd, *args: Any, **kwargs: Any):
         th = self._toolhead
         th_pos = th.get_position()
 
