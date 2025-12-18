@@ -4,6 +4,7 @@ import os
 import sys
 import argparse
 import shutil
+import re
 from pathlib import Path
 
 IS_MAC = os.path.isdir("/System/Library")
@@ -39,6 +40,23 @@ def uninstall_klipper(target_dir: str):
     os.system(
         f"sed {SED_IN_PLACE_ARG} 's,\"eddy\" in probe_name #eddy-ng,probe_name.startswith(\"probe_eddy_current\"),' '{bed_mesh_path}'"
     )
+
+    print("Unpatching src/Kconfig...")
+    kconfig_path = os.path.join(target_dir, "src/Kconfig")
+    if os.path.exists(kconfig_path):
+        with open(kconfig_path, 'r') as f:
+            content = f.read()
+            if 'EDDY_NG_DISABLE_CARTOGRAPHER_GPIO' in content:
+                # Remove internal config
+                pattern = r'\nconfig EDDY_NG_DISABLE_CARTOGRAPHER_GPIO\n\s+bool\n\s+depends on WANT_LDC1612\n\s+depends on MACH_STM32F0\n\s+default n'
+                new_content = re.sub(pattern, '', content)
+                
+                # Remove user-visible option
+                pattern2 = r'\nconfig EDDY_NG_DISABLE_CARTOGRAPHER_GPIO\n\s+bool "eddy-ng: Disable Cartographer GPIO setup \(for other STM32F0 boards\)"\n\s+depends on WANT_LDC1612\n\s+depends on MACH_STM32F0'
+                new_content = re.sub(pattern2, '', new_content)
+                
+                with open(kconfig_path, 'w') as f:
+                    f.write(new_content)
     return
 
 
@@ -114,6 +132,26 @@ def install_klipper(target_dir: str, uninstall: bool, copy: bool):
     os.system(
         f"sed {SED_IN_PLACE_ARG} 's,probe_name.startswith(\"probe_eddy_current\"),\"eddy\" in probe_name #eddy-ng,' '{bed_mesh_path}'"
     )
+
+    print("Patching src/Kconfig...")
+    kconfig_path = os.path.join(target_dir, "src/Kconfig")
+    if os.path.exists(kconfig_path):
+        with open(kconfig_path, 'r') as f:
+            content = f.read()
+            # Check if already patched
+            if 'EDDY_NG_DISABLE_CARTOGRAPHER_GPIO' not in content:
+                # Add internal config after WANT_SENSOR_ANGLE internal config (around line 171)
+                pattern = r'(config WANT_SENSOR_ANGLE\n\s+bool\n\s+depends on WANT_SPI\n\s+default y)'
+                replacement = r'\1\nconfig EDDY_NG_DISABLE_CARTOGRAPHER_GPIO\n    bool\n    depends on WANT_LDC1612\n    depends on MACH_STM32F0\n    default n'
+                new_content = re.sub(pattern, replacement, content)
+                
+                # Add user-visible option after WANT_SENSOR_ANGLE user-visible config (around line 257, before endmenu)
+                pattern2 = r'(config WANT_SENSOR_ANGLE\n\s+bool "Support angle sensors"\n\s+depends on WANT_SPI)'
+                replacement2 = r'\1\nconfig EDDY_NG_DISABLE_CARTOGRAPHER_GPIO\n    bool "eddy-ng: Disable Cartographer GPIO setup (for other STM32F0 boards)"\n    depends on WANT_LDC1612\n    depends on MACH_STM32F0'
+                new_content = re.sub(pattern2, replacement2, new_content)
+                
+                with open(kconfig_path, 'w') as f:
+                    f.write(new_content)
 
 
 def main():

@@ -1,6 +1,13 @@
-config WANT_EDDY_NG
-    bool "Include eddy-ng ldc1612 support"
-
-config WANT_EDDY_NG_DEBUG
-    bool "Enable verbose eddy-ng logging"
-    depends on WANT_EDDY_NG
+config EDDY_NG_DISABLE_CARTOGRAPHER_GPIO
+    bool "eddy-ng: Disable Cartographer GPIO setup (for other STM32F0 boards)"
+    depends on WANT_LDC1612
+    depends on MACH_STM32F0
+    help
+      Enable this ONLY if you are flashing firmware to an STM32F0 board that
+      is NOT Cartographer hardware (e.g., Orbitool O2 toolboard).
+      
+      Cartographer probe hardware requires GPIO setup (PA15, PB4, PB5) for the
+      LDC1612 sensor. Other STM32F0 boards that connect to an external eddy coil
+      via I2C should disable this GPIO setup.
+      
+      Leave this DISABLED if you are using Cartographer hardware.

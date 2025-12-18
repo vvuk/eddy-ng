@@ -26,7 +26,12 @@
 // For Cartographer
 #include "board/internal.h"
 #include "board/gpio.h"
+// Default to Cartographer GPIO setup unless explicitly disabled
+#if CONFIG_EDDY_NG_DISABLE_CARTOGRAPHER_GPIO
+#define SUPPORT_CARTOGRAPHER 0
+#else
 #define SUPPORT_CARTOGRAPHER 1
+#endif
 #else
 #define SUPPORT_CARTOGRAPHER 0
 #endif
@@ -63,7 +68,7 @@ enum {
 // should match ldc1612_ng.py
 #define PRODUCT_UNKNOWN 0
 #define PRODUCT_BTT_EDDY 1
-#define PRODUCT_CARTOGRAPHER 2
+#define PRODUCT_STM32F0 2
 #define PRODUCT_MELLOW_FLY 3
 #define PRODUCT_LDC1612_INTERNAL_CLK 4
 
@@ -325,10 +330,10 @@ config_ldc1612_ng(uint32_t oid, uint32_t i2c_oid, uint8_t product, int32_t intb_
     case PRODUCT_MELLOW_FLY:
         ld->sensor_cvt = 40000000.0f / (float)(1<<28);
         break;
-#if SUPPORT_CARTOGRAPHER
-    case PRODUCT_CARTOGRAPHER:
+    case PRODUCT_STM32F0:
         ld->sensor_cvt = 24000000.0f / (float)(1<<28);
-
+#if SUPPORT_CARTOGRAPHER
+        // Cartographer hardware-specific GPIO setup
         // This enables the ldc1612 (CS?)
         gpio_out_setup(GPIO('A', 15), 0);
 
@@ -347,8 +352,8 @@ config_ldc1612_ng(uint32_t oid, uint32_t i2c_oid, uint8_t product, int32_t intb_
 
         // There's also a temp sensor on A4, but we can
         // pull that out on the python side.
-        break;
 #endif
+        break;
     case PRODUCT_LDC1612_INTERNAL_CLK:
         ld->sensor_cvt = 43400000.0f / (float)(1<<28);
         break;
