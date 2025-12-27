@@ -568,6 +568,7 @@ class ProbeEddy:
             ["PROBE_STATIC", "PEPS"],
             "PROBE_ACCURACY",
             ["TAP", "PETAP"],
+            "SET_TAP_OFFSET",
             "SET_TAP_ADJUST_Z",
             "TEST_DRIVE_CURRENT",
 
@@ -593,8 +594,7 @@ class ProbeEddy:
             for p in prefixes:
                 gcode.register_command(f"{p}_{cmd_name}", cmd_fn, cmd_help)
             for alias in aliases:
-                for p in prefixes:
-                    gcode.register_command(alias, cmd_fn, (cmd_help or "") + f" (alias for {cmd_name})")
+                gcode.register_command(alias, cmd_fn, (cmd_help or "") + f" (alias for {cmd_name})")
 
         gcode.register_command("Z_OFFSET_APPLY_PROBE", None)
         gcode.register_command(
