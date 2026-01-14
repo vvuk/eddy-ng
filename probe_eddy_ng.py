@@ -229,6 +229,8 @@ class ProbeEddyParams:
     tap_max_samples: int = 5
     # The maximum standard deviation for any 3 samples to be considered valid.
     tap_samples_stddev: float = 0.020
+    # Use the median value instead of the mean
+    tap_samples_median: bool = False
     # Where in the time range of tap detection start to the time the threshold
     # is crossed should the tap be placed. 0.0 places it at the earliest start
     # of tap detection; 1.0 places it at the point where the threshold is hit.
@@ -324,6 +326,7 @@ class ProbeEddyParams:
         self.tap_samples = config.getint("tap_samples", self.tap_samples, minval=1)
         self.tap_max_samples = config.getint("tap_max_samples", self.tap_max_samples, minval=self.tap_samples)
         self.tap_samples_stddev = config.getfloat("tap_samples_stddev", self.tap_samples_stddev, above=0.0)
+        self.tap_samples_median = config.getboolean("tap_samples_median", self.tap_samples_median)
         self.tap_trigger_safe_start_height = config.getfloat(
             "tap_trigger_safe_start_height",
             -1.0,
@@ -1798,6 +1801,7 @@ class ProbeEddy:
         samples = gcmd.get_int("SAMPLES", self.params.tap_samples, minval=1)
         max_samples = gcmd.get_int("MAX_SAMPLES", self.params.tap_max_samples, minval=samples)
         samples_stddev = gcmd.get_float("SAMPLES_STDDEV", self.params.tap_samples_stddev, above=0.0)
+        samples_median: bool = gcmd.get_int("SAMPLES_MEDIAN", 1 if self.params.tap_samples_median else 0) == 1
         home_z: bool = gcmd.get_int("HOME_Z", 1) == 1
         write_plot_arg: int = gcmd.get_int("PLOT", None)
 
@@ -1903,7 +1907,7 @@ class ProbeEddy:
                     break
 
                 if len(results) >= samples:
-                    tap_z, tap_stddev, tap_overshoot = self._compute_tap_z(results, samples, samples_stddev)
+                    tap_z, tap_stddev, tap_overshoot = self._compute_tap_z(results, samples, samples_stddev, samples_median)
                     if tap_z is not None:
                         break
         finally:
@@ -1996,7 +2000,7 @@ class ProbeEddy:
 
     # Compute the average tap_z from a set of tap results, taking a cluster of samples
     # from the result that has the lowest standard deviation
-    def _compute_tap_z(self, taps: List[ProbeEddy.TapResult], samples: int, req_stddev: float) -> Tuple[float, float, float]:
+    def _compute_tap_z(self, taps: List[ProbeEddy.TapResult], samples: int, req_stddev: float, use_median: bool) -> Tuple[float, float, float]:
         if len(taps) < samples:
             return None, None, None
 
@@ -2007,10 +2011,11 @@ class ProbeEddy:
             tap_zs = np.array([t.probe_z for t in cluster])
             overshoots = np.array([t.overshoot for t in cluster])
             mean = np.mean(tap_zs)
+            median = np.median(tap_zs)
             std = np.std(tap_zs)
             if std < std_min:
                 std_min = std
-                tap_z = mean
+                tap_z = median if use_median else mean
                 overshoot = np.mean(overshoots)
 
         if std_min <= req_stddev:
