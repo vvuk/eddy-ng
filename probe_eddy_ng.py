@@ -21,6 +21,9 @@ import numpy as np
 import numpy.polynomial as npp
 from itertools import combinations
 from functools import cmp_to_key
+from typing import cast
+
+from scipy.optimize import curve_fit
 
 from dataclasses import dataclass, field
 from typing import (
@@ -263,6 +266,9 @@ class ProbeEddyParams:
     max_errors: int = 0
     # whether to print lots of verbose debug info to the log
     debug: bool = True
+    bigfoot: bool = False
+    primary: bool = True
+    bigfoot_scan_position: list[float] | None = None
 
     tap_trigger_safe_start_height: float = 1.5
 
@@ -274,7 +280,7 @@ class ProbeEddyParams:
             return None
         try:
             return [float(v) for v in re.split(r"\s*,\s*|\s+", s)]
-        except:
+        except ValueError:
             raise configerror(f"Can't parse '{s}' as list of floats")
 
     def is_default_butter_config(self):
@@ -286,6 +292,18 @@ class ProbeEddyParams:
         self.probe_speed = config.getfloat("probe_speed", self.probe_speed, above=0.0)
         self.lift_speed = config.getfloat("lift_speed", self.lift_speed, above=0.0)
         self.move_speed = config.getfloat("move_speed", self.move_speed, above=0.0)
+        self.reg_drive_current = config.getint("reg_drive_current", 0, minval=0, maxval=31)
+
+        self.allow_unsafe = config.getboolean("allow_unsafe", self.allow_unsafe)
+        self.debug = config.getboolean("debug", self.debug)
+        self.max_errors = config.getint("max_errors", self.max_errors)
+        self.primary = config.getboolean("primary", default=self.primary)
+
+        self.bigfoot = config.getboolean("bigfoot", self.bigfoot)
+        if self.bigfoot:
+            self.bigfoot_scan_position = config.getfloatlist("bigfoot_scan_position", count=3, default=None)
+            return
+
         self.home_trigger_height = config.getfloat("home_trigger_height", self.home_trigger_height, minval=1.0)
         self.home_trigger_safe_start_offset = config.getfloat(
             "home_trigger_safe_start_offset",
@@ -294,9 +312,7 @@ class ProbeEddyParams:
         )
         self.calibration_z_max = config.getfloat("calibration_z_max", self.calibration_z_max, above=0.0)
 
-        self.reg_drive_current = config.getint("reg_drive_current", 0, minval=0, maxval=31)
         self.tap_drive_current = config.getint("tap_drive_current", 0, minval=0, maxval=31)
-
         self.tap_start_z = config.getfloat("tap_start_z", self.tap_start_z, above=0.0)
         self.tap_target_z = config.getfloat("tap_target_z", self.tap_target_z)
         self.tap_speed = config.getfloat("tap_speed", self.tap_speed, above=0.0)
@@ -334,12 +350,8 @@ class ProbeEddyParams:
         if self.tap_trigger_safe_start_height == -1.0:  # sentinel
             self.tap_trigger_safe_start_height = self.home_trigger_height / 2.0
 
-        self.allow_unsafe = config.getboolean("allow_unsafe", self.allow_unsafe)
         self.write_tap_plot = config.getboolean("write_tap_plot", self.write_tap_plot)
         self.write_every_tap_plot = config.getboolean("write_every_tap_plot", self.write_every_tap_plot)
-        self.debug = config.getboolean("debug", self.debug)
-
-        self.max_errors = config.getint("max_errors", self.max_errors)
 
         self.x_offset = config.getfloat("x_offset", self.x_offset)
         self.y_offset = config.getfloat("y_offset", self.y_offset)
@@ -406,7 +418,7 @@ class ProbeEddyProbeResult:
             max_value=float(np.max(h)),
             tstart=float(times[0]),
             tend=float(times[-1]),
-            errors=errors
+            errors=errors,
         )
 
     def __format__(self, spec):
@@ -442,14 +454,40 @@ class ProbeEddy:
         }
         sensor_type = config.getchoice("sensor_type", {s: s for s in sensors})
 
+        self.params = ProbeEddyParams()
+        self.params.load_from_config(config)
+
         self._sensor_type = sensor_type
-        self._sensor = sensors[sensor_type](config)
+        self._sensor = sensors[sensor_type](config, name=self._name, primary=self.params.primary)
         self._mcu = self._sensor.get_mcu()
         self._toolhead: ToolHead = None  # filled in _handle_connect
         self._trapq = None
 
-        self.params = ProbeEddyParams()
-        self.params.load_from_config(config)
+        self._dummy_gcode_cmd: GCodeCommand = self._gcode.create_gcode_command("", "", {})
+        self._dc_to_fmap: Dict[int, ProbeEddyFrequencyMap] = {}
+
+        # There can only be one active sampler at a time
+        self._sampler: ProbeEddySampler = None
+        self._last_sampler: ProbeEddySampler = None
+        self.save_samples_path = None
+
+        # The last tap Z value, in absolute axis terms. Used for status.
+        self._last_tap_z = 0.0
+        # The last gcode offset applied after tap, either the tap
+        # value, or 0.0 if HOME_Z=1
+        self._last_tap_gcode_adjustment = 0.0
+
+        self._ffi_pull_move_1 = chelper.get_ffi()[0].new("struct pull_move[1]")
+
+        self._printer.register_event_handler("gcode:command_error", self._handle_command_error)
+        self._printer.register_event_handler("klippy:connect", self._handle_connect)
+
+        if self.params.bigfoot:
+            self.define_commands(self._gcode, bigfoot=True)
+            self._bigfoot = BigfootProbe(self)
+            return
+
+        self._bigfoot = None
 
         # figure out if either of these comes from the autosave section
         # so we can sort out what we want to write out later on
@@ -484,7 +522,6 @@ class ProbeEddy:
 
         calibrated_drive_currents = config.getintlist("calibrated_drive_currents", [])
 
-        self._dc_to_fmap: Dict[int, ProbeEddyFrequencyMap] = {}
         if not calibration_bad:
             for dc in calibrated_drive_currents:
                 fmap = ProbeEddyFrequencyMap(self)
@@ -498,17 +535,6 @@ class ProbeEddy:
 
         # Our virtual endstop wrapper -- used for homing.
         self._endstop_wrapper = ProbeEddyEndstopWrapper(self)
-
-        # There can only be one active sampler at a time
-        self._sampler: ProbeEddySampler = None
-        self._last_sampler: ProbeEddySampler = None
-        self.save_samples_path = None
-
-        # The last tap Z value, in absolute axis terms. Used for status.
-        self._last_tap_z = 0.0
-        # The last gcode offset applied after tap, either the tap
-        # value, or 0.0 if HOME_Z=1
-        self._last_tap_gcode_adjustment = 0.0
 
         # This class emulates "PrinterProbe". We use some existing helpers to implement
         # functionality like start_session
@@ -531,11 +557,7 @@ class ProbeEddy:
         self._tap_adjust_z = self.params.tap_adjust_z
 
         # define our own commands
-        self._dummy_gcode_cmd: GCodeCommand = self._gcode.create_gcode_command("", "", {})
         self.define_commands(self._gcode)
-
-        self._printer.register_event_handler("gcode:command_error", self._handle_command_error)
-        self._printer.register_event_handler("klippy:connect", self._handle_connect)
 
         # patch bed_mesh because Klipper
         if not IS_KALICO:
@@ -560,54 +582,72 @@ class ProbeEddy:
         if self.params.debug:
             logging.info(f"{self._name}: {msg}")
 
-    def define_commands(self, gcode):
-        commands = [
+    def define_commands(self, gcode, bigfoot: bool = False):
+        names = [self._name]
+        if self.params.primary:
+            names.append(None)
+
+        if self.params.primary:
+            gcode.register_command("Z_OFFSET_APPLY_PROBE", None)
+
+        base_commands = [
             ["STATUS", "PES"],
-            "CALIBRATE",
-            "SETUP",
-            "CLEAR_CALIBRATION",
-            ["PROBE", "PEP"],
             ["PROBE_STATIC", "PEPS"],
+
+            "STREAM_START",
+            "STREAM_STOP",
+        ]
+
+        tap_commands = [
+            "SETUP",
+            "CALIBRATE",
+            "CALIBRATION_STATUS",
+            "CLEAR_CALIBRATION",
             "PROBE_ACCURACY",
-            ["TAP", "PETAP"],
             "SET_TAP_OFFSET",
             "SET_TAP_ADJUST_Z",
             "TEST_DRIVE_CURRENT",
+            ["PROBE", "PEP"],
+            ["TAP", "PETAP"],
 
             "BED_MESH_EXPERIMENTAL",
-            "START_STREAM_EXPERIMENTAL",
-            "STOP_STREAM_EXPERIMENTAL",
         ]
+
+        commands = base_commands.copy()
+        if not bigfoot:
+            commands.extend(tap_commands)
 
         prefixes = ["PROBE_EDDY_NG", "EDDYNG"]
 
-        for v in commands:
-            if type(v) is list:
-                cmd_name = v[0]
-                aliases = v[1:]
-            else:
-                cmd_name = v
-                aliases = []
+        for name in names:
+            for v in commands:
+                if type(v) is list:
+                    cmd_name = v[0]
+                    aliases = v[1:]
+                else:
+                    cmd_name = v
+                    aliases = []
 
-            func_name = f"cmd_{cmd_name.replace("_EXPERIMENTAL", "")}"
+                func_name = f"cmd_{cmd_name.replace('_EXPERIMENTAL', '')}"
 
-            cmd_fn = getattr(self, func_name)
-            cmd_help = getattr(self, f"{func_name}_help", None)
-            for p in prefixes:
-                gcode.register_command(f"{p}_{cmd_name}", cmd_fn, cmd_help)
-            for alias in aliases:
-                gcode.register_command(alias, cmd_fn, (cmd_help or "") + f" (alias for {cmd_name})")
+                cmd_fn = getattr(self, func_name)
+                cmd_help = getattr(self, f"{func_name}_help", None)
+                for p in prefixes:
+                    gcode.register_mux_command(f"{p}_{cmd_name}", "SENSOR", name, cmd_fn, cmd_help)
+                for alias in aliases:
+                    gcode.register_mux_command(alias, "SENSOR", name, cmd_fn, (cmd_help or "") + f" (alias for {cmd_name})")
 
-        gcode.register_command("Z_OFFSET_APPLY_PROBE", None)
-        gcode.register_command(
-            "Z_OFFSET_APPLY_PROBE",
-            self.cmd_Z_OFFSET_APPLY_PROBE,
-            "Apply the current G-Code Z offset to tap_adjust_z",
-        )
+            gcode.register_mux_command(
+                "Z_OFFSET_APPLY_PROBE",
+                "SENSOR", name,
+                self.cmd_Z_OFFSET_APPLY_PROBE,
+                "Apply the current G-Code Z offset to tap_adjust_z",
+            )
 
     def _handle_command_error(self, gcmd=None):
         try:
             if self._sampler is not None:
+                logging.info("COMMAND ERROR")
                 self._sampler.finish()
         except:
             logging.exception("EDDYng handle_command_error: sampler.finish() failed")
@@ -618,13 +658,12 @@ class ProbeEddy:
         for msg in self.params._warning_msgs:
             self._log_warning(msg)
 
-    def _get_trapq_position(self, print_time: float) -> Tuple[Tuple[float, float, float], float]:
+    def _get_trapq_position(self, print_time: float) -> Tuple[Tuple[float, float, float] | None, float | None]:
         ffi_main, ffi_lib = chelper.get_ffi()
-        data = ffi_main.new("struct pull_move[1]")
-        count = ffi_lib.trapq_extract_old(self._trapq, data, 1, 0.0, print_time)
+        count = ffi_lib.trapq_extract_old(self._trapq, self._ffi_pull_move_1, 1, 0.0, print_time)
         if not count:
             return None, None
-        move = data[0]
+        move = self._ffi_pull_move_1[0]
         move_time = max(0.0, min(move.move_t, print_time - move.print_time))
         dist = (move.start_v + 0.5 * move.accel * move_time) * move_time
         pos = (
@@ -779,7 +818,9 @@ class ProbeEddy:
                     past_pos, past_v = self._get_trapq_position(times[i])
                     past_k_z = past_pos[2] if past_pos is not None else ""
                     past_v = past_v if past_v is not None else ""
-                    data_file.write(f"{times[i]},{freqs[i]},{heights[i] if heights else ''},{past_k_z},{past_v},{raw_freqs[i]},{trigger_time},{tap_start_time}\n")
+                    data_file.write(
+                        f"{times[i]},{freqs[i]},{heights[i] if heights else ''},{past_k_z},{past_v},{raw_freqs[i]},{trigger_time},{tap_start_time}\n"
+                    )
             logging.info(f"Wrote {len(times)} samples to {self.save_samples_path}")
             self.save_samples_path = None
 
@@ -962,10 +1003,13 @@ class ProbeEddy:
         )
 
     def probe_static_height(self, duration: float = 0.100) -> ProbeEddyProbeResult:
+        now = self._print_time_now()
+        tend = now + (duration + self._sensor._ldc_settle_time)
         with self.start_sampler() as sampler:
-            now = self._print_time_now()
-            sampler.wait_for_sample_at_time(now + (duration + self._sensor._ldc_settle_time))
-            sampler.finish()
+            self._reactor.pause(self._reactor.monotonic() + duration)
+            while tend >= self._print_time_now():
+                self._reactor.pause(self._reactor.monotonic() + 0.050)
+                break
 
         if sampler.height_count == 0:
             return ProbeEddyProbeResult([])
@@ -975,7 +1019,7 @@ class ProbeEddy:
 
         first_idx = bisect.bisect_left(sampler.times, stime)
         if first_idx == len(sampler.times):
-            raise self._printer.command_error(f"No samples in time range")
+            raise self._printer.command_error(f"No samples in time range (errors: {sampler.error_counts})")
 
         errors = sampler.error_count
         return ProbeEddyProbeResult.make(sampler.times[first_idx:], sampler.heights[first_idx:], errors=errors)
@@ -1041,24 +1085,30 @@ class ProbeEddy:
         if not self._xy_homed():
             raise self._printer.command_error("X and Y must be homed before setup")
 
-        if self._z_homed():
-            # z-hop so that manual probe helper doesn't complain if we're already
-            # at the right place
-            self._z_hop()
+        trust_z_axis = gcmd.get_int("TRUST_Z", 0) == 1
 
-        # Now reset the axis so that we have a full range to calibrate with
         th = self._printer.lookup_object("toolhead")
         th_pos = th.get_position()
-        # XXX This is proably not correct for some printers?
-        zrange = th.get_kinematics().rails[2].get_range()
-        th_pos[2] = zrange[1] - 20.0
-        self._set_toolhead_position(th_pos, [2])
 
-        manual_probe.ManualProbeHelper(
-            self._printer,
-            gcmd,
-            lambda kin_pos: self.cmd_SETUP_next(gcmd, kin_pos),
-        )
+        if trust_z_axis:
+            self.cmd_SETUP_next(gcmd, th_pos[0:3])
+        else:
+            if self._z_homed():
+                # z-hop so that manual probe helper doesn't complain if we're already
+                # at the right place
+                self._z_hop()
+
+            # Now reset the axis so that we have a full range to calibrate with
+            # XXX This is proably not correct for some printers?
+            zrange = th.get_kinematics().rails[2].get_range()
+            th_pos[2] = zrange[1] - 20.0
+            self._set_toolhead_position(th_pos, [2])
+
+            manual_probe.ManualProbeHelper(
+                self._printer,
+                gcmd,
+                lambda kin_pos: self.cmd_SETUP_next(gcmd, kin_pos),
+            )
 
     def cmd_SETUP_next(self, gcmd: GCodeCommand, kin_pos: Optional[List[float]]):
         if kin_pos is None:
@@ -1068,13 +1118,15 @@ class ProbeEddy:
 
         debug = 1 if self.params.debug else 0
         debug = gcmd.get_int("DEBUG", debug) == 1
+        trust_z_axis = gcmd.get_int("TRUST_Z", 0) == 1
 
         # We just did a ManualProbeHelper, so we're going to zero the z-axis
         # to make the following code easier, so it can assume z=0 is actually real zero.
         th = self._printer.lookup_object("toolhead")
         th_pos = th.get_position()
-        th_pos[2] = 0.0
-        self._set_toolhead_position(th_pos, [2])
+        if not trust_z_axis:
+            th_pos[2] = 0.0
+            self._set_toolhead_position(th_pos, [2])
 
         orig_drive_current = self.current_drive_current()
         start_dc = self._sensor._drive_current_range[1]
@@ -1405,6 +1457,9 @@ class ProbeEddy:
         # return self._probe_session.start_probe_session(gcmd)
 
     def get_status(self, eventtime):
+        if self.params.bigfoot:
+            return dict()
+
         if self._cmd_helper is not None:
             status = self._cmd_helper.get_status(eventtime)
         else:
@@ -1419,6 +1474,8 @@ class ProbeEddy:
                 "last_tap_z": float(self._last_tap_z),
             }
         )
+        if self._bigfoot:
+            self._bigfoot.update_status(status)
         return status
 
     # Old Probe interface, for Kalico
@@ -1748,16 +1805,16 @@ class ProbeEddy:
         tap_start_z: float = gcmd.get_float("START_Z", self.params.tap_start_z, above=2.0)
         target_z: float = gcmd.get_float("TARGET_Z", self.params.tap_target_z)
         tap_threshold: float = gcmd.get_float("THRESHOLD", None)  # None so we have a sentinel value
-        tap_threshold = gcmd.get_float("TT", tap_threshold)  # alias for THRESHOLD
-        tap_adjust_z = gcmd.get_float("ADJUST_Z", self._tap_adjust_z)
-        do_retract = gcmd.get_int("RETRACT", 1) == 1
-        samples = gcmd.get_int("SAMPLES", self.params.tap_samples, minval=1)
-        max_samples = gcmd.get_int("MAX_SAMPLES", self.params.tap_max_samples, minval=samples)
-        samples_stddev = gcmd.get_float("SAMPLES_STDDEV", self.params.tap_samples_stddev, above=0.0)
+        tap_threshold: float = gcmd.get_float("TT", tap_threshold)  # alias for THRESHOLD
+        tap_adjust_z: float = gcmd.get_float("ADJUST_Z", self._tap_adjust_z)
+        do_retract: bool = gcmd.get_int("RETRACT", 1) == 1
+        samples: int = gcmd.get_int("SAMPLES", self.params.tap_samples, minval=1)
+        max_samples: int = gcmd.get_int("MAX_SAMPLES", self.params.tap_max_samples, minval=samples)
+        samples_stddev: float = gcmd.get_float("SAMPLES_STDDEV", self.params.tap_samples_stddev, above=0.0)
         home_z: bool = gcmd.get_int("HOME_Z", 1) == 1
         write_plot_arg: int = gcmd.get_int("PLOT", None)
 
-        mode = gcmd.get("MODE", self.params.tap_mode).lower()
+        mode: str = gcmd.get("MODE", self.params.tap_mode).lower()
         if mode not in ("wma", "butter"):
             raise self._printer.command_error(f"Invalid mode: {mode}")
 
@@ -1819,7 +1876,7 @@ class ProbeEddy:
 
             for sample_i in range(max_samples):
                 if self.params.debug:
-                    self.save_samples_path = f"/tmp/tap-samples-{sample_i+1}.csv"
+                    self.save_samples_path = f"/tmp/tap-samples-{sample_i + 1}.csv"
 
                 tap = self.do_one_tap(
                     start_z=tap_start_z,
@@ -1894,8 +1951,9 @@ class ProbeEddy:
         if home_z:
             th_pos = th.get_position()
             th_z = th_pos[2]
-            #true_z_zero = - (tap_adjust_z + tap_overshoot)
-            true_z_zero = - computed_tap_z
+            ###true_z_zero = - (tap_adjust_z + tap_overshoot)
+            ##true_z_zero = - computed_tap_z
+            true_z_zero = -(tap_adjust_z + tap_overshoot)
             th_pos[2] = th_pos[2] + true_z_zero
             homed_to_str = f"homed z with true_z_zero={true_z_zero:.3f}, thz={th_z:.3f}, setz={th_pos[2]:.3f}, overshoot={tap_overshoot:.3f}, "
             self._set_toolhead_position(th_pos, [2])
@@ -1984,7 +2042,7 @@ class ProbeEddy:
         if tapnum == -1:
             filename_base = "tap"
         else:
-            filename_base = f"tap-{tapnum+1}"
+            filename_base = f"tap-{tapnum + 1}"
         tapplot_path_png = f"/tmp/{filename_base}.png"
         tapplot_path_html = f"/tmp/{filename_base}.html"
 
@@ -2047,12 +2105,12 @@ class ProbeEddy:
 
         import plotly.graph_objects as go
 
-        (c_red, c_lt_red) = ('#9e4058', '#C2697F')
-        (c_orange, c_lt_orange) = ('#d0641e', '#E68E54')
-        (c_yellow, c_lt_yellow) = ('#f9ab0e', '"#FBC559')
-        (c_green, c_lt_green) = ('#589e40', '#7FC269')
-        (c_blue, c_lt_blue) = ('#2c3778', '#4151B0')
-        (c_purple, c_lt_purple) = ('#513965', '#785596')
+        (c_red, c_lt_red) = ("#9e4058", "#C2697F")
+        (c_orange, c_lt_orange) = ("#d0641e", "#E68E54")
+        (c_yellow, c_lt_yellow) = ("#f9ab0e", '"#FBC559')
+        (c_green, c_lt_green) = ("#589e40", "#7FC269")
+        (c_blue, c_lt_blue) = ("#2c3778", "#4151B0")
+        (c_purple, c_lt_purple) = ("#513965", "#785596")
 
         fig = go.Figure()
 
@@ -2112,16 +2170,19 @@ class ProbeEddy:
             thtml = time.time() - t0
         self._log_info(f"Wrote tap plot to {tapplot_path_png or ''} {tapplot_path_html or ''}  [took {timg:.1f}, {thtml:.1f}]")
 
-    def cmd_START_STREAM(self, gcmd):
+    def cmd_STREAM_START(self, gcmd):
         self.save_samples_path = "/tmp/stream.csv"
-        self._log_info("Eddy sampling enabled")
-        self.start_sampler()
+        msg = f"Starting stream to {self.save_samples_path}"
+        if not self.calibrated():
+            msg += " (not calibrated)"
+        gcmd.respond_info(msg)
+        self.start_sampler(calculate_heights=self.calibrated())
 
-    def cmd_STOP_STREAM(self, gcmd):
+    def cmd_STREAM_STOP(self, gcmd):
         self._log_info("Eddy sampling finished")
+        sampler = self._sampler
         self._sampler.finish()
-        self._sampler = None
-
+        gcmd.respond_info(f"Stopped stream ({len(sampler.times)} samples, {sampler.error_count} errors)")
 
 
 # Probe interface that does only scanning, no up/down movement.
@@ -2520,6 +2581,7 @@ class ProbeEddySampler:
         self._stopped = False
         self._started = False
         self._errors = 0
+        self._error_counts = [0, 0, 0, 0]
         self._fmap = eddy.map_for_drive_current() if calculate_heights else None
 
         self.times = []
@@ -2554,29 +2616,37 @@ class ProbeEddySampler:
 
     # bulk sample callback for when new data arrives
     # from the probe
-    def _add_hw_measurement(self, msg):
-        if self._stopped:
-            return False
+    def _add_hw_data(self, times, raw_freqs):
+        has_errors = False
+        for rf in raw_freqs:
+            if (rf >> 28) != 0:
+                has_errors = True
+                break
 
-        self._errors += msg["errors"]
-        data = msg["data"]
+        if not has_errors:
+            self.times.extend(times)
+            self.raw_freqs.extend(raw_freqs)
+            return
 
-        # data is (t, fv)
-        if data:
-            times, raw_freqs = zip(*data)
-        else:
-            times, raw_freqs = [], []
+        for i in range(len(times)):
+            t = times[i]
+            rf = raw_freqs[i]
+            err = rf >> 28
+            if err == 0:
+                self.times.append(t)
+                self.raw_freqs.append(rf)
+                continue
 
-        self.times.extend(times)
-        self.raw_freqs.extend(raw_freqs)
-
-        return True
+            self._errors += 1
+            for i in range(4):
+                if err & (1 << i) != 0:
+                    self._error_counts[i] += 1
 
     def start(self):
         if self._stopped:
             raise self._printer.command_error("ProbeEddySampler.start() called after finish()")
         if not self._started:
-            self._sensor.add_bulk_sensor_data_client(self._add_hw_measurement)
+            self._sensor.start_streaming(self._add_hw_data)
             self._started = True
 
     def finish(self):
@@ -2586,18 +2656,31 @@ class ProbeEddySampler:
             raise self._printer.command_error("ProbeEddySampler.finish() called without start()")
         if self.eddy._sampler is not self:
             raise self._printer.command_error("ProbeEddySampler.finish(): eddy._sampler is not us!")
+        self._sensor.stop_streaming()
         self._update_samples()
         self.eddy._sampler_finished(self)
         self._stopped = True
+
+    def trim_to_times(self, tstart: float | None = None, tend: float | None = None):
+        if not self._stopped:
+            raise self._printer.command_error("ProbeEddySampler.trim_to_times while sampler was active")
+
+        istart = bisect.bisect_left(self.times, tstart) if tstart else 0
+        iend = bisect.bisect_right(self.times, tend) if tend else len(self.times)
+
+        self.times = self.times[istart:iend]
+        self.freqs = self.freqs[istart:iend]
+        self.raw_freqs = self.raw_freqs[istart:iend]
+        self.heighs = self.heights[istart:iend] if self.heights else None
 
     def _update_samples(self):
         if len(self.freqs) == len(self.raw_freqs):
             return
 
-        conv_ratio = self._sensor.freqval_conversion_value()
+        conv_add, conv_mul = self._sensor.freqval_conversion_values()
 
         start_idx = len(self.freqs)
-        freqs_np = np.asarray(self.raw_freqs[start_idx:]) * conv_ratio
+        freqs_np = (np.asarray(self.raw_freqs[start_idx:]) + conv_add) * conv_mul
         self.freqs.extend(freqs_np.tolist())
 
         if self._fmap is not None:
@@ -2607,6 +2690,10 @@ class ProbeEddySampler:
     @property
     def error_count(self):
         return self._errors
+
+    @property
+    def error_counts(self):
+        return list(self._error_counts)
 
     # get the last sampled height
     def get_last_height(self) -> float:
@@ -2626,15 +2713,20 @@ class ProbeEddySampler:
 
     # Wait until a sample for the given time arrives
     def wait_for_sample_at_time(self, sample_print_time, max_wait_time=0.250, raise_error=True) -> bool:
-        def report_no_samples():
+        self.eddy._log_debug(f"EDDYng waiting for sample at {sample_print_time:.3f} (now: max_wait_time: {max_wait_time:.3f})")
+
+        def report_no_samples(waited_for):
             if raise_error:
-                raise self._printer.command_error(f"No samples received for time {sample_print_time:.3f} (waited for {max_wait_time:.3f})")
+                lsf = f", last sample {self.times[-1]}" if self.times else ", no samples at all"
+                logging.info(f"stack", stack_info=True)
+                raise self._printer.command_error(f"No samples received for time {sample_print_time:.3f} (waited for {waited_for:.3f}{lsf})")
             return False
 
         if self._stopped:
             # if we're not getting any more samples, we can check directly
+            self.eddy._log_debug(f"stopped, last sample time: {self.times[-1]}")
             if len(self.times) == 0:
-                return report_no_samples()
+                return report_no_samples(0.0)
             return self.times[-1] >= sample_print_time
 
         # quick check
@@ -2646,6 +2738,9 @@ class ProbeEddySampler:
         # if sample_print_time is in the future, make sure to wait max_wait_time
         # past the expected time
         if sample_print_time > wait_start_time:
+            self.eddy._log_debug(
+                f"{sample_print_time} > {wait_start_time}; max_wait_time = {max_wait_time} + ({sample_print_time} - {wait_start_time} [= {sample_print_time - wait_start_time}])"
+            )
             max_wait_time = max_wait_time + (sample_print_time - wait_start_time)
 
         # this is just a sanity check, there shouldn't be any reason to ever wait this long
@@ -2659,9 +2754,12 @@ class ProbeEddySampler:
         )
         now = self.eddy._print_time_now()
         while len(self.times) == 0 or self.times[-1] < sample_print_time:
+            # Process any pending data
+            self._sensor.process_data()
+
             now = self.eddy._print_time_now()
             if now - wait_start_time > max_wait_time:
-                return report_no_samples()
+                return report_no_samples(now - wait_start_time)
             self._reactor.pause(self._reactor.monotonic() + 0.010)
 
         if now - wait_start_time > 1.0:
@@ -2739,7 +2837,7 @@ class ProbeEddySampler:
             raise self._printer.command_error("Update samples didn't compute heights")
 
         self.eddy._log_debug(
-                f"find_height_at_time: looking between {start_time:.3f}s-{end_time:.3f}s, inside {len(self.times)} samples, time range {self.times[0]:.3f}s to {self.times[-1]:.3f}s"
+            f"find_height_at_time: looking between {start_time:.3f}s-{end_time:.3f}s, inside {len(self.times)} samples, time range {self.times[0]:.3f}s to {self.times[-1]:.3f}s"
         )
 
         # find the first sample that is >= start_time
@@ -3129,7 +3227,6 @@ class BedMeshScanHelper:
 
         self._mesh_points, self._mesh_path = self._generate_path()
 
-
     def _generate_path(self):
         x_vals = np.linspace(self._x_min, self._x_max, self._x_points)
         y_vals = np.linspace(self._y_min, self._y_max, self._y_points)
@@ -3167,11 +3264,11 @@ class BedMeshScanHelper:
             i += 1
 
         def sort_points(a, b):
-            if a[1] < b[1]: # y first
+            if a[1] < b[1]:  # y first
                 return -1
             if a[1] > b[1]:
                 return 1
-            if a[0] < b[0]: # then x
+            if a[0] < b[0]:  # then x
                 return -1
             if a[0] > b[0]:
                 return 1
@@ -3190,14 +3287,16 @@ class BedMeshScanHelper:
             matrix.append(row)
 
         params = self._bed_mesh.bmc.mesh_config.copy()
-        params.update({
-            "min_x": self._x_min,
-            "max_x": self._x_max,
-            "min_y": self._y_min,
-            "max_y": self._y_max,
-            "x_count": self._x_points,
-            "y_count": self._y_points,
-        })
+        params.update(
+            {
+                "min_x": self._x_min,
+                "max_x": self._x_max,
+                "min_y": self._y_min,
+                "max_y": self._y_max,
+                "x_count": self._x_points,
+                "y_count": self._y_points,
+            }
+        )
         mesh = bed_mesh.ZMesh(params, None)
         try:
             mesh.build_mesh(matrix)
@@ -3222,10 +3321,10 @@ class BedMeshScanHelper:
 
         with self._eddy.start_sampler() as sampler:
             path_times = self._scan_path()
-            sampler.wait_for_sample_at_time(path_times[-1] + sample_time*2.)
+            sampler.wait_for_sample_at_time(path_times[-1] + sample_time * 2.0)
             sampler.finish()
 
-            heights = sampler.find_heights_at_times([(t - sample_time/2., t + sample_time/2.) for t in path_times])
+            heights = sampler.find_heights_at_times([(t - sample_time / 2.0, t + sample_time / 2.0) for t in path_times])
             # Note plus tap_offset here, vs -tap_offset when probing. These are actual
             # heights, the other is "offset from real"
             heights = [h + self._eddy._tap_offset for h in heights]
@@ -3262,3 +3361,227 @@ def bed_mesh_ProbeManager_start_probe_override(self, gcmd):
 
 def load_config_prefix(config: ConfigWrapper):
     return ProbeEddy(config)
+
+
+class BigfootProbe:
+    def __init__(self, eddy: ProbeEddy):
+        self.eddy = eddy
+        self.params = self.eddy.params
+        self.last_result = None
+        self.last_offset = None
+        self._printer = eddy._printer
+        self._sensor = eddy._sensor
+        self._reference = [0.0, 0.0, 0.0]
+
+        gcode = self._printer.lookup_object("gcode")
+
+        names = [self.eddy._name]
+        if self.params.primary:
+            names.append(None)
+
+        for name in names:
+            gcode.register_mux_command("EDDYNG_NOZZLE_POSITION_SCAN", "SENSOR", name, self.cmd_EDDYNG_NOZZLE_POSITION_SCAN)
+            gcode.register_mux_command(
+                "EDDYNG_NOZZLE_POSITION_SET_REFERENCE", "SENSOR", name, self.cmd_EDDYNG_NOZZLE_POSITION_SET_REFERENCE
+            )
+            gcode.register_mux_command("EDDYNG_SET_TOOL_OFFSET", "SENSOR", name, self.cmd_EDDYNG_SET_TOOL_OFFSET)
+
+    def update_status(self, status):
+        if self.last_result:
+            status.update({"bigfoot_scan_result": self.last_result})
+        if self.last_offset:
+            status.update({"bigfoot_scan_offset": self.last_offset})
+
+    def _last_probe_z_result(self):
+        probe = self._printer.lookup_object("probe")
+        ps = probe.get_status(self._printer.get_reactor().monotonic())
+        return ps.get("last_z_result", None)
+
+    def cmd_EDDYNG_SET_TOOL_OFFSET(self, gcmd):
+        tool_name = gcmd.get("TOOL")
+        x = gcmd.get_float("X", None)
+        y = gcmd.get_float("Y", None)
+        z = gcmd.get_float("Z", None)
+
+        if (x is None or y is None or z is None) and not self.last_offset:
+            raise self._printer.command_error("EDDYNG_SET_TOOL_OFFSET: need X Y Z if no last scan result")
+
+        x = x if x is not None else self.last_offset[0]
+        y = y if y is not None else self.last_offset[1]
+        z = z if z is not None else self.last_offset[2]
+
+        tool = self._printer.lookup_object(f"tool {tool_name}", None)
+        if tool is None:
+            raise self._printer.command_error(f"EDDYNG_SET_TOOL_OFFSET: Tool {tool_name} not found")
+
+        tool.gcode_x_offset = x
+        tool.gcode_y_offset = y
+        tool.gcode_z_offset = z
+
+        gcmd.respond_info(f"Tool {tool_name} offset set to {x:.3f} {y:.3f} {z:.3f}")
+
+    def cmd_EDDYNG_NOZZLE_POSITION_SET_REFERENCE(self, gcmd):
+        x = gcmd.get_float("X", None)
+        y = gcmd.get_float("Y", None)
+        z = gcmd.get_float("Z", None)
+        z_use_probe = gcmd.get_int("Z_USE_PROBE", 0) == 1
+
+        if z_use_probe and z is not None:
+            raise self._printer.command_error("Can't specify both Z and Z_USE_PROBE")
+
+        if z is None and not z_use_probe:
+            raise self._printer.command_error("Must specify either Z or Z_USE_PROBE")
+
+        if (x is None or y is None) and not self.last_result:
+            raise self._printer.command_error("Need both X and Y if no last scan result")
+
+        x = x if x is not None else self.last_result[0]
+        y = y if y is not None else self.last_result[1]
+        z = z or 0.0
+        if z_use_probe:
+            z = self._last_probe_z_result()
+            if z is None:
+                raise self._printer.command_error("Z_USE_PROBE specified, but no last probe result to use for Z")
+
+        self._reference = [x, y, z]
+        gcmd.respond_info(f"EDDYNG_NOZZLE_POSITION_SCAN reference set to {x:.3f} {y:.3f} {z:.3f}")
+
+    def cmd_EDDYNG_NOZZLE_POSITION_SCAN(self, gcmd):
+        try:
+            self.cmd_EDDYNG_NOZZLE_POSITION_SCAN_actual(gcmd)
+        except Exception as e:
+            logging.exception("EDDYNG_NOZZLE_POSITION_SCAN error")
+            self.eddy._log_error(f"EDDYNG_NOZZLE_POSITION_SCAN error: {e}")
+
+    def cmd_EDDYNG_NOZZLE_POSITION_SCAN_actual(self, gcmd):
+        use_last = gcmd.get_int("USE_LAST", 0) == 1
+        if use_last:
+            if not self.last_result:
+                raise self._printer.command_error("No last scan result to use for USE_LAST")
+            x, y = self.last_result
+            z = self.eddy.params.bigfoot_scan_position[2] if self.eddy.params.bigfoot_scan_position else None
+        elif self.eddy.params.bigfoot_scan_position:
+            x, y, z = self.eddy.params.bigfoot_scan_position
+        else:
+            x, y, z = None, None, None
+        x = gcmd.get_float("X", x)
+        y = gcmd.get_float("Y", y)
+        z = gcmd.get_float("Z", z)
+        if x is None or y is None or z is None:
+            raise self._printer.command_error("EDDYNG_NOZZLE_POSITION_SCAN requires X, Y, and Z; bigfoot_scan_position in the config; or USE_LAST")
+
+        scan_z_use_probe = gcmd.get_int("SCAN_Z_USE_PROBE", 0) == 1
+
+        radius = gcmd.get_float("RADIUS", 5.0)
+        passes = gcmd.get_int("PASSES", 3)
+
+        move_speed = gcmd.get_float("MOVE_SPEED", 100.0)
+        speed = gcmd.get_float("SPEED", self.eddy.params.probe_speed)
+
+        zval = 0.0
+        if scan_z_use_probe:
+            zval = self._last_probe_z_result()
+            if zval is None:
+                raise self._printer.command_error("SCAN_Z_USE_PROBE specified, but no last probe result to use for scan Z")
+
+        th: ToolHead = cast(ToolHead, self._printer.lookup_object("toolhead"))
+
+        th_z = th.get_position()[2]
+        if th_z < z:
+            th.manual_move([None, None, z], self.eddy.params.lift_speed)
+
+        th.manual_move([x, y, None], move_speed)
+        th.manual_move([None, None, z], self.eddy.params.lift_speed)
+        th.wait_moves()
+
+        def scan_between(start, end, passes):
+            th.manual_move([start[0], start[1], z], move_speed)
+            th.dwell(0.100)
+
+            tstart = th.get_last_move_time()
+            while passes > 0:
+                th.manual_move([end[0], end[1], z], speed)
+                passes -= 1
+                if passes == 0:
+                    break
+                th.manual_move([start[0], start[1], z], speed)
+                passes -= 1
+            tend = th.get_last_move_time()
+
+            th.dwell(0.100)
+            th.wait_moves()
+            return tstart, tend
+
+        def write_debug(axis):
+            mode = "w" if axis == "x" else "a"
+            with open("/tmp/bigfoot.csv", mode) as datafile:
+                if axis == "x":
+                    datafile.write("axis,time,x,y,z,f,rf\n")
+                for i in range(len(sampler.times)):
+                    t = sampler.times[i]
+                    f = sampler.freqs[i]
+                    rf = sampler.raw_freqs[i]
+                    pos, v = self.eddy._get_trapq_position(t)
+                    x, y, z = pos if pos is not None else ("", "", "")
+                    datafile.write(f"{axis},{t},{x},{y},{z},{f},{rf}\n")
+
+        result = [-math.inf, -math.inf]
+
+        for axindex, axis in enumerate(["x", "y"]):
+            tstart_pos = [x, y]
+            tend_pos = [x, y]
+
+            tstart_pos[axindex] -= radius
+            tend_pos[axindex] += radius
+
+            with self.eddy.start_sampler(calculate_heights=False) as sampler:
+                tstart, tend = scan_between(tstart_pos, tend_pos, passes)
+                sampler.wait_for_sample_at_time(tend, max_wait_time=1.0)
+                sampler.finish()
+                sampler.trim_to_times(tstart, tend)
+
+                np_times = np.asarray(sampler.times)
+                np_rf = np.asarray(sampler.freqs)
+                np_pos = np.asarray([self.eddy._get_trapq_position(t)[0][axindex] for t in np_times])
+
+                write_debug(axis)
+
+                def gaussian(x, a, x0, sigma, offset):
+                    return a * np.exp(-((x - x0) ** 2) / (2 * sigma**2)) + offset
+
+                p0 = [
+                    np_rf.max() - np_rf.min(),  # a
+                    np_pos[np.argmax(np_rf)],  # x0
+                    (np_pos.max() - np_pos.min()) / 4,  # sigma
+                    np_rf.min(),
+                ]  # offset
+
+                bounds = ([0, np_pos.min(), 1e-6, 0], [np.inf, np_pos.max(), (np_pos.max() - np_pos.min()) * 2, np.inf])
+
+                popt, _ = curve_fit(gaussian, np_pos, np_rf, p0=p0, bounds=bounds, maxfev=10000)
+                a, x0, sigma, offset = popt
+                val = gaussian(x0, *popt)
+
+                self.eddy._log_msg(
+                    f"{axis} {x0:.3f} (fv {val:.6f} sigma {sigma:.6f} over {tend - tstart:.3f}s, {len(sampler.times)} samples)"
+                )
+                result[axindex] = float(x0)
+
+        # we're moving at speed mm/sec. we're sampling at rcount_sec.
+        rcount_sec = self.eddy._sensor.get_rcount_sec()
+        # samples_per_sec = 1.0 / rcount_sec
+        # TODO: not correct, need to also look at the quantization of the data.
+        # would be handy to be able to log this.
+        # best_precision = speed / samples_per_sec
+
+        msg = f"Center: {result[0]:.3f} {result[1]:.3f} (samp_ms: {rcount_sec * 1000.0:.3f} speed: {speed:.3f})"
+
+        offset = [result[0] - self._reference[0], result[1] - self._reference[1], zval - self._reference[2]]
+
+        if self._reference[0] != 0.0 and self._reference[1] != 0.0 and self._reference[2] != 0.0:
+            msg += f"\nOffset: {offset[0]:.3f} {offset[1]:.3f} {offset[2]:.3f} (samp_ms: {rcount_sec * 1000.0:.3f} speed: {speed:.3f})"
+
+        self.eddy._log_msg(msg)
+
+        self.last_result = result
+        self.last_offset = offset
