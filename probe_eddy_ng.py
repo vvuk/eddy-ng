@@ -2084,23 +2084,20 @@ class ProbeEddy:
             butter_s_t = butter_s_v = None
 
         # Do this roughly how the C code does it, to keep the values identical
-        # TODO Just report the value from the mcu?
+        # The C code computes: diff = tap_start_value - val
+        # where tap_start_value is the most recent peak.
+        # It does NOT accumulate drops, it measures distance from peak.
         butter_accum = None
         if butter_s_v is not None:
-            # Note: we don't handle freq offset or
-            # start this at same point as the C code does
             butter_accum = np.zeros(len(butter_s_v))
+            peak_value = butter_s_v[0]  # tap_start_value in C code
             last_value = butter_s_v[0]
-            falling = False
-            accum_val = 0.0
             for bi, bv in enumerate(butter_s_v):
-                if bv <= last_value:
-                    falling = True
-                    accum_val += last_value - bv
-                elif falling and bv > last_value:
-                    falling = False
-                    accum_val = 0.0
-                butter_accum[bi] = accum_val
+                if bv > last_value:
+                    # Update peak (matches C: sos_tap->tap_start_value = val)
+                    peak_value = bv
+                # Compute drop from peak (matches C: diff = tap_start_value - val)
+                butter_accum[bi] = peak_value - bv
                 last_value = bv
 
         import plotly.graph_objects as go

@@ -1,6 +1,6 @@
 # Experimental Eddy-based Nozzle Alignment
 
-This branch (`bigfoot`) contains code for experimental nozzle alignment
+`eddy-ng`` contains code for experimental nozzle alignment
 using upwards-facing Eddy current probes. It's been tested with
 Cartographer and BTT Eddy hardware on a [Mad Max](https://github.com/zruncho3d/madmax)
 toolchanger. (It has been developed and tested by exactly one person though,
