@@ -1116,7 +1116,7 @@ class ProbeEddy:
                 return new_m
             # prefer ranges that expand the valid range at the bottom end,
             # as long as they're still within req
-            if old_m[0] > new_m[0]:
+            if old_m.height_range[0] > new_m.height_range[0]:
                 return new_m
             return old_m
 
