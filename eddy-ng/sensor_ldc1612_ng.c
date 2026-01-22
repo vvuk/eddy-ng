@@ -188,8 +188,8 @@ struct ldc1612_ng {
     struct gpio_out led_gpio;
 #endif
 
-    // max number of pairs of 4-byte items
-    #define BUF_COUNT32_MAX (((MESSAGE_PAYLOAD_MAX - 4) / 8) * 2)
+    // max number of 4-byte items
+    #define BUF_COUNT32_MAX ((MESSAGE_PAYLOAD_MAX - 8) / 4)
     uint8_t buf_next;
     uint8_t seq_next;
     uint8_t overflows;
@@ -630,8 +630,14 @@ ldc1612_ng_update(struct ldc1612_ng *ld, uint8_t oid)
     ld->buffer[ld->buf_next++] = data;
 
     switch (ld->homing.mode) {
-    case HOME_MODE_HOME: check_homing(ld, data, time); break;
-    case HOME_MODE_SOS: check_sos_tap(ld, data, time); break;
+    case HOME_MODE_HOME:
+	    check_homing(ld, data, time);
+	    ld->buffer[ld->buf_next++] = 0;
+	    break;
+    case HOME_MODE_SOS:
+	    check_sos_tap(ld, data, time);
+	    int32_t v = (int32_t)(ld->homing.sos_tap.tap_start_value - ld->homing.sos_tap.last_value);
+	    ld->buffer[ld->buf_next++] = v < 0 ? 0 : v;
     }
 
     if (ld->buf_next >= BUF_COUNT32_MAX)

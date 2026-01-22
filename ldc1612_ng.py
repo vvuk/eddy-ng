@@ -643,6 +643,7 @@ class LDC1612_ng:
 
         times: list[float] = []
         values: list[int] = []
+        sos_values: list[int] = []
 
         for seq, overflows, data_raw in pending_data:
             if overflows > 0:
@@ -654,14 +655,16 @@ class LDC1612_ng:
             # data is byte string. Convert to little endian u32 array
             data = np.frombuffer(data_raw, dtype=np.uint32)
 
-            for i in range(len(data) // 2):
-                t = self._clock32_to_print_time(int(data[i * 2]))
-                v = int(data[i * 2 + 1])
+            for i in range(len(data) // 3):
+                t = self._clock32_to_print_time(int(data[i * 3]))
+                v = int(data[i * 3 + 1])
+                sv = int(data[i * 3 + 2])
                 times.append(t)
                 values.append(v)
+                sos_values.append(v)
 
         print_time_now = self._mcu.estimated_print_time(reactor.monotonic())
         logging.info(f"samples now: {print_time_now} sample times: {times[:2]}...{times[-2:]} values: {values[:2]}...{values[-2:]}")
 
-        self._data_callback(times, values)
+        self._data_callback(times, values, sos_values)
         return self.printer.get_reactor().monotonic() + self._data_interval
