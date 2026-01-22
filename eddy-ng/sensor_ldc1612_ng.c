@@ -629,18 +629,21 @@ ldc1612_ng_update(struct ldc1612_ng *ld, uint8_t oid)
     ld->buffer[ld->buf_next++] = time;
     ld->buffer[ld->buf_next++] = data;
 
+    uint32_t sos_fval = 0;
+
     switch (ld->homing.mode) {
     case HOME_MODE_HOME:
 	    check_homing(ld, data, time);
-	    ld->buffer[ld->buf_next++] = 0;
 	    break;
     case HOME_MODE_SOS:
 	    check_sos_tap(ld, data, time);
 	    // Send the computed drop value as a float (reinterpreted as uint32)
 	    float drop = ld->homing.sos_tap.tap_start_value - ld->homing.sos_tap.last_value;
-	    ld->buffer[ld->buf_next++] = *(uint32_t*)&drop;
+	    sos_fval = *(uint32_t*)&drop;
 	    break;
     }
+
+    ld->buffer[ld->buf_next++] = sos_fval;
 
     if (ld->buf_next >= BUF_COUNT32_MAX)
       flush_buffer(ld, oid);

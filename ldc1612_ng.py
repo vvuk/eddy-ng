@@ -666,7 +666,7 @@ class LDC1612_ng:
                 sos_values.append(sv)
 
         print_time_now = self._mcu.estimated_print_time(reactor.monotonic())
-        logging.info(f"samples now: {print_time_now} sample times: {times[:2]}...{times[-2:]} values: {values[:2]}...{values[-2:]}")
+        logging.info(f"samples now: {print_time_now} sample times: {times[:2]}...{times[-2:]} values: {values[:2]}...{values[-2:]} sosv: {sos_values[:2]}...{sos_values[-2:]}")
 
         self._data_callback(times, values, sos_values)
         return self.printer.get_reactor().monotonic() + self._data_interval
