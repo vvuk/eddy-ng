@@ -658,8 +658,9 @@ class LDC1612_ng:
             for i in range(len(data) // 3):
                 t = self._clock32_to_print_time(int(data[i * 3]))
                 v = int(data[i * 3 + 1])
-                # Reinterpret uint32 bits as float32
-                sv = np.frombuffer(np.uint32(data[i * 3 + 2]).tobytes(), dtype=np.float32)[0]
+                # Reinterpret uint32 bits as float32 using array view
+                sv_uint = data[i * 3 + 2]
+                sv = np.array([sv_uint], dtype=np.uint32).view(np.float32)[0]
                 times.append(t)
                 values.append(v)
                 sos_values.append(sv)

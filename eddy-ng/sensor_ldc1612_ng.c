@@ -639,6 +639,7 @@ ldc1612_ng_update(struct ldc1612_ng *ld, uint8_t oid)
 	    // Send the computed drop value as a float (reinterpreted as uint32)
 	    float drop = ld->homing.sos_tap.tap_start_value - ld->homing.sos_tap.last_value;
 	    ld->buffer[ld->buf_next++] = *(uint32_t*)&drop;
+	    break;
     }
 
     if (ld->buf_next >= BUF_COUNT32_MAX)
