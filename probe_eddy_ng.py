@@ -1952,9 +1952,7 @@ class ProbeEddy:
         if home_z:
             th_pos = th.get_position()
             th_z = th_pos[2]
-            ###true_z_zero = - (tap_adjust_z + tap_overshoot)
-            ##true_z_zero = - computed_tap_z
-            true_z_zero = -(tap_adjust_z + tap_overshoot)
+            true_z_zero = - computed_tap_z
             th_pos[2] = th_pos[2] + true_z_zero
             homed_to_str = f"homed z with true_z_zero={true_z_zero:.3f}, thz={th_z:.3f}, setz={th_pos[2]:.3f}, overshoot={tap_overshoot:.3f}, "
             self._set_toolhead_position(th_pos, [2])
