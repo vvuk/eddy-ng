@@ -2137,8 +2137,8 @@ class ProbeEddy:
         # the butter tap if we have the data
         if butter_s_t is not None:
             fig.add_trace(go.Scatter(x=butter_s_t, y=butter_s_v, mode="lines", name="signal", yaxis="y4", line=dict(color=c_green)))
-            fig.add_trace(go.Scatter(x=butter_s_t, y=butter_accum, mode="lines", name="threshold", yaxis="y3", line=dict(color="#626b73")))
-            fig.add_trace(go.Scatter(x=s_t, y=s_sv, mode="lines", name="threshold", yaxis="y3", line=dict(color="#626b73")))
+            fig.add_trace(go.Scatter(x=butter_s_t, y=butter_accum, mode="lines", name="accum_py", yaxis="y3", line=dict(color="#626b73")))
+            fig.add_trace(go.Scatter(x=s_t, y=s_sv, mode="lines", name="accum_mcu", yaxis="y3", line=dict(color="#62ab73")))
 
         fig.update_xaxes(range=[max(0.0, time_len - 0.60), time_len], autorange=False)
 
