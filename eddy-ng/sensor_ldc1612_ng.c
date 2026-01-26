@@ -116,6 +116,12 @@ struct sosfilter_sos {
     float sos[MAX_SOS_SECTIONS*6];
 };
 
+struct data_sample {
+  uint32_t time;
+  uint32_t data;
+  float accum_val;
+};
+
 struct ldc1612_ng_homing_sos_tap {
     float state[MAX_SOS_SECTIONS*4];
     float tap_threshold;
@@ -188,7 +194,9 @@ struct ldc1612_ng {
     struct gpio_out led_gpio;
 #endif
 
-    // max number of 4-byte items
+    // max number of 4-byte items, minus 8 bytes
+    // MESSAGE_PAYLOAD_MAX is annoyingly initially 64-5 = 59, which
+    // means there isn't much room in here
     #define BUF_COUNT32_MAX ((MESSAGE_PAYLOAD_MAX - 8) / 4)
     uint8_t buf_next;
     uint8_t seq_next;
@@ -626,8 +634,12 @@ ldc1612_ng_update(struct ldc1612_ng *ld, uint8_t oid)
                     | ((uint32_t)d[3]);
 
     ld->last_read_value = data;
-    ld->buffer[ld->buf_next++] = time;
-    ld->buffer[ld->buf_next++] = data;
+
+    struct data_sample sample = {
+      .time = time,
+      .data = data,
+      .accum_val = 0.0f,
+    };
 
     uint32_t sos_fval = 0;
 
@@ -639,13 +651,14 @@ ldc1612_ng_update(struct ldc1612_ng *ld, uint8_t oid)
 	    check_sos_tap(ld, data, time);
 	    // Send the computed drop value as a float (reinterpreted as uint32)
 	    float drop = ld->homing.sos_tap.tap_start_value - ld->homing.sos_tap.last_value;
-	    sos_fval = *(uint32_t*)&drop;
+      sample.accum_val = drop;
 	    break;
     }
 
-    ld->buffer[ld->buf_next++] = sos_fval;
+    memcpy(ld->buffer + ld->buf_next, &sample, sizeof(sample));
+    ld->buf_next += sizeof(sample)/4;
 
-    if (ld->buf_next >= BUF_COUNT32_MAX)
+    if (ld->buf_next + sizeof(sample)/4 >= BUF_COUNT32_MAX)
       flush_buffer(ld, oid);
 }
 

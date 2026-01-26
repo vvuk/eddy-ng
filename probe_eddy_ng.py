@@ -808,7 +808,7 @@ class ProbeEddy:
             with open(self.save_samples_path, "w") as data_file:
                 times = sampler.times
                 raw_freqs = sampler.raw_freqs
-                sos_values = sampler.sos_values
+                accum_vals = sampler.accum_vals
                 freqs = sampler.freqs
                 heights = sampler.heights
 
@@ -820,7 +820,7 @@ class ProbeEddy:
                     past_k_z = past_pos[2] if past_pos is not None else ""
                     past_v = past_v if past_v is not None else ""
                     data_file.write(
-                        f"{times[i]},{freqs[i]},{heights[i] if heights else ''},{past_k_z},{past_v},{raw_freqs[i]},{sos_values[i]},{trigger_time},{tap_start_time}\n"
+                        f"{times[i]},{freqs[i]},{heights[i] if heights else ''},{past_k_z},{past_v},{raw_freqs[i]},{accum_vals[i]},{trigger_time},{tap_start_time}\n"
                     )
             logging.info(f"Wrote {len(times)} samples to {self.save_samples_path}")
             self.save_samples_path = None
@@ -1764,7 +1764,7 @@ class ProbeEddy:
 
     def _compute_butter_tap(self, sampler):
         if not scipy:
-            return None, None
+            return None, None, None
 
         trigger_freq = self.height_to_freq(self.params.home_trigger_height)
 
@@ -1786,7 +1786,7 @@ class ProbeEddy:
         )
         filtered = scipy.signal.sosfilt(sos, s_f - s_f[0])
 
-        return s_t, filtered
+        return s_t, filtered, first_one
 
     def cmd_TAP_next(self, gcmd: Optional[GCodeCommand] = None):
         self._log_debug("\nEDDYng Tap begin")
@@ -2057,7 +2057,7 @@ class ProbeEddy:
         s_t = np.asarray(self._last_sampler.times)
         s_f = np.asarray(self._last_sampler.freqs)
         s_z = np.asarray(self._last_sampler.heights)
-        s_sv = np.asarray(self._last_sampler.sos_values)
+        s_accval = np.asarray(self._last_sampler.accum_vals)
         s_kinz = np.vectorize(lambda t: self._get_trapq_height(t) or -10)(s_t)
 
         # Any values below 0.0 are suspect because they were not calibrated,
@@ -2078,10 +2078,11 @@ class ProbeEddy:
 
         # compute the butterworth filter, if we have scipy
         if tap is not None and scipy:
-            butter_s_t, butter_s_v = self._compute_butter_tap(self._last_sampler)
+            butter_s_t, butter_s_v, butter_index_start = self._compute_butter_tap(self._last_sampler)
             butter_s_t = butter_s_t - time_start
         else:
             butter_s_t = butter_s_v = None
+            butter_index_start = 0
 
         # Do this roughly how the C code does it, to keep the values identical
         # The C code computes: diff = tap_start_value - val
@@ -2138,7 +2139,7 @@ class ProbeEddy:
         if butter_s_t is not None:
             fig.add_trace(go.Scatter(x=butter_s_t, y=butter_s_v, mode="lines", name="signal", yaxis="y4", line=dict(color=c_green)))
             fig.add_trace(go.Scatter(x=butter_s_t, y=butter_accum, mode="lines", name="accum_py", yaxis="y3", line=dict(color="#626b73")))
-            fig.add_trace(go.Scatter(x=s_t, y=s_sv, mode="lines", name="accum_mcu", yaxis="y3", line=dict(color="#62ab73")))
+            fig.add_trace(go.Scatter(x=s_t[butter_index_start:], y=s_accval[butter_index_start:], mode="lines", name="accum_mcu", yaxis="y3", line=dict(color="#c26ba3")))
 
         fig.update_xaxes(range=[max(0.0, time_len - 0.60), time_len], autorange=False)
 
@@ -2584,7 +2585,7 @@ class ProbeEddySampler:
 
         self.times = []
         self.raw_freqs = []
-        self.sos_values = []
+        self.accum_vals = []
         self.freqs = []
         self.heights = [] if self._fmap is not None else None
 
@@ -2615,34 +2616,31 @@ class ProbeEddySampler:
 
     # bulk sample callback for when new data arrives
     # from the probe
-    def _add_hw_data(self, times, raw_freqs, sos_values):
+    def _add_hw_data(self, data: ldc1612_ng.LDC1612_ng_sample_data):
         has_errors = False
-        for rf in raw_freqs:
+        for rf in data.raw_freqs:
             if (rf >> 28) != 0:
                 has_errors = True
                 break
 
         if not has_errors:
-            self.times.extend(times)
-            self.raw_freqs.extend(raw_freqs)
-            self.sos_values.extend(sos_values)
+            self.times.extend(data.times)
+            self.raw_freqs.extend(data.raw_freqs)
+            self.accum_vals.extend(data.accum_vals)
             return
 
-        for i in range(len(times)):
-            t = times[i]
-            rf = raw_freqs[i]
-            sv = sos_values[i]
+        for i in range(len(data.times)):
+            rf = data.raw_freqs[i]
             err = rf >> 28
             if err == 0:
-                self.times.append(t)
+                self.times.append(data.times[i])
                 self.raw_freqs.append(rf)
-                self.sos_values.append(sv)
-                continue
-
-            self._errors += 1
-            for i in range(4):
-                if err & (1 << i) != 0:
-                    self._error_counts[i] += 1
+                self.accum_vals.append(data.accum_vals[i])
+            else:
+                self._errors += 1
+                for i in range(4):
+                    if err & (1 << i) != 0:
+                        self._error_counts[i] += 1
 
     def start(self):
         if self._stopped:
@@ -2673,7 +2671,7 @@ class ProbeEddySampler:
         self.times = self.times[istart:iend]
         self.freqs = self.freqs[istart:iend]
         self.raw_freqs = self.raw_freqs[istart:iend]
-        self.sos_values = self.sos_values[istart:iend]
+        self.accum_vals = self.accum_vals[istart:iend]
         self.heights = self.heights[istart:iend] if self.heights else None
 
     def _update_samples(self):

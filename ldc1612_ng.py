@@ -76,6 +76,11 @@ class LDC1612_ng_homing_result:
     tap_start_time: float
     error: int
 
+@dataclass
+class LDC1612_ng_sample_data:
+    times: list[float]
+    raw_freqs: list[int]
+    accum_vals: list[float]
 
 # Interface class to LDC1612 mcu support
 class LDC1612_ng:
@@ -643,30 +648,31 @@ class LDC1612_ng:
 
         times: list[float] = []
         values: list[int] = []
-        sos_values: list[float] = []
+        accum_values: list[float] = []
 
         for seq, overflows, data_raw in pending_data:
             if overflows > 0:
                 logging.error(f"LDC1612ng at least {overflows} dropped conversions")
             if seq != self._next_seq:
                 logging.error(f"LDC1612ng lost data! Expected seq {self._next_seq} got {seq}")
+
             self._next_seq = (seq + 1) & 0xFF
 
-            # data is byte string. Convert to little endian u32 array
-            data = np.frombuffer(data_raw, dtype=np.uint32)
+            if len(data_raw) % (4 * 3) != 0:
+                logging.error(f"LDC1612ng invalid data length: {len(data_raw)}, ignoring")
+                continue
 
-            for i in range(len(data) // 3):
-                t = self._clock32_to_print_time(int(data[i * 3]))
-                v = int(data[i * 3 + 1])
-                # Reinterpret uint32 bits as float32 using array view
-                sv_uint = data[i * 3 + 2]
-                sv = np.array([sv_uint], dtype=np.uint32).view(np.float32)[0]
+            for i in range(len(data_raw) // (4*3)):
+                raw_t, raw_data, raw_accum = struct.unpack_from("<IIf", data_raw, i * 4 * 3)
+
+                t = self._clock32_to_print_time(raw_t)
                 times.append(t)
-                values.append(v)
-                sos_values.append(sv)
+                values.append(raw_data)
+                accum_values.append(raw_accum)
 
         print_time_now = self._mcu.estimated_print_time(reactor.monotonic())
-        logging.info(f"samples now: {print_time_now} sample times: {times[:2]}...{times[-2:]} values: {values[:2]}...{values[-2:]} sosv: {sos_values[:2]}...{sos_values[-2:]}")
+        logging.info(f"samples now: {print_time_now} sample times: {times[:2]}...{times[-2:]} values: {values[:2]}...{values[-2:]} sosv: {accum_values[:2]}...{accum_values[-2:]}")
 
-        self._data_callback(times, values, sos_values)
+        data = LDC1612_ng_sample_data(times=times, raw_freqs=values, accum_vals=accum_values)
+        self._data_callback(data)
         return self.printer.get_reactor().monotonic() + self._data_interval
