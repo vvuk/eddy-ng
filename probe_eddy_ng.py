@@ -1420,7 +1420,7 @@ class ProbeEddy:
     # PrinterProbe interface
     #
 
-    def get_offsets(self):
+    def get_offsets(self, *args, **kwargs):
         # the z offset is the trigger height, because the probe will trigger
         # at z=trigger_height (not at z=0)
         return (
