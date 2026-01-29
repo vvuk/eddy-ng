@@ -24,6 +24,7 @@ from functools import cmp_to_key
 
 from dataclasses import dataclass, field
 from typing import (
+    Any,
     Dict,
     List,
     Optional,
@@ -437,6 +438,7 @@ class ProbeEddy:
             "btt_eddy": ldc1612_ng.LDC1612_ng,
             "cartographer": ldc1612_ng.LDC1612_ng,
             "mellow_fly": ldc1612_ng.LDC1612_ng,
+            "ldc1612_internal_clk": ldc1612_ng.LDC1612_ng,
         }
         sensor_type = config.getchoice("sensor_type", {s: s for s in sensors})
 
@@ -1114,7 +1116,7 @@ class ProbeEddy:
                 return new_m
             # prefer ranges that expand the valid range at the bottom end,
             # as long as they're still within req
-            if old_m[0] > new_m[0]:
+            if old_m.height_range[0] > new_m.height_range[0]:
                 return new_m
             return old_m
 
@@ -1374,7 +1376,7 @@ class ProbeEddy:
     # PrinterProbe interface
     #
 
-    def get_offsets(self):
+    def get_offsets(self, *args, **kwargs):
         # the z offset is the trigger height, because the probe will trigger
         # at z=trigger_height (not at z=0)
         return (
@@ -1434,7 +1436,7 @@ class ProbeEddy:
 
     # This is a mishmash of cmd_PROBE and cmd_PROBE_STATIC. This run_probe
     # is the old one, different than the scanning session run_probe.
-    def run_probe(self, gcmd=None):
+    def run_probe(self, gcmd=None, *args: Any, **kwargs: Any):
         z = self.params.home_trigger_height
         duration = 0.100
 
@@ -2179,7 +2181,7 @@ class ProbeEddyScanningProbe:
         start_time = time - self._sample_time / 2.0
         self._notes.append([start_time, time, th_pos])
 
-    def run_probe(self, gcmd):
+    def run_probe(self, gcmd, *args: Any, **kwargs: Any):
         th = self._toolhead
         th_pos = th.get_position()
 

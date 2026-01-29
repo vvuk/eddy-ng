@@ -1,5 +1,7 @@
 # eddy-ng
 
+> ***Note: October 2025 -- life has gotten quite busy lately, so I've been much slower to respond to issues and make updates. Apologies, will get back to it soon!***
+
 eddy-ng improves the Eddy current probe support in Klipper to add accurate Z-offset setting by physically making contact with the build surface. These probes are very accurate, but suffer from drifts due to changes in conductivity in the target surface as well as changes in coil parameters as temperatures change. Instead of doing temperature compensation (which is guesswork at best), eddy-ng takes a more physical approach:
 
 1. Calibration is performed at any temperature (cold).
@@ -44,3 +46,4 @@ cd ~/eddy-ng
 git pull
 ./install.sh
 ```
+
