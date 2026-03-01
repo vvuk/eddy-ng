@@ -210,6 +210,7 @@ class LDC1612_ng:
                 desc=self.cmd_LDC_SET_DC_help,
             )
             gcode.register_mux_command("LDC_NG_SET", "CHIP", name, self.cmd_LDC_SET, desc="Set various LDC config values")
+            gcode.register_mux_command("LDC_NG_DUMP", "CHIP", name, self.cmd_LDC_DUMP, desc="Dump LDC state")
 
     cmd_LDC_SET_DC_help = "Set LDC1612 DRIVE_CURRENT register (idrive value only)"
 
@@ -466,6 +467,31 @@ class LDC1612_ng:
                 "(e.g. faulty wiring) or a faulty ldc1612 chip." % (manuf_id, dev_id, LDC1612_MANUF_ID, LDC1612_DEV_ID)
             )
 
+    def cmd_LDC_DUMP(self, gcmd):
+        manuf_id = self.read_reg(REG_MANUFACTURER_ID)
+        dev_id = self.read_reg(REG_DEVICE_ID)
+        reg_mux_config = self.read_reg(REG_MUX_CONFIG)
+        reg_settlecount = self.read_reg(REG_SETTLECOUNT0)
+        reg_rcount = self.read_reg(REG_RCOUNT0)
+        reg_offset = self.read_reg(REG_OFFSET0)
+
+        deglitch_now = self.get_deglitch()
+        if deglitch_now == DEGLITCH_1_0MHZ:
+            deglitch_now = "1mhz"
+        if deglitch_now == DEGLITCH_3_3MHZ:
+            deglitch_now = "3.3mhz"
+        if deglitch_now == DEGLITCH_10MHZ:
+            deglitch_now = "10mhz"
+        if deglitch_now == DEGLITCH_33MHZ:
+            deglitch_now = "33mhz"
+
+        offset_now = round(reg_offset / (2**16) * self._ldc_freq_ref)
+        settle_now = reg_settlecount * 16.0 / self._ldc_freq_ref * 1000.0
+        rcount_now = self.get_rcount_sec() * 1000.0
+
+        gcmd.respond_info(f"LDC: {manuf_id:04x}:{dev_id:04x} Mux config: 0x{reg_mux_config:08x} ldc_freq_ref: {self._ldc_freq_ref}")
+        gcmd.respond_info(f"Offset: {offset_now} (0x{reg_offset:8x}) settle time: {settle_now:.6f}ms (0x{reg_settlecount:8x}) rcount: {rcount_now:.6f}ms (0x{reg_rcount:8x}) deglitch: {deglitch_now}")
+
     def cmd_LDC_SET(self, gcmd):
         offset = gcmd.get_float("OFFSET", None)
         rcount = gcmd.get_float("RCOUNT", None, above=0.0)
@@ -497,21 +523,7 @@ class LDC1612_ng:
         if rcount is not None:
             self.set_reg(REG_RCOUNT0, int((rcount / 1000.0) * self._ldc_freq_ref / 16.0 + 0.5))
 
-        deglitch_now = self.get_deglitch()
-        if deglitch_now == DEGLITCH_1_0MHZ:
-            deglitch_now = "1mhz"
-        if deglitch_now == DEGLITCH_3_3MHZ:
-            deglitch_now = "3.3mhz"
-        if deglitch_now == DEGLITCH_10MHZ:
-            deglitch_now = "10mhz"
-        if deglitch_now == DEGLITCH_33MHZ:
-            deglitch_now = "33mhz"
-
-        offset_now = round(self.read_reg(REG_OFFSET0) / (2**16) * self._ldc_freq_ref)
-        settle_now = self.read_reg(REG_SETTLECOUNT0) * 16.0 / self._ldc_freq_ref * 1000.0
-        rcount_now = self.get_rcount_sec() * 1000.0
-
-        gcmd.respond_info(f"Offset: {offset_now} settle time: {settle_now:.6f}ms rcount: {rcount_now:.6f}ms deglitch: {deglitch_now}")
+        self.cmd_LDC_DUMP(gcmd)
 
     def get_rcount_sec(self):
         return self.read_reg(REG_RCOUNT0) * 16.0 / self._ldc_freq_ref
