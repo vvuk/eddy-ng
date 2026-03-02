@@ -1019,6 +1019,7 @@ class ProbeEddy:
         stime = etime - duration
 
         first_idx = bisect.bisect_left(sampler.times, stime)
+        self._log_msg(f"probe_static_height: len({len(sampler.times)}), first_idx: {first_idx}, stime: {stime} etime: {etime}")
         if first_idx == len(sampler.times):
             raise self._printer.command_error(f"No samples in time range (errors: {sampler.error_counts})")
 
@@ -2818,10 +2819,11 @@ class ProbeEddySampler:
 
             if istart == iend:
                 # no samples in this range
-                raise self._printer.command_error(f"No samples in time range {iv_start}-{iv_end}")
-
-            median = np.median(heights[istart:iend])
-            interval_heights.append(float(median))
+                self._eddy._log_msg(f"Warning: no samples in time range {iv_start}-{iv_end}")
+                interval_heights.append(math.nan)
+            else:
+                median = np.median(heights[istart:iend])
+                interval_heights.append(float(median))
 
         return interval_heights
 
@@ -3326,6 +3328,44 @@ class BedMeshScanHelper:
             sampler.finish()
 
             heights = sampler.find_heights_at_times([(t - sample_time / 2.0, t + sample_time / 2.0) for t in path_times])
+
+            # heights may have NaNs in it if there were no samples during our scan time.
+            # fill these in with averages
+            for j in range(self._y_points):
+                for i in range(self._x_points):
+                    idx = j*self._y_points + i
+                    if not math.isnan(heights[idx]):
+                        continue
+                    zsum = 0.0
+                    zcount = 0
+                    if j > 1:
+                        if x > 1:
+                            hv = heights[(j-1)*self._y_points + x-1]
+                            if not math.isnan(hv):
+                                zsum += hv
+                                zcount += 1
+                        if x <= (self._x_points-1):
+                            hv = heights[(j-1)*self._y_points + x+1]
+                            if not math.isnan(hv):
+                                zsum += hv
+                                zcount += 1
+                    if j <= (self._y_points-1):
+                        if x > 1:
+                            hv = heights[(j+1)*self._y_points + x-1]
+                            if not math.isnan(hv):
+                                zsum += hv
+                                zcount += 1
+                        if x <= (self._x_points-1):
+                            hv = heights[(j+1)*self._y_points + x+1]
+                            if not math.isnan(hv):
+                                zsum += hv
+                                zcount += 1
+
+                    if zcount == 0:
+                        raise self._printer.command_error(f"No sample for [{i},{j}] and all adjacent samples are NaN")
+
+                    heights[idx] = zsum / zcount
+
             # Note plus tap_offset here, vs -tap_offset when probing. These are actual
             # heights, the other is "offset from real"
             heights = [h + self._eddy._tap_offset for h in heights]
