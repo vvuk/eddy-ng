@@ -111,7 +111,7 @@ class LDC1612_ng:
         elif self._device_product == PRODUCT_MELLOW_FLY:
             self._ldc_freq_clk = 40_000_000
             self._ldc_fin_divider = 1
-            self._ldc_fref_divider = 2
+            self._ldc_fref_divider = 3
             self._ldc_settle_time = 0.00125
             self._default_drive_current = 15
             self._drive_current_range = (14, 17)
@@ -128,11 +128,12 @@ class LDC1612_ng:
             self._ldc_freq_clk = 12_000_000
             self._ldc_settle_time = 0.005
             self._ldc_fin_divider = 1
-            self._ldc_fref_divider = 1
+            self._ldc_fref_divider = 2
             self._default_drive_current = 15
             self._drive_current_range = (14, 20)
 
-        self._ldc_freq_ref = round(self._ldc_freq_clk / self._ldc_fref_divider)
+        self._ldc_freq_ref = self._ldc_freq_clk / self._ldc_fref_divider
+        self._freq_conv = self._ldc_fin_divider * self._ldc_freq_ref
 
         drive_current: int = config.getint("reg_drive_current", 0, minval=0, maxval=31)
         saved_drive_current: int = config.getint("saved_reg_drive_current", 0, minval=0, maxval=31)
@@ -167,16 +168,17 @@ class LDC1612_ng:
             if pin_params["chip"] != mcu:
                 raise config.error("ldc1612 intb_pin must be on same mcu")
             mcu.add_config_cmd(
-                "config_ldc1612_ng_with_intb oid=%d i2c_oid=%d product=%i intb_pin=%s"
+                "config_ldc1612_ng_with_intb oid=%d i2c_oid=%d product=%i in_div=%hu ref_div=%hu intb_pin=%s"
                 % (
                     oid,
                     self._i2c.get_oid(),
                     self._device_product,
+                        self._ldc_fin_divider, self._ldc_fref_divider,
                     pin_params["pin"],
                 )
             )
         else:
-            mcu.add_config_cmd("config_ldc1612_ng oid=%d i2c_oid=%d product=%i" % (oid, self._i2c.get_oid(), self._device_product))
+            mcu.add_config_cmd("config_ldc1612_ng oid=%d i2c_oid=%d product=%i in_div=%hu ref_div=%hu" % (oid, self._i2c.get_oid(), self._device_product, self._ldc_fin_divider, self._ldc_fref_divider))
 
         # Make sure the sensor is stopped on restart
         mcu.add_config_cmd(
@@ -368,12 +370,12 @@ class LDC1612_ng:
     def to_ldc_freqval(self, freq, offset=None):
         if offset is None:
             offset = self._ldc_offset
-        return int((freq - offset) * (1 << 28) / float(self._ldc_freq_ref) + 0.5)
+        return int((1<<28) * ((freq / self._freq_conv) - offset / (1<<12)) + 0.5)
 
     def from_ldc_freqval(self, val, ignore_err=False):
         if (val & 0xF0000000) != 0 and not ignore_err:
             raise self.printer.command_error(f"LDC1612 frequency value has error bits: {hex(val)}")
-        return round((val + (self._ldc_offset_ref << 12)) * (float(self._ldc_freq_ref) / (1 << 28)), 3)
+        return round((self._freq_conv / (1<<28)) * val + self._freq_conv * (self._ldc_offset / (1<<12)), 3)
 
     def ldc_freqval_error(self, val):
         return val >> 28
@@ -453,7 +455,7 @@ class LDC1612_ng:
     # The value that should be added to freqvals and multiplied by
     # to get an actual frequency
     def freqval_conversion_values(self):
-        return self._ldc_offset_ref << 12, float(self._ldc_freq_ref) / (1 << 28)
+        return self._freq_conv * (self._ldc_offset / (1<<12)), self._freq_conv / (1<<28)
 
     def _verify_chip(self):
         # In case of miswiring, testing LDC1612 device ID prevents treating

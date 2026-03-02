@@ -169,7 +169,9 @@ struct ldc1612_ng {
     struct gpio_in intb_pin;
 
     uint8_t product;
-    float sensor_cvt;
+    uint32_t sensor_fref;
+    float sensor_mul;
+    float sensor_off;
 
     uint32_t rest_ticks;
     uint8_t flags;
@@ -295,6 +297,7 @@ uint32_t
 read_reg_data0(struct ldc1612_ng *ld)
 {
     uint8_t d[4];
+    irq_disable();
     read_reg(ld, REG_DATA0_MSB, &d[0]);
     read_reg(ld, REG_DATA0_LSB, &d[2]);
     irq_enable();
@@ -345,7 +348,7 @@ flush_buffer(struct ldc1612_ng *ld, uint8_t oid)
 }
 
 static void
-config_ldc1612_ng(uint32_t oid, uint32_t i2c_oid, uint8_t product, int32_t intb_pin)
+config_ldc1612_ng(uint32_t oid, uint32_t i2c_oid, uint8_t product, int32_t intb_pin, uint16_t in_div, uint16_t ref_div)
 {
     dprint2("EDDYng cfg o=%u i=%u b=%d", oid, i2c_oid, intb_pin);
 
@@ -362,14 +365,14 @@ config_ldc1612_ng(uint32_t oid, uint32_t i2c_oid, uint8_t product, int32_t intb_
     switch (product) {
     case PRODUCT_UNKNOWN:
     case PRODUCT_BTT_EDDY:
-        ld->sensor_cvt = 12000000.0f / (float)(1<<28);
+        ld->sensor_fref = 12000000 / ref_div;
         break;
     case PRODUCT_MELLOW_FLY:
-        ld->sensor_cvt = 40000000.0f / (float)(1<<28);
+        ld->sensor_fref = 40000000 / ref_div;
         break;
 #if SUPPORT_CARTOGRAPHER
     case PRODUCT_CARTOGRAPHER:
-        ld->sensor_cvt = 24000000.0f / (float)(1<<28);
+        ld->sensor_fref = 24000000 / ref_div;
 
         // The Cartographer hardware uses a timer in the STM32F0
         // to generate a 24MHz reference clock for the ldc1612.
@@ -397,11 +400,15 @@ config_ldc1612_ng(uint32_t oid, uint32_t i2c_oid, uint8_t product, int32_t intb_
         break;
 #endif
     case PRODUCT_LDC1612_INTERNAL_CLK:
-        ld->sensor_cvt = 43400000.0f / (float)(1<<28);
+        ld->sensor_fref = 43400000.0f / ref_div;
         break;
     default:
         shutdown("ldc1612_ng: unknown product");
     }
+
+    float freq_conv = (float)ld->sensor_fref * (float)in_div;
+    ld->sensor_mul = freq_conv / (float)(1<<28);
+    ld->sensor_off = 0.0; // assume 0 for now, tbd
 }
 
 void
@@ -410,10 +417,12 @@ command_config_ldc1612_ng(uint32_t *args)
     uint32_t oid = args[0];
     uint32_t i2c_oid = args[1];
     uint8_t product = args[2];
+    uint16_t in_div = args[3];
+    uint16_t ref_div = args[4];
 
-    config_ldc1612_ng(oid, i2c_oid, product, -1);
+    config_ldc1612_ng(oid, i2c_oid, product, -1, in_div, ref_div);
 }
-DECL_COMMAND(command_config_ldc1612_ng, "config_ldc1612_ng oid=%c i2c_oid=%c product=%i");
+DECL_COMMAND(command_config_ldc1612_ng, "config_ldc1612_ng oid=%c i2c_oid=%c product=%i in_div=%hu ref_div=%hu");
 
 void
 command_config_ldc1612_ng_with_intb(uint32_t *args)
@@ -421,12 +430,14 @@ command_config_ldc1612_ng_with_intb(uint32_t *args)
     uint32_t oid = args[0];
     uint32_t i2c_oid = args[1];
     uint8_t product = args[2];
-    uint32_t intb_pin = args[3];
+    uint16_t in_div = args[3];
+    uint16_t ref_div = args[4];
+    uint32_t intb_pin = args[5];
 
-    config_ldc1612_ng(oid, i2c_oid, product, intb_pin);
+    config_ldc1612_ng(oid, i2c_oid, product, intb_pin, in_div, ref_div);
 }
 DECL_COMMAND(command_config_ldc1612_ng_with_intb,
-             "config_ldc1612_ng_with_intb oid=%c i2c_oid=%c product=%i intb_pin=%c");
+             "config_ldc1612_ng_with_intb oid=%c i2c_oid=%c product=%i in_div=%hu ref_div=%hu intb_pin=%c");
 
 void
 command_query_ldc1612_ng_latched_status(uint32_t *args)
@@ -623,16 +634,7 @@ ldc1612_ng_update(struct ldc1612_ng *ld, uint8_t oid)
         return;
 
     uint32_t time = timer_read_time();
-
-    // Read coil0 frequency
-    uint8_t d[4];
-    read_reg(ld, REG_DATA0_MSB, &d[0]);
-    read_reg(ld, REG_DATA0_LSB, &d[2]);
-    uint32_t data =   ((uint32_t)d[0] << 24)
-                    | ((uint32_t)d[1] << 16)
-                    | ((uint32_t)d[2] << 8)
-                    | ((uint32_t)d[3]);
-
+    uint32_t data = read_reg_data0(ld);
     ld->last_read_value = data;
 
     struct data_sample sample = {
@@ -645,14 +647,14 @@ ldc1612_ng_update(struct ldc1612_ng *ld, uint8_t oid)
 
     switch (ld->homing.mode) {
     case HOME_MODE_HOME:
-	    check_homing(ld, data, time);
-	    break;
+        check_homing(ld, data, time);
+        break;
     case HOME_MODE_SOS:
-	    check_sos_tap(ld, data, time);
-	    // Send the computed drop value as a float (reinterpreted as uint32)
-	    float drop = ld->homing.sos_tap.tap_start_value - ld->homing.sos_tap.last_value;
-      sample.accum_val = drop;
-	    break;
+        check_sos_tap(ld, data, time);
+        // Send the computed drop value as a float (reinterpreted as uint32)
+        float drop = ld->homing.sos_tap.tap_start_value - ld->homing.sos_tap.last_value;
+        sample.accum_val = drop;
+        break;
     }
 
     memcpy(ld->buffer + ld->buf_next, &sample, sizeof(sample));
@@ -798,7 +800,7 @@ check_sos_tap(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
     if (!check_error(ld, data, time))
         return;
 
-    float freq = data * ld->sensor_cvt;
+    float freq = data * ld->sensor_mul + ld->sensor_off;
 
     // We need to offset the frequencies by the first
     // one we feed to the filter so we don't get a crazy
