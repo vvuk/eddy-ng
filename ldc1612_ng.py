@@ -46,6 +46,7 @@ REG_CLOCK_DIVIDERS0 = 0x14
 REG_ERROR_CONFIG = 0x19
 REG_CONFIG = 0x1A
 REG_MUX_CONFIG = 0x1B
+REG_RESET_DEV = 0x1C
 REG_DRIVE_CURRENT0 = 0x1E
 REG_MANUFACTURER_ID = 0x7E
 REG_DEVICE_ID = 0x7F
@@ -213,6 +214,7 @@ class LDC1612_ng:
             )
             gcode.register_mux_command("LDC_NG_SET", "CHIP", name, self.cmd_LDC_SET, desc="Set various LDC config values")
             gcode.register_mux_command("LDC_NG_DUMP", "CHIP", name, self.cmd_LDC_DUMP, desc="Dump LDC state")
+            gcode.register_mux_command("LDC_NG_RESET", "CHIP", name, self.cmd_LDC_RESET, desc="Reset LDC")
 
     cmd_LDC_SET_DC_help = "Set LDC1612 DRIVE_CURRENT register (idrive value only)"
 
@@ -223,8 +225,6 @@ class LDC1612_ng:
     cmd_LDC_CALIBRATE_help = "Calibrate LDC1612 DRIVE_CURRENT register"
 
     def cmd_LDC_CALIBRATE(self, gcmd):
-        is_in_progress = True
-
         self.start_streaming(lambda _: _)
         toolhead = self.printer.lookup_object("toolhead")
         toolhead.dwell(0.100)
@@ -248,6 +248,18 @@ class LDC1612_ng:
             "Add this to your config as either reg_drive_current or tap_drive_current\n"
             "then restart."
         )
+
+    def cmd_LDC_RESET(self, gcmd):
+        if self._data_timer is not None:
+            gcmd.respond_info(f"Streaming active, stopping before reset")
+            self.stop_streaming()
+
+        self.set_reg(REG_RESET_DEV, 0x0001)
+
+        reactor = self.printer.get_reactor()
+        reactor.pause(reactor.monotonic() + 0.500)
+        self._init_chip(force=True)
+        gcmd.respond_info(f"Reset complete")
 
     def _build_config(self):
         cmdqueue = self._i2c.get_command_queue()
@@ -530,8 +542,8 @@ class LDC1612_ng:
     def get_rcount_sec(self):
         return self.read_reg(REG_RCOUNT0) * 16.0 / self._ldc_freq_ref
 
-    def _init_chip(self):
-        if self._chip_initialized:
+    def _init_chip(self, *, force: bool = False):
+        if self._chip_initialized and not force:
             return
 
         self._verify_chip()
@@ -632,6 +644,7 @@ class LDC1612_ng:
         self._ldc1612_ng_start_stop_cmd.send_wait_ack([self._oid, 0])
         reactor = self.printer.get_reactor()
         reactor.unregister_timer(self._data_timer)
+        self._data_timer = None
 
         self._process_data(reactor.monotonic())
 

@@ -2819,7 +2819,7 @@ class ProbeEddySampler:
 
             if istart == iend:
                 # no samples in this range
-                self._eddy._log_msg(f"Warning: no samples in time range {iv_start}-{iv_end}")
+                self.eddy._log_msg(f"Warning: no samples in time range {iv_start}-{iv_end}")
                 interval_heights.append(math.nan)
             else:
                 median = np.median(heights[istart:iend])
