@@ -1019,7 +1019,7 @@ class ProbeEddy:
         stime = etime - duration
 
         first_idx = bisect.bisect_left(sampler.times, stime)
-        self._log_msg(f"probe_static_height: len({len(sampler.times)}), first_idx: {first_idx}, stime: {stime} etime: {etime}")
+        #self._log_msg(f"probe_static_height: len({len(sampler.times)}), first_idx: {first_idx}, stime: {stime} etime: {etime}")
         if first_idx == len(sampler.times):
             raise self._printer.command_error(f"No samples in time range (errors: {sampler.error_counts})")
 

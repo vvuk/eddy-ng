@@ -104,25 +104,25 @@ class LDC1612_ng:
         # Fref0 = Fclk / FREF_DIVIDER0
         if self._device_product == PRODUCT_CARTOGRAPHER:
             self._ldc_freq_clk = 24_000_000
+            self._ldc_settle_time = 0.0001706
             self._ldc_fin_divider = 1
             self._ldc_fref_divider = 1
-            self._ldc_settle_time = 0.0001706
             self._default_drive_current = 26
             self._drive_current_range = (26, 26)
         elif self._device_product == PRODUCT_MELLOW_FLY:
             self._ldc_freq_clk = 40_000_000
+            self._ldc_settle_time = 0.00125
             self._ldc_fin_divider = 1
             self._ldc_fref_divider = 3
-            self._ldc_settle_time = 0.00125
             self._default_drive_current = 15
             self._drive_current_range = (14, 17)
         elif self._device_product == PRODUCT_LDC1612_INTERNAL_CLK:
             # A generic setup that usees internal LDC1612 clock
             # using LDC1612 internal typical clock frequency 43.4MHz
             self._ldc_freq_clk = 43_400_000
+            self._ldc_settle_time = 0.00125
             self._ldc_fin_divider = 1
             self._ldc_fref_divider = 1
-            self._ldc_settle_time = 0.00125
             self._default_drive_current = 15
             self._drive_current_range = (14, 20)
         else:  # Generic/BTT Eddy using external 12MHz clock source
@@ -132,6 +132,10 @@ class LDC1612_ng:
             self._ldc_fref_divider = 2
             self._default_drive_current = 15
             self._drive_current_range = (14, 20)
+
+        # allow overriding these
+        self._ldc_fref_divider = config.getint("ldc_fref_divider", self._ldc_fref_divider)
+        self._ldc_fin_divider = config.getint("ldc_fin_divider", self._ldc_fin_divider)
 
         self._ldc_freq_ref = self._ldc_freq_clk / self._ldc_fref_divider
         self._freq_conv = self._ldc_fin_divider * self._ldc_freq_ref
