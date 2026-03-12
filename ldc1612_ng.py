@@ -273,13 +273,13 @@ class LDC1612_ng:
         )
 
         # XXX move this to a totally separate thing at some point
-        self._mcu.register_response(self._handle_debug_print, "debug_print")
+        # self._mcu.register_response(self._handle_debug_print, "debug_print") # Causes klipper 13 to fail to start with "Unknown response type: debug_print". Leaving this in for now since it can be useful for debugging, but it should be removed or changed to a proper logging mechanism eventually.
 
     def _handle_debug_print(self, params):
         logging.info(params["m"])
 
     def _clock32_to_print_time(self, clock) -> float:
-        return self._mcu.clock_to_print_time(self._mcu.clock32_to_clock64(clock))
+        return self._mcu.clock_to_print_time(self._mcu.clock32_to_clock64(clock)) 
 
     def get_mcu(self):
         return self._i2c.get_mcu()
@@ -289,10 +289,10 @@ class LDC1612_ng:
         response = bytearray(params["response"])
         return (response[0] << 8) | response[1]
 
-    def set_reg(self, reg, val, minclock=0):
-        self._i2c.i2c_write([reg, (val >> 8) & 0xFF, val & 0xFF], minclock=minclock)
+    def set_reg(self, reg, val, minclock=0): 
+        self._i2c.i2c_write([reg, (val >> 8) & 0xFF, val & 0xFF], minclock=minclock) 
 
-    def add_bulk_sensor_data_client(self, cb):
+    def add_bulk_sensor_data_client(self, cb): 
         self._batch_bulk.add_client(cb)
 
     def latched_status(self):
