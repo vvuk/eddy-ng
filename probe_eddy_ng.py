@@ -44,6 +44,7 @@ try:
     from klippy.extras.homing import HomingMove
 
     IS_KALICO = True
+    HAS_PROBE_RESULT_TYPE = False
 except ImportError:
     import mcu
     import pins
@@ -57,6 +58,7 @@ except ImportError:
     from .homing import HomingMove
 
     IS_KALICO = False
+    HAS_PROBE_RESULT_TYPE = hasattr(manual_probe, "ProbeResult")
 
 from . import ldc1612_ng
 
@@ -2239,14 +2241,20 @@ class ProbeEddyScanningProbe:
             # the probe would 'trigger'", because this is all done in terms of klicky-type probes
             z = float(self._scan_z + z_deviation)
 
-            results.append([th_pos[0], th_pos[1], z])
+            if HAS_PROBE_RESULT_TYPE:
+                bed_x = th_pos[0] + self.eddy.params.x_offset
+                bed_y = th_pos[1] + self.eddy.params.y_offset
+                res = manual_probe.ProbeResult(bed_x, bed_y, z_deviation,
+                                               th_pos[0], th_pos[1], th_pos[2])
+                self._printer.send_event("probe:update_results", [res])
+            else:
+                res = [th_pos[0], th_pos[1], z]
+                self._printer.send_event("probe:update_results", res)
+
+            results.append(res)
 
         # reset notes so that this session can continue to be used
         self._notes = []
-
-        # Allow axis_twist_compensation to update results
-        for epos in results:
-            self._printer.send_event("probe:update_results", epos)
 
         return results
 
