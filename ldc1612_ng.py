@@ -272,8 +272,10 @@ class LDC1612_ng:
             cq=cmdqueue,
         )
 
-        # XXX move this to a totally separate thing at some point
-        self._mcu.register_response(self._handle_debug_print, "debug_print")
+        if hasattr(self._mcu, "register_serial_response"):
+            self._mcu.register_serial_response(self._handle_debug_print, "debug_print")
+        else:
+            self._mcu.register_response(self._handle_debug_print, "debug_print")
 
     def _handle_debug_print(self, params):
         logging.info(params["m"])
