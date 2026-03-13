@@ -277,7 +277,7 @@ class LDC1612_ng:
         )
 
         if hasattr(self._mcu, "register_serial_response"):
-            self._mcu.register_serial_response(self._handle_debug_print, "debug_print")
+            self._mcu.register_serial_response(self._handle_debug_print, "debug_print m=%*s")
         else:
             self._mcu.register_response(self._handle_debug_print, "debug_print")
 
