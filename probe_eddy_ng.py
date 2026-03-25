@@ -2257,7 +2257,9 @@ class ProbeEddyScanningProbe:
                 bed_y = th_pos[1] + self.eddy.params.y_offset
                 res = manual_probe.ProbeResult(bed_x, bed_y, z_deviation,
                                                th_pos[0], th_pos[1], th_pos[2])
-                self._printer.send_event("probe:update_results", [res])
+                result_wrapper = [res]
+                self._printer.send_event("probe:update_results", result_wrapper)
+                res = result_wrapper[0]
             else:
                 res = [th_pos[0], th_pos[1], z]
                 self._printer.send_event("probe:update_results", res)
