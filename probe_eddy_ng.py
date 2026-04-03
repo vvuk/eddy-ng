@@ -826,7 +826,7 @@ class ProbeEddy:
             self.save_samples_path = None
 
     def cmd_MESH(self, gcmd: GCodeCommand):
-        self._bed_mesh_helper.scan()
+        self._bed_mesh_helper.scan(gcmd)
 
     cmd_STATUS_help = "Query the last raw coil value and status"
 
@@ -3174,7 +3174,7 @@ class BedMeshScanHelper:
         self._eddy = eddy
         self._printer = eddy._printer
 
-        bmc = config.getsection("bed_mesh")
+        self._bmc = bmc = config.getsection("bed_mesh")
         self._bed_mesh = eddy._printer.load_object(bmc, "bed_mesh")
         self._x_points, self._y_points = bmc.getintlist("probe_count", count=2, note_valid=False)
         self._x_min, self._y_min = bmc.getfloatlist("mesh_min", count=2, note_valid=False)
@@ -3264,8 +3264,101 @@ class BedMeshScanHelper:
         self._bed_mesh.set_mesh(mesh)
         self._eddy._log_msg("Mesh scan complete")
 
-    def scan(self):
+    def _adaptive_mesh(self, gcmd: GCodeCommand):
+
+        config_mesh_min = self._bmc.getfloatlist("mesh_min", count=2, note_valid=False)
+        config_mesh_max = self._bmc.getfloatlist("mesh_max", count=2, note_valid=False)
+
+        self._x_points, self._y_points = self._bmc.getintlist("probe_count", count=2, note_valid=False)
+        self._x_min, self._y_min = config_mesh_min
+        self._x_max, self._y_max = config_mesh_max
+
+        if not gcmd.get_int("ADAPTIVE", 0):
+            return
+
+        exclude_objects = self._printer.lookup_object("exclude_object", None)
+        if exclude_objects is None:
+            self._eddy._log_msg("Exclude objects not enabled. Using full mesh...")
+            return
+
+        objects = exclude_objects.get_status().get("objects", [])
+        if not objects:
+            return
+
+        margin = gcmd.get_float("ADAPTIVE_MARGIN", 5.0)
+
+        # List all exclude_object points by axis and iterate over
+        # all polygon points, and pick the min and max or each axis
+        list_of_xs = []
+        list_of_ys = []
+
+        for obj in objects:
+            for point in obj["polygon"]:
+                list_of_xs.append(point[0])
+                list_of_ys.append(point[1])
+
+        # Define bounds of adaptive mesh area
+        mesh_min = [min(list_of_xs), min(list_of_ys)]
+        mesh_max = [max(list_of_xs), max(list_of_ys)]
+        adjusted_mesh_min = [x - margin for x in mesh_min]
+        adjusted_mesh_max = [x + margin for x in mesh_max]
+
+        # Force margin to respect original mesh bounds
+        adjusted_mesh_min[0] = max(adjusted_mesh_min[0], config_mesh_min[0])
+        adjusted_mesh_min[1] = max(adjusted_mesh_min[1], config_mesh_min[1])
+        adjusted_mesh_max[0] = min(adjusted_mesh_max[0], config_mesh_max[0])
+        adjusted_mesh_max[1] = min(adjusted_mesh_max[1], config_mesh_max[1])
+
+        adjusted_mesh_size = (
+            adjusted_mesh_max[0] - adjusted_mesh_min[0],
+            adjusted_mesh_max[1] - adjusted_mesh_min[1],
+        )
+
+        # Compute a ratio between the adapted and original sizes
+        ratio = (
+            adjusted_mesh_size[0] / (config_mesh_max[0] - config_mesh_min[0]),
+            adjusted_mesh_size[1] / (config_mesh_max[1] - config_mesh_min[1]),
+        )
+
+        x_count, y_count = (self._x_points, self._y_points)
+
+        new_x_probe_count = int(
+            math.ceil(x_count * ratio[0])
+        )
+        new_y_probe_count = int(
+            math.ceil(y_count * ratio[1])
+        )
+
+        # There is one case, where we may have to adjust the probe counts:
+        # axis0 < 4 and axis1 > 6.
+        min_num_of_probes = 3
+        if (
+            max(new_x_probe_count, new_y_probe_count) > 6
+            and min(new_x_probe_count, new_y_probe_count) < 4
+        ):
+            min_num_of_probes = 4
+
+        new_x_probe_count = max(min_num_of_probes, new_x_probe_count)
+        new_y_probe_count = max(min_num_of_probes, new_y_probe_count)
+
+        # If the adapted mesh size is too small, adjust it to something
+        # useful.
+        adjusted_mesh_size = (
+            max(adjusted_mesh_size[0], new_x_probe_count),
+            max(adjusted_mesh_size[1], new_y_probe_count),
+        )
+
+        self._x_points, self._y_points = (new_x_probe_count, new_y_probe_count)
+        self._x_min, self._y_min = adjusted_mesh_min
+        self._x_max, self._y_max = adjusted_mesh_max
+
+        self._mesh_points, self._mesh_path = self._generate_path()
+
+
+    def scan(self, gcmd: GCodeCommand):
         th = self._eddy._toolhead
+
+        self._adaptive_mesh(gcmd)
 
         # move to the start point
         v = self._mesh_path[0]
