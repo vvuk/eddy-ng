@@ -44,6 +44,7 @@ try:
     from klippy.extras.homing import HomingMove
 
     IS_KALICO = True
+    HAS_PROBE_RESULT_TYPE = False
 except ImportError:
     import mcu
     import pins
@@ -57,6 +58,7 @@ except ImportError:
     from .homing import HomingMove
 
     IS_KALICO = False
+    HAS_PROBE_RESULT_TYPE = hasattr(manual_probe, "ProbeResult")
 
 from . import ldc1612_ng
 
@@ -229,6 +231,8 @@ class ProbeEddyParams:
     tap_max_samples: int = 5
     # The maximum standard deviation for any 3 samples to be considered valid.
     tap_samples_stddev: float = 0.020
+    # Use the median value instead of the mean
+    tap_use_median: bool = False
     # Where in the time range of tap detection start to the time the threshold
     # is crossed should the tap be placed. 0.0 places it at the earliest start
     # of tap detection; 1.0 places it at the point where the threshold is hit.
@@ -324,6 +328,7 @@ class ProbeEddyParams:
         self.tap_samples = config.getint("tap_samples", self.tap_samples, minval=1)
         self.tap_max_samples = config.getint("tap_max_samples", self.tap_max_samples, minval=self.tap_samples)
         self.tap_samples_stddev = config.getfloat("tap_samples_stddev", self.tap_samples_stddev, above=0.0)
+        self.tap_use_median = config.getboolean("tap_use_median", self.tap_use_median)
         self.tap_trigger_safe_start_height = config.getfloat(
             "tap_trigger_safe_start_height",
             -1.0,
@@ -1586,7 +1591,7 @@ class ProbeEddy:
     # PrinterProbe interface
     #
 
-    def get_offsets(self):
+    def get_offsets(self, *args, **kwargs):
         # the z offset is the trigger height, because the probe will trigger
         # at z=trigger_height (not at z=0)
         return (
@@ -1964,6 +1969,7 @@ class ProbeEddy:
         samples = gcmd.get_int("SAMPLES", self.params.tap_samples, minval=1)
         max_samples = gcmd.get_int("MAX_SAMPLES", self.params.tap_max_samples, minval=samples)
         samples_stddev = gcmd.get_float("SAMPLES_STDDEV", self.params.tap_samples_stddev, above=0.0)
+        use_median: bool = gcmd.get_int("USE_MEDIAN", 1 if self.params.tap_use_median else 0) == 1
         home_z: bool = gcmd.get_int("HOME_Z", 1) == 1
         write_plot_arg: int = gcmd.get_int("PLOT", None)
 
@@ -2069,7 +2075,7 @@ class ProbeEddy:
                     break
 
                 if len(results) >= samples:
-                    tap_z, tap_stddev, tap_overshoot = self._compute_tap_z(results, samples, samples_stddev)
+                    tap_z, tap_stddev, tap_overshoot = self._compute_tap_z(results, samples, samples_stddev, use_median)
                     if tap_z is not None:
                         break
         finally:
@@ -2162,7 +2168,7 @@ class ProbeEddy:
 
     # Compute the average tap_z from a set of tap results, taking a cluster of samples
     # from the result that has the lowest standard deviation
-    def _compute_tap_z(self, taps: List[ProbeEddy.TapResult], samples: int, req_stddev: float) -> Tuple[float, float, float]:
+    def _compute_tap_z(self, taps: List[ProbeEddy.TapResult], samples: int, req_stddev: float, use_median: bool) -> Tuple[float, float, float]:
         if len(taps) < samples:
             return None, None, None
 
@@ -2172,12 +2178,19 @@ class ProbeEddy:
         for cluster in combinations(taps, samples):
             tap_zs = np.array([t.probe_z for t in cluster])
             overshoots = np.array([t.overshoot for t in cluster])
-            mean = np.mean(tap_zs)
             std = np.std(tap_zs)
             if std < std_min:
                 std_min = std
-                tap_z = mean
-                overshoot = np.mean(overshoots)
+                if use_median:
+                    # we need the corresponding overshoot as well, so
+                    # can't just use np.median().
+                    sorted_indices = np.argsort(tap_zs)
+                    idx = len(tap_zs) // 2
+                    tap_z = tap_zs[sorted_indices[idx]]
+                    overshoot = overshoots[sorted_indices[idx]]
+                else:
+                    tap_z = np.mean(tap_zs)
+                    overshoot = np.mean(overshoots)
 
         if std_min <= req_stddev:
             return float(tap_z), float(std_min), float(overshoot)
@@ -2449,14 +2462,22 @@ class ProbeEddyScanningProbe:
             # the probe would 'trigger'", because this is all done in terms of klicky-type probes
             z = float(self._scan_z + z_deviation)
 
-            results.append([th_pos[0], th_pos[1], z])
+            if HAS_PROBE_RESULT_TYPE:
+                bed_x = th_pos[0] + self.eddy.params.x_offset
+                bed_y = th_pos[1] + self.eddy.params.y_offset
+                res = manual_probe.ProbeResult(bed_x, bed_y, z_deviation,
+                                               th_pos[0], th_pos[1], th_pos[2])
+                result_wrapper = [res]
+                self._printer.send_event("probe:update_results", result_wrapper)
+                res = result_wrapper[0]
+            else:
+                res = [th_pos[0], th_pos[1], z]
+                self._printer.send_event("probe:update_results", res)
+
+            results.append(res)
 
         # reset notes so that this session can continue to be used
         self._notes = []
-
-        # Allow axis_twist_compensation to update results
-        for epos in results:
-            self._printer.send_event("probe:update_results", epos)
 
         return results
 
