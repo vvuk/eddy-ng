@@ -728,7 +728,7 @@ class ProbeEddy:
         except:
             logging.exception("EDDYng handle_command_error: recovery failed")
 
-    BUILD_ID = "myfork-fix4-2026-10-03"
+    BUILD_ID = "myfork-fix5-2026-10-03"
 
     def _handle_connect(self):
         logging.info(f"{self._name}: probe_eddy_ng build {self.BUILD_ID} loaded from {os.path.abspath(__file__)}")
@@ -1074,6 +1074,12 @@ class ProbeEddy:
 
         if log_msg:
             self._log_msg("Calibration saved. Issue a SAVE_CONFIG to write the values to your config file and restart Klipper.")
+
+    def _next_lower_calibrated_dc(self, dc: int) -> Optional[int]:
+        """The highest calibrated drive current below `dc`, or None if there isn't one."""
+        known = set(self._dc_to_fmap.keys()) | set(self._dc_to_temp_fmaps.keys())
+        lower = [d for d in known if d < dc and self.calibrated(d)]
+        return max(lower) if lower else None
 
     SENSOR_ERROR_MARKERS = ("Sensor error", "Watchdog", "No samples received", "Communication timeout")
 
@@ -1893,9 +1899,16 @@ class ProbeEddy:
 
             self._log_msg(f"Working drive currents for tap: {working_tap_currents}")
             if working_tap_currents:
-                highest_working = working_tap_currents[-1]
-                self._tap_drive_current = highest_working
-                self._log_msg(f"Selected highest working drive current {highest_working} for tap.")
+                # Pick the LOWEST drive current that works, not the highest. A higher drive
+                # current is more sensitive, but the calibration is done with a cooler sensor;
+                # once the toolhead/chamber heat up the higher values were seen to fail with
+                # LDC1612 "Watchdog Error". The lowest working value has the most margin.
+                lowest_working = min(working_tap_currents)
+                self._tap_drive_current = lowest_working
+                self._log_msg(
+                    f"Selected lowest working drive current {lowest_working} for tap "
+                    f"(working: {working_tap_currents})."
+                )
             else:
                 self._log_warning(
                     f"None of the tested drive currents in range {tap_candidates} worked for tap. "
@@ -2637,7 +2650,14 @@ class ProbeEddy:
 
         sample_last_err = None
 
-        for sample_i in range(max_samples):
+        # Samples that failed because of a sensor error while we were stepping down the
+        # drive current don't count against max_samples (see below).
+        attempt_limit = max_samples
+        sample_i = -1
+        while True:
+            sample_i += 1
+            if sample_i >= attempt_limit:
+                break
             if self.params.debug:
                 self.save_samples_path = f"/tmp/tap-samples-{sample_i+1}.csv"
 
@@ -2659,13 +2679,17 @@ class ProbeEddy:
             if tap.error:
                 if any(m in str(tap.error) for m in self.SENSOR_ERROR_MARKERS):
                     sensor_err_streak += 1
-                    if sensor_err_streak >= 2 and tap_drive_current != orig_drive_current:
-                        self._log_warning(
-                            f"EDDYng: sensor keeps failing at tap drive current {tap_drive_current}; "
-                            f"falling back to {orig_drive_current} for this tap. If this repeats when the "
-                            "printer is hot, lower tap_drive_current (and recalibrate)."
-                        )
-                        tap_drive_current = orig_drive_current
+                    if sensor_err_streak >= 2:
+                        lower_dc = self._next_lower_calibrated_dc(tap_drive_current)
+                        if lower_dc is not None:
+                            self._log_warning(
+                                f"EDDYng: sensor keeps failing at tap drive current {tap_drive_current}; "
+                                f"stepping down to {lower_dc} for this tap. If this repeats, lower "
+                                "tap_drive_current (and recalibrate)."
+                            )
+                            tap_drive_current = lower_dc
+                            sensor_err_streak = 0
+                            attempt_limit += 2  # don't let the failed attempts eat the sample budget
                 else:
                     sensor_err_streak = 0
                 if "too close to target z" in str(tap.error):

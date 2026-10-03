@@ -304,3 +304,15 @@ def test_command_error_handler_cleans_up(fake_sampler):
     eddy._endstop_wrapper._homing_in_progress = True
     eddy._endstop_wrapper._handle_command_error()
     assert eddy._sampler is None and not eddy._endstop_wrapper._homing_in_progress
+
+
+def test_next_lower_calibrated_dc():
+    eddy = make_eddy()
+    cal = {15, 16, 17, 18, 19}
+    eddy._dc_to_fmap = {d: object() for d in cal}
+    eddy._dc_to_temp_fmaps = {}
+    eddy.calibrated = lambda d=None: d in cal
+    assert eddy._next_lower_calibrated_dc(18) == 17
+    assert eddy._next_lower_calibrated_dc(16) == 15
+    assert eddy._next_lower_calibrated_dc(15) is None
+    assert eddy._next_lower_calibrated_dc(30) == 19
