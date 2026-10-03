@@ -39,13 +39,32 @@ class FakeZMesh:
 
 
 def _load_module():
+    names = [
+        "probe_eddy_ng", "probe_eddy_ng.ldc1612_ng", "probe_eddy_ng.probe_eddy_ng",
+    ]
+    saved = {}
+    try:
+        return _load_module_inner(saved, names)
+    finally:
+        # do not leak our mocks into other test modules (test_probe_eddy_ng.py has its own)
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+
+def _load_module_inner(saved, names):
     for name in (
         "klippy", "klippy.mcu", "klippy.pins", "klippy.chelper", "klippy.printer",
         "klippy.configfile", "klippy.gcode", "klippy.toolhead", "klippy.extras",
         "klippy.extras.homing", "klippy.extras.probe", "klippy.extras.manual_probe",
         "klippy.extras.bed_mesh",
     ):
+        saved.setdefault(name, sys.modules.get(name))
         sys.modules[name] = MagicMock()
+    for name in names:
+        saved.setdefault(name, sys.modules.get(name))
     sys.modules["klippy.configfile"].error = Exception
     bm = sys.modules["klippy.extras.bed_mesh"]
     bm.ZMesh = FakeZMesh
