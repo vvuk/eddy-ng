@@ -728,7 +728,7 @@ class ProbeEddy:
         except:
             logging.exception("EDDYng handle_command_error: recovery failed")
 
-    BUILD_ID = "myfork-fix5-2026-10-03"
+    BUILD_ID = "myfork-fix6-2026-10-03"
 
     def _handle_connect(self):
         logging.info(f"{self._name}: probe_eddy_ng build {self.BUILD_ID} loaded from {os.path.abspath(__file__)}")
@@ -1899,16 +1899,9 @@ class ProbeEddy:
 
             self._log_msg(f"Working drive currents for tap: {working_tap_currents}")
             if working_tap_currents:
-                # Pick the LOWEST drive current that works, not the highest. A higher drive
-                # current is more sensitive, but the calibration is done with a cooler sensor;
-                # once the toolhead/chamber heat up the higher values were seen to fail with
-                # LDC1612 "Watchdog Error". The lowest working value has the most margin.
-                lowest_working = min(working_tap_currents)
-                self._tap_drive_current = lowest_working
-                self._log_msg(
-                    f"Selected lowest working drive current {lowest_working} for tap "
-                    f"(working: {working_tap_currents})."
-                )
+                highest_working = working_tap_currents[-1]
+                self._tap_drive_current = highest_working
+                self._log_msg(f"Selected highest working drive current {highest_working} for tap.")
             else:
                 self._log_warning(
                     f"None of the tested drive currents in range {tap_candidates} worked for tap. "
