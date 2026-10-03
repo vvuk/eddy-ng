@@ -1,49 +1,67 @@
-# eddy-ng
+# eddy-ng — myfork (correções)
 
-> ***Note: October 2025 -- life has gotten quite busy lately, so I've been much slower to respond to issues and make updates. Apologies, will get back to it soon!***
+Fork baseado em [vvuk/eddy-ng](https://github.com/vvuk/eddy-ng) + PR #150 (calibração 3D de temperatura)
++ mesh adaptativo (`EDDYNG_BED_MESH_EXPERIMENTAL ADAPTIVE=1`, ideia da issue
+[Kalico #828](https://github.com/KalicoCrew/kalico/issues/828)).
 
-eddy-ng improves the Eddy current probe support in Klipper to add accurate Z-offset setting by physically making contact with the build surface. These probes are very accurate, but suffer from drifts due to changes in conductivity in the target surface as well as changes in coil parameters as temperatures change. Instead of doing temperature compensation (which is guesswork at best), eddy-ng takes a more physical approach:
+Build atual: `myfork-fix6-2026-10-03` (aparece no `klippy.log` ao iniciar:
+`probe_eddy_ng build ... loaded from <caminho>` — se a linha não aparecer, o Klipper está
+carregando outro arquivo).
 
-1. Calibration is performed at any temperature (cold).
-2. Z-homing via the sensor happens using this calibration, regardless of current temperatures. This is a "coarse" Z-home -- it is not accurate enough for printing, but is sufficient for homing, gantry leveling, and other preparation.
-3. A precise Z-offset is taken with a "tap" just before printing, with the bed at print temps and the nozzle warm (but not hot -- you don't want filament drooling or damage to your build plate).
-4. At the same time as the tap, the difference between the actual height (now known after the tap) and what the sensor reads at that height is saved. This offset then gets taken into account when doing a bed mesh, because it indicates the delta (due to temperatures) between what height the sensor thinks it is vs. where it actually is.
+## Sintomas corrigidos
 
-This is a standalone `eddy-ng` repository, intended to be integrated into your own Klipper installation.
+| Sintoma | Causa | Correção |
+|---|---|---|
+| `Internal error on command:"EDDYNG_BED_MESH_EXPERIMENTAL"` → shutdown, só `FIRMWARE_RESTART` resolvia | `_adaptive_mesh` saía cedo (sem objetos / `ADAPTIVE=0`) sem refazer `_mesh_path`; o caminho adaptivo da impressão anterior ficava preso e `_set_bed_mesh` estourava com `IndexError` | Contagem, limites **e caminho** são recalculados a cada chamada; objetos fora da área/área vazia → mesh completo; qualquer exceção inesperada vira erro de comando recuperável (sem shutdown) |
+| Tap passa a falhar sempre (`Already sampling!`) até reiniciar | `if "Sensor error" or ... in str(err)` é sempre verdadeiro (também no upstream): todo erro era engolido sem o evento `gcode:command_error`; se o erro ocorria antes de `homing_move_end`, o sampler/endstop/MCU ficavam armados | `recover_probe_state()` (sampler, endstop, trsync, `finish_home`) chamado antes/depois do tap, antes do mesh, no `command_error` e dentro de `start_sampler()` (auto-recuperação); lista explícita de erros que justificam nova tentativa |
+| Tap com `Watchdog Error` / `No samples received` depois de imprimir (câmara quente) | Drive current alto (18) escolhido na calibração a frio deixa o LDC1612 em erro de watchdog quando o sensor esquenta | Fallback em cascata (abaixo) e o wizard continua escolhendo o maior drive current que funciona (como no upstream), para o fallback ter para onde descer |
+| Heights vs. gatilho do MCU inconsistentes com `sensor_temp_sensor` | `height_to_freq` ignorava o drift que `freq_to_height` aplica (PR #150) | `height_to_freq` aplica o inverso exato do drift |
 
-## Support
+## Comportamento novo do tap
 
-Questions? Come ask on the Sovol 3D Printers Discord at `https://discord.gg/Zg45rA52G7` in the eddy-ng forum. (Nothing Sovol-specific in `eddy-ng`, just where all this work started! You can also find the server via the Discover tab in Discord, then Sovol 3D Printers)
+* **Fallback em cascata:** se o tap falhar **2 vezes seguidas por erro de sensor**
+  (`Sensor error`, `Watchdog`, `No samples received`, `Communication timeout`), o tap desce para o
+  próximo drive current calibrado abaixo (ex.: 18 → 17 → 16 → 15) e avisa no log:
+  `sensor keeps failing at tap drive current X; stepping down to Y for this tap`.
+  Cada passo ganha +2 tentativas, então não consome o `tap_max_samples`.
+  O fallback vale só para aquele comando; o valor salvo em `tap_drive_current` não muda.
+* Se já estiver no menor drive current calibrado não há para onde descer: só as tentativas normais.
+* **Wizard (`PROBE_EDDY_NG_SETUP`)**: inalterado em relação ao PR #150/upstream — salva o **maior** drive current
+  que passa em ≥3/5 taps. É de propósito: assim o fallback sempre tem valores abaixo para tentar.
+* Z do tap muda com o drive current (menos sensível → stddev um pouco maior). Confira o primeiro layer
+  depois de mudar.
 
-You can also file issues in [this `eddy-ng` github repo](https://github.com/vvuk/eddy-ng/issues).
+## Instalação / atualização
 
-## Installation
+1. Copie `eddy-ng/probe_eddy_ng.py` (e os demais arquivos, se quiser) para o diretório do eddy-ng
+   usado pelo Klipper (o que o `install.sh` linkou em `klippy/extras`).
+2. `FIRMWARE_RESTART`.
+3. Confirme no `klippy.log` a linha `probe_eddy_ng build myfork-fix6-2026-10-03 loaded from ...`.
 
-1. Clone this repository:
+> **`/bin/bash^M: bad interpreter`** — o `install.sh` ficou com final de linha do Windows (CRLF), geralmente por
+> descompactar/commitar no Windows com `autocrlf`. Corrija na Pi com `sed -i 's/\r$//' install.sh install.py` e rode
+> `./install.sh` (ou `bash install.sh`). O repositório agora tem `.gitattributes` forçando LF.
+
+## Recomendação de configuração
 
 ```
-cd ~
-git clone https://github.com/vvuk/eddy-ng
+[probe_eddy_ng btt_eddy]
+tap_drive_current: 16   # ou o valor que o wizard salvar; evite valores no limite a quente
 ```
 
-2. Run the install script:
+## Testes
 
 ```
-cd ~/eddy-ng
-./install.sh
+pip install pytest numpy
+cd eddy-ng && python3 -m pytest test_probe_eddy_ng.py test_bed_mesh_scan.py
 ```
 
-(If your klipper isn't installed in `~/klipper`, provide the path as the first argument, i.e. `./install.sh ~/my-klipper`.)
+40 testes. `test_bed_mesh_scan.py` (novo) cobre: mesh adaptivo repetido/alternado (reprodução do `IndexError`),
+recuperação de sampler preso e escolha do drive current de fallback. `test_probe_eddy_ng.py` (original) tinha o
+caminho fixo da máquina do autor; agora localiza o `probe_eddy_ng.py` ao lado dele. Não substituem teste na impressora.
 
-3. Follow the rest of the full `eddy-ng` setup instructions that are [available in the wiki](https://github.com/vvuk/eddy-ng/wiki).
+## Arquivos alterados
 
-## Updating
-
-Run a `git pull` and then run `./install.sh` again:
-
-```
-cd ~/eddy-ng
-git pull
-./install.sh
-```
-
+* `probe_eddy_ng.py` — todas as correções acima
+* `test_bed_mesh_scan.py` — novos testes
+* `test_probe_eddy_ng.py` — caminho do módulo agora relativo ao arquivo
