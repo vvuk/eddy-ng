@@ -267,7 +267,7 @@ class ProbeEddyParams:
     # maximum number of errors to allow in a row on the sensor
     max_errors: int = 0
     # whether to print lots of verbose debug info to the log
-    debug: bool = True
+    debug: bool = False
     bigfoot: bool = False
     primary: bool = True
     bigfoot_scan_position: list[float] | None = None
