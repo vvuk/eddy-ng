@@ -660,7 +660,8 @@ ldc1612_ng_update(struct ldc1612_ng *ld, uint8_t oid)
     memcpy(ld->buffer + ld->buf_next, &sample, sizeof(sample));
     ld->buf_next += sizeof(sample)/4;
 
-    if (ld->buf_next + sizeof(sample)/4 >= BUF_COUNT32_MAX)
+    // flush once there's no room for another sample
+    if (ld->buf_next + sizeof(sample)/4 > BUF_COUNT32_MAX)
       flush_buffer(ld, oid);
 }
 
