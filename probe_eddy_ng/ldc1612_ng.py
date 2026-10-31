@@ -4,6 +4,8 @@
 # Copyright (C) 2025  Vladimir Vukicevic <vladimir@pobox.com>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+from __future__ import annotations
+
 import math
 import logging
 import struct
