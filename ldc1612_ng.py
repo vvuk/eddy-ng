@@ -161,14 +161,17 @@ class ConversionTimeFit:
                 fit = self._refine(r, self._t0, self._period)
             if fit is not None:
                 self._t0, self._period = fit[:2]
-        return [self.to_sample_time(t) for t in read_times]
+        return self.to_sample_times(np.asarray(read_times, dtype=float)).tolist()
+
+    def to_sample_times(self, read_times: np.ndarray) -> np.ndarray:
+        """Map mcu read times to the middle of each sample's conversion window"""
+        if self._period is None:
+            return read_times
+        n = np.floor((read_times - self._t0) / self._period + self.INDEX_BIAS)
+        return self._t0 + n * self._period - self._center_offset
 
     def to_sample_time(self, read_time: float) -> float:
-        """Map a mcu read time to the middle of that sample's conversion window"""
-        if self._period is None:
-            return read_time
-        n = math.floor((read_time - self._t0) / self._period + self.INDEX_BIAS)
-        return self._t0 + n * self._period - self._center_offset
+        return float(self.to_sample_times(np.asarray([read_time], dtype=float))[0])
 
     def _phase_shift(self, read_times: list[float]) -> float:
         if self._period is None:
@@ -337,6 +340,7 @@ class LDC1612_ng:
         mcu.register_config_callback(self._build_config)
 
         self._chip_initialized = False
+        self._rcount_reg: Optional[int] = None
         self._data_callback = None
         self._data_timer = None
 
@@ -661,7 +665,7 @@ class LDC1612_ng:
 
         offset_now = round(reg_offset / (1 << 16) * self._freq_conv)
         settle_now = reg_settlecount * 16.0 / self._ldc_freq_ref * 1000.0
-        rcount_now = self.get_rcount_sec() * 1000.0
+        rcount_now = reg_rcount * 16.0 / self._ldc_freq_ref * 1000.0
 
         gcmd.respond_info(f"LDC: {manuf_id:04x}:{dev_id:04x} Mux config: 0x{reg_mux_config:08x} ldc_freq_ref: {self._ldc_freq_ref}")
         gcmd.respond_info(f"Offset: {offset_now} (0x{reg_offset:8x}) settle time: {settle_now:.6f}ms (0x{reg_settlecount:8x}) rcount: {rcount_now:.6f}ms (0x{reg_rcount:8x}) deglitch: {deglitch_now}")
@@ -693,12 +697,18 @@ class LDC1612_ng:
             self.set_reg(REG_SETTLECOUNT0, int((settle / 1000.0) * self._ldc_freq_ref / 16.0 + 0.5))
 
         if rcount is not None:
-            self.set_reg(REG_RCOUNT0, int((rcount / 1000.0) * self._ldc_freq_ref / 16.0 + 0.5))
+            self._set_rcount_reg(int((rcount / 1000.0) * self._ldc_freq_ref / 16.0 + 0.5))
 
         self.cmd_LDC_DUMP(gcmd)
 
+    def _set_rcount_reg(self, val: int):
+        self._rcount_reg = val
+        self.set_reg(REG_RCOUNT0, val)
+
+    # the conversion time, from the last RCOUNT0 value written
     def get_rcount_sec(self):
-        return self.read_reg(REG_RCOUNT0) * 16.0 / self._ldc_freq_ref
+        self._init_chip()
+        return self._rcount_reg * 16.0 / self._ldc_freq_ref
 
     def _init_chip(self, *, force: bool = False):
         if self._chip_initialized and not force:
@@ -722,7 +732,7 @@ class LDC1612_ng:
         # Setup chip in requested query rate
         rcount0 = self._ldc_freq_ref / (16.0 * (self._data_rate - 4))
 
-        self.set_reg(REG_RCOUNT0, int(rcount0 + 0.5))
+        self._set_rcount_reg(int(rcount0 + 0.5))
         self.set_reg(REG_OFFSET0, self._ldc_offset_reg)
         self.set_reg(
             REG_SETTLECOUNT0,
@@ -830,7 +840,9 @@ class LDC1612_ng:
 
         for seq, overflows, fmt, data_raw in pending_data:
             if overflows > 0:
-                logging.error(f"LDC1612ng at least {overflows} dropped conversions")
+                # the firmware polls ~2.3x per conversion, so a late poll
+                # doesn't necessarily mean a conversion was lost
+                logging.error(f"LDC1612ng {overflows} sensor polls ran late; conversions may have been missed")
             if seq != self._next_seq:
                 logging.error(f"LDC1612ng lost data! Expected seq {self._next_seq} got {seq}")
 
