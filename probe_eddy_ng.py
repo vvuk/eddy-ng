@@ -811,7 +811,7 @@ class ProbeEddy:
         return self._sampler is not None and self._sampler.active()
 
     # Called by samplers when they're finished
-    def _sampler_finished(self, sampler: ProbeEddySampler, **kwargs):
+    def _sampler_finished(self, sampler: ProbeEddySampler):
         if self._sampler is not sampler:
             raise self._printer.command_error("EDDYng finishing sampler that's not active")
 
@@ -827,8 +827,8 @@ class ProbeEddy:
                 heights = sampler.heights
 
                 data_file.write("time,frequency,z,kin_z,kin_v,raw_f,sos_val,trigger_time,tap_start_time\n")
-                trigger_time = kwargs.get("trigger_time", "")
-                tap_start_time = kwargs.get("tap_start_time", "")
+                trigger_time = sampler.memos.get("trigger_time", "")
+                tap_start_time = sampler.memos.get("tap_start_time", "")
                 for i in range(len(times)):
                     past_pos, past_v = self._get_trapq_position(times[i])
                     past_k_z = past_pos[2] if past_pos is not None else ""
@@ -2788,9 +2788,9 @@ class ProbeEddySampler:
 
         if self._stopped:
             # if we're not getting any more samples, we can check directly
-            self.eddy._log_debug(f"stopped, last sample time: {self.times[-1]}")
             if len(self.times) == 0:
                 return report_no_samples(0.0)
+            self.eddy._log_debug(f"stopped, last sample time: {self.times[-1]}")
             return self.times[-1] >= sample_print_time
 
         # quick check
@@ -3044,13 +3044,13 @@ class ProbeEddyFrequencyMap:
 
         if write_debug_files:
             with open("/tmp/eddy-calibration.csv", "w") as data_file:
-                data_file.write("time,frequency,avg_freq,z,avg_z,v\n")
+                data_file.write("time,frequency,z,v\n")
                 for i in range(len(freqs)):
                     s_t = times[i]
                     s_f = freqs[i]
                     s_z = heights[i]
                     s_v = vels[i] if vels is not None else 0.0
-                    data_file.write(f"{s_t},{s_f},{s_z},,{s_v}\n")
+                    data_file.write(f"{s_t},{s_f},{s_z},{s_v}\n")
                 self._eddy._log_info(f"Wrote {len(freqs)} samples to /tmp/eddy-calibration.csv")
 
         if len(freqs) == 0 or len(heights) == 0:
