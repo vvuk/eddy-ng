@@ -713,7 +713,7 @@ check_error(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
         return true;
     }
 
-    uint8_t is_tap = lh->mode > 0;
+    uint8_t is_tap = lh->mode == HOME_MODE_SOS;
 
     // Ignore amplitude too high errors for homing,
     // because this is generally the probe being very
@@ -745,7 +745,7 @@ bool
 check_safe_start(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
 {
     struct ldc1612_ng_homing *lh = &ld->homing;
-    uint8_t is_tap = lh->mode > 0;
+    uint8_t is_tap = lh->mode == HOME_MODE_SOS;
 
     if (lh->safe_start_freq == 0)
         return true;
