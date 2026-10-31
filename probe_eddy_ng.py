@@ -12,6 +12,7 @@ import os
 import logging
 import math
 import bisect
+import json
 import pickle
 import base64
 import time
@@ -485,7 +486,7 @@ class ProbeEddy:
         if version == -1:
             if config.get("calibrated_drive_currents", None) is not None:
                 calibration_bad = True
-        elif version != ProbeEddyFrequencyMap.calibration_version:
+        elif version not in ProbeEddyFrequencyMap.loadable_calibration_versions:
             calibration_bad = True
 
         calibrated_drive_currents = config.getintlist("calibrated_drive_currents", [])
@@ -493,7 +494,7 @@ class ProbeEddy:
         if not calibration_bad:
             for dc in calibrated_drive_currents:
                 fmap = ProbeEddyFrequencyMap(self)
-                if fmap.load_from_config(config, dc):
+                if fmap.load_from_config(config, dc, version):
                     self._dc_to_fmap[dc] = fmap
         else:
             for dc in calibrated_drive_currents:
@@ -2687,7 +2688,10 @@ class ProbeEddySampler:
 
 @final
 class ProbeEddyFrequencyMap:
-    calibration_version = 5
+    # Version 6 stores the calibration as JSON; version 5 (a pickle of numpy
+    # objects) can still be loaded, and is rewritten as 6 on the next save.
+    calibration_version = 6
+    loadable_calibration_versions = (5, 6)
     low_z_threshold = 5.0
 
     def __init__(self, eddy: ProbeEddy):
@@ -2712,30 +2716,42 @@ class ProbeEddyFrequencyMap:
     def freq_spread(self) -> float:
         return ((self.freq_range[1] / self.freq_range[0]) - 1.0) * 100.0
 
-    def load_from_config(self, config: ConfigWrapper, drive_current: int):
+    @staticmethod
+    def _poly_to_json(p: Optional[npp.Polynomial]):
+        if p is None:
+            return None
+        return {"coef": p.coef.tolist(), "domain": p.domain.tolist(), "window": p.window.tolist()}
+
+    @staticmethod
+    def _poly_from_json(d) -> Optional[npp.Polynomial]:
+        if d is None:
+            return None
+        return npp.Polynomial(d["coef"], domain=d["domain"], window=d["window"])
+
+    def load_from_config(self, config: ConfigWrapper, drive_current: int, version: int):
         calibstr = config.get(f"calibration_{drive_current}", None)
         if calibstr is None:
             return False
 
-        data = pickle.loads(base64.b64decode(calibstr))
-        v = data.get("v", None)
-        if v is None or v < self.calibration_version:
-            self._eddy._log_info(f"Calibration for dc {drive_current} is old ({v}), needs recalibration")
-            return False
+        if version == 5:
+            data = pickle.loads(base64.b64decode(calibstr))
+            if data.get("v", None) != 5:
+                self._eddy._log_info(f"Calibration for dc {drive_current} is old ({data.get('v')}), needs recalibration")
+                return False
+            ftoh, ftoh_high = data.get("ftoh"), data.get("ftoh_high")
+        else:
+            data = json.loads(calibstr)
+            ftoh, ftoh_high = self._poly_from_json(data["ftoh"]), self._poly_from_json(data.get("ftoh_high"))
 
-        ftoh = data.get("ftoh", None)
-        ftoh_high = data.get("ftoh_high", None)
         dc = data.get("dc", None)
-        h_range = data.get("h_range", (math.inf, -math.inf))
-        f_range = data.get("f_range", (math.inf, -math.inf))
-
         if dc != drive_current:
             raise configerror(f"ProbeEddyFrequencyMap: drive current mismatch: loaded {dc} != requested {drive_current}")
 
         self._ftoh = ftoh
         self._ftoh_high = ftoh_high
-        self.height_range = h_range
-        self.freq_range = f_range
+        self._ftoh_rms = data.get("rms", None)
+        self.height_range = tuple(data["h_range"])
+        self.freq_range = tuple(data["f_range"])
         self.drive_current = drive_current
 
         self._eddy._log_info(f"Loaded calibration for drive current {drive_current}")
@@ -2746,16 +2762,16 @@ class ProbeEddyFrequencyMap:
             return
 
         configfile = self._eddy._printer.lookup_object("configfile")
+        # json writes floats with repr(), which round-trips exactly
         data = {
-            "v": self.calibration_version,
-            "ftoh": self._ftoh,
-            "ftoh_high": self._ftoh_high,
-            "h_range": self.height_range,
-            "f_range": self.freq_range,
             "dc": self.drive_current,
+            "ftoh": self._poly_to_json(self._ftoh),
+            "ftoh_high": self._poly_to_json(self._ftoh_high),
+            "h_range": [float(v) for v in self.height_range],
+            "f_range": [float(v) for v in self.freq_range],
+            "rms": None if self._ftoh_rms is None else float(self._ftoh_rms),
         }
-        calibstr = base64.b64encode(pickle.dumps(data)).decode()
-        configfile.set(self._eddy._full_name, f"calibration_{self.drive_current}", calibstr)
+        configfile.set(self._eddy._full_name, f"calibration_{self.drive_current}", json.dumps(data, separators=(",", ":")))
 
     def calibrate_from_values(
         self,
