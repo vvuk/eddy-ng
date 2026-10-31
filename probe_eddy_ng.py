@@ -52,6 +52,8 @@ from .compat import (
     HomingMove,
     IS_KALICO,
     HAS_PROBE_RESULT_TYPE,
+    set_position_z_homed,
+    clear_z_homed,
 )
 from . import ldc1612_ng
 
@@ -692,32 +694,11 @@ class ProbeEddy:
         curpos[2] = curpos[2] + by
         toolhead.manual_move(curpos, self.params.probe_speed)
 
-    def _set_toolhead_position(self, pos, homing_axes):
-        # klipper changed homing_axes to be a "xyz" string instead
-        # of a tuple randomly on jan10 without support for the old
-        # syntax
-        func = self._toolhead.set_position
-        kind = type(func.__defaults__[0])
-        if kind is str:
-            # new
-            homing_axes_str = "".join(["xyz"[axis] for axis in homing_axes])
-            return self._toolhead.set_position(pos, homing_axes=homing_axes_str)
-        else:
-            # old
-            return self._toolhead.set_position(pos, homing_axes=homing_axes)
+    def _set_toolhead_position(self, pos):
+        set_position_z_homed(self._toolhead, pos)
 
     def _z_not_homed(self):
-        kin = self._toolhead.get_kinematics()
-        # klipper got rid of this
-        if hasattr(kin, "note_z_not_homed"):
-            kin.note_z_not_homed()
-        else:
-            try:
-                kin.clear_homing_state("z")
-            except TypeError:
-                raise self._printer.command_error(
-                    "clear_homing_state failed: please update Klipper, your klipper is from the brief 5 day window where this was broken"
-                )
+        clear_z_homed(self._toolhead, self._printer.command_error)
 
     def save_config(self):
         configfile = self._printer.lookup_object("configfile")
@@ -1027,7 +1008,7 @@ class ProbeEddy:
                 th = self._printer.lookup_object("toolhead")
                 th_pos = th.get_position()
                 th_pos[2] = r.value
-                self._set_toolhead_position(th_pos, [2])
+                self._set_toolhead_position(th_pos)
                 self._log_debug(f"Homed Z to {r}")
             else:
                 self._log_msg(f"Probed {r}")
@@ -1058,7 +1039,7 @@ class ProbeEddy:
             # XXX This is proably not correct for some printers?
             zrange = th.get_kinematics().rails[2].get_range()
             th_pos[2] = zrange[1] - 20.0
-            self._set_toolhead_position(th_pos, [2])
+            self._set_toolhead_position(th_pos)
 
             manual_probe.ManualProbeHelper(
                 self._printer,
@@ -1082,7 +1063,7 @@ class ProbeEddy:
         th_pos = th.get_position()
         if not trust_z_axis:
             th_pos[2] = 0.0
-            self._set_toolhead_position(th_pos, [2])
+            self._set_toolhead_position(th_pos)
 
         orig_drive_current = self.current_drive_current()
         start_dc = self._sensor._drive_current_range[1]
@@ -1218,7 +1199,7 @@ class ProbeEddy:
         # XXX This is proably not correct for some printers?
         zrange = th.get_kinematics().rails[2].get_range()
         th_pos[2] = zrange[1] - 20.0
-        self._set_toolhead_position(th_pos, [2])
+        self._set_toolhead_position(th_pos)
 
         manual_probe.ManualProbeHelper(
             self._printer,
@@ -1246,7 +1227,7 @@ class ProbeEddy:
         # The Eddy sensor calibration is done to nozzle height (not sensor or trigger height).
         th_pos = th.get_position()
         th_pos[2] = 0.0
-        self._set_toolhead_position(th_pos, [2])
+        self._set_toolhead_position(th_pos)
 
         th.wait_moves()
 
@@ -1548,7 +1529,7 @@ class ProbeEddy:
             # and we should know that we have this room because the sensor tells us we're too low
             th_pos[2] = rail_range[1] - (move_up_by + 10.0)
             self._log_debug(f"probe_to_start_position_unhomed: resetting toolhead to z {th_pos[2]:.3f}")
-            self._set_toolhead_position(th_pos, [2])
+            self._set_toolhead_position(th_pos)
 
             n_pos = th.get_position()
 
@@ -1918,7 +1899,7 @@ class ProbeEddy:
             true_z_zero = - computed_tap_z
             th_pos[2] = th_pos[2] + true_z_zero
             homed_to_str = f"homed z with true_z_zero={true_z_zero:.3f}, thz={th_z:.3f}, setz={th_pos[2]:.3f}, overshoot={tap_overshoot:.3f}, "
-            self._set_toolhead_position(th_pos, [2])
+            self._set_toolhead_position(th_pos)
             adjusted_tap_z = 0.0
 
         gcode_move = self._printer.lookup_object("gcode_move")

@@ -37,6 +37,46 @@ except ImportError:
 # Newer Klipper passes probe results around as manual_probe.ProbeResult
 HAS_PROBE_RESULT_TYPE = hasattr(manual_probe, "ProbeResult")
 
+
+# Set the toolhead position and mark Z as homed
+def set_position_z_homed(toolhead: ToolHead, pos):
+    # Klipper (Jan 2025) changed homing_axes from a tuple of axis indices
+    # to a string of axis names
+    if isinstance(toolhead.set_position.__defaults__[0], str):
+        toolhead.set_position(pos, homing_axes="z")
+    else:
+        toolhead.set_position(pos, homing_axes=(2,))
+
+
+# Mark Z as no longer homed
+def clear_z_homed(toolhead: ToolHead, command_error):
+    kin = toolhead.get_kinematics()
+    # Klipper replaced note_z_not_homed with clear_homing_state
+    if hasattr(kin, "note_z_not_homed"):
+        kin.note_z_not_homed()
+        return
+    try:
+        kin.clear_homing_state("z")
+    except TypeError:
+        raise command_error(
+            "clear_homing_state failed: please update Klipper, your klipper is from the brief 5 day window where this was broken"
+        )
+
+
+# Register a callback for a message from the mcu. Klipper replaced
+# mcu.register_response(cb, name, oid) with register_serial_response(cb,
+# msgformat, oid), which validates the format against the firmware; Kalico
+# still has the former. An optional response is only registered (on Klipper)
+# if the firmware can send it.
+def register_mcu_response(mcu_obj, cb, msgformat: str, oid=None, optional: bool = False):
+    if hasattr(mcu_obj, "register_serial_response"):
+        if optional and not mcu_obj.check_valid_response(msgformat):
+            return
+        mcu_obj.register_serial_response(cb, msgformat, oid)
+    else:
+        mcu_obj.register_response(cb, msgformat.split()[0], oid)
+
+
 __all__ = [
     "mcu",
     "pins",
@@ -53,4 +93,7 @@ __all__ = [
     "HomingMove",
     "IS_KALICO",
     "HAS_PROBE_RESULT_TYPE",
+    "set_position_z_homed",
+    "clear_z_homed",
+    "register_mcu_response",
 ]

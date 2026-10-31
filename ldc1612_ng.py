@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 import numpy as np
 
-from .compat import bus, Printer
+from .compat import bus, Printer, register_mcu_response
 
 MIN_MSG_TIME = 0.100
 
@@ -442,20 +442,9 @@ class LDC1612_ng:
             cq=cmdqueue,
         )
 
-        self._register_response(self._handle_data, "ldc1612_ng_data oid=%c seq=%c ov=%c fmt=%c data=%*s", self._oid)
+        register_mcu_response(self._mcu, self._handle_data, "ldc1612_ng_data oid=%c seq=%c ov=%c fmt=%c data=%*s", self._oid)
         # only sent by firmware built with CONFIG_WANT_EDDY_NG_DEBUG
-        self._register_response(self._handle_debug_print, "debug_print m=%*s", optional=True)
-
-    # Klipper replaced mcu.register_response(cb, name, oid) with
-    # register_serial_response(cb, msgformat, oid), which validates the
-    # format against the firmware; Kalico still has the former.
-    def _register_response(self, cb, msgformat, oid=None, optional=False):
-        if hasattr(self._mcu, "register_serial_response"):
-            if optional and not self._mcu.check_valid_response(msgformat):
-                return
-            self._mcu.register_serial_response(cb, msgformat, oid)
-        else:
-            self._mcu.register_response(cb, msgformat.split()[0], oid)
+        register_mcu_response(self._mcu, self._handle_debug_print, "debug_print m=%*s", optional=True)
 
     def _handle_debug_print(self, params):
         logging.info(params["m"])
