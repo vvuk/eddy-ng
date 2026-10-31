@@ -23,13 +23,13 @@ except ImportError:
 
 @dataclass
 class TapResult:
-    error: Optional[Exception]
-    probe_z: float
-    toolhead_z: float
-    overshoot: float
-    tap_time: float
-    tap_start_time: float
-    tap_end_time: float
+    error: Optional[Exception] = None
+    probe_z: float = 0.0
+    toolhead_z: float = 0.0
+    overshoot: float = 0.0
+    tap_time: float = 0.0
+    tap_start_time: float = 0.0
+    tap_end_time: float = 0.0
 
 
 @dataclass

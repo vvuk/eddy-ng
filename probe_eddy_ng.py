@@ -406,28 +406,20 @@ class ProbeEddy(EddyNgSensor):
 
     cmd_SET_TAP_OFFSET_help = "Set or clear the tap offset for the bed mesh scan and other probe operations"
 
+    # A new value from VALUE= (replace) and/or ADJUST= (add)
+    @staticmethod
+    def _value_or_adjust(gcmd: GCodeCommand, current: float) -> float:
+        value = gcmd.get_float("VALUE", current)
+        return value + gcmd.get_float("ADJUST", 0.0)
+
     def cmd_SET_TAP_OFFSET(self, gcmd: GCodeCommand):
-        value = gcmd.get_float("VALUE", None)
-        adjust = gcmd.get_float("ADJUST", None)
-        tap_offset = self._tap_offset
-        if value is not None:
-            tap_offset = value
-        if adjust is not None:
-            tap_offset += adjust
-        self._tap_offset = tap_offset
+        tap_offset = self._tap_offset = self._value_or_adjust(gcmd, self._tap_offset)
         gcmd.respond_info(f"Set tap offset: {tap_offset:.3f}")
 
     cmd_SET_TAP_ADJUST_Z_help = "Set the tap adjustment value"
 
     def cmd_SET_TAP_ADJUST_Z(self, gcmd: GCodeCommand):
-        value = gcmd.get_float("VALUE", None)
-        adjust = gcmd.get_float("ADJUST", None)
-        tap_adjust_z = self._tap_adjust_z
-        if value is not None:
-            tap_adjust_z = value
-        if adjust is not None:
-            tap_adjust_z += adjust
-        self._tap_adjust_z = tap_adjust_z
+        tap_adjust_z = self._tap_adjust_z = self._value_or_adjust(gcmd, self._tap_adjust_z)
 
         if self.params.tap_adjust_z != self._tap_adjust_z:
             configfile = self._printer.lookup_object("configfile")
@@ -452,8 +444,8 @@ class ProbeEddy(EddyNgSensor):
         with self.start_sampler() as sampler:
             start_time = self._print_time_now() + self._sensor.settle_time
             sampler.wait_for_sample_at_time(start_time + duration)
-            sampler.finish()
-            times, heights = sampler.heights_between(start_time, math.inf)
+
+        times, heights = sampler.heights_between(start_time, math.inf)
 
         if len(heights) == 0:
             raise self._printer.command_error(f"No valid samples in time range (errors: {sampler.error_counts})")
@@ -820,7 +812,6 @@ class ProbeEddy(EddyNgSensor):
             last_sample_time = th.get_last_move_time()
             th.wait_moves()
             sampler.wait_for_sample_at_time(last_sample_time)
-            sampler.finish()
 
         if sampler.raw_count == 0:
             return None, None, None, None
@@ -1110,12 +1101,14 @@ class ProbeEddy(EddyNgSensor):
             hmove = HomingMove(self._printer, endstops)
 
             try:
-                probe_position = hmove.homing_move(target_position, tap_speed, probe_pos=True)
-
-                # raise toolhead as soon as tap ends
-                finish_z = th.get_position()[2]
-                if finish_z < 1.0:
-                    th.manual_move([None, None, start_z], lift_speed)
+                try:
+                    probe_position = hmove.homing_move(target_position, tap_speed, probe_pos=True)
+                finally:
+                    # raise the toolhead as soon as the tap ends (or fails), so
+                    # it isn't left pushing into the bed
+                    finish_z = th.get_position()[2]
+                    if finish_z < 1.0 and not self._printer.is_shutdown():
+                        th.manual_move([None, None, start_z], lift_speed)
 
                 if hmove.check_no_movement() is not None:
                     raise self._printer.command_error("Probe triggered prior to movement")
@@ -1128,37 +1121,16 @@ class ProbeEddy(EddyNgSensor):
                     # we detected a tap but it was too close to our target z
                     # to be trusted
                     # TODO: use velocity to determine this
-                    return TapResult(
-                        error=Exception("Tap detected too close to target z"),
-                        toolhead_z=finish_z,
-                        probe_z=probe_z,
-                        overshoot=0.0,
-                        tap_time=0.0,
-                        tap_start_time=0.0,
-                        tap_end_time=0.0,
-                    )
+                    return TapResult(error=Exception("Tap detected too close to target z"), toolhead_z=finish_z, probe_z=probe_z)
 
             except self._printer.command_error as err:
                 if self._printer.is_shutdown():
                     raise self._printer.command_error("Probing failed due to printer shutdown")
 
-                # in case of failure don't leave the toolhead in a bad spot (i.e. in bed)
-                finish_z = th.get_position()[2]
-                if finish_z < 1.0:
-                    th.manual_move([None, None, start_z], lift_speed)
-
                 # If just sensor errors, let the caller handle it
                 self._log_error(f"Tap failed with Z at {finish_z:.3f}: {err}")
                 if any(m in str(err) for m in ("Sensor error", "Probe completed movement", "Probe triggered prior")):
-                    return TapResult(
-                        error=err,
-                        toolhead_z=finish_z,
-                        probe_z=0.0,
-                        overshoot=0.0,
-                        tap_time=0.0,
-                        tap_start_time=0.0,
-                        tap_end_time=0.0,
-                    )
+                    return TapResult(error=err, toolhead_z=finish_z)
                 else:
                     raise
         finally:

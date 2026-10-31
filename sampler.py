@@ -98,8 +98,9 @@ class ProbeEddySampler:
     def memo(self, name, value):
         self.memos[name] = value
 
+    # start_sampler() returns a started sampler; using it in a with block
+    # finishes it at the end
     def __enter__(self):
-        self.start()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):

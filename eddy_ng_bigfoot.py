@@ -193,37 +193,37 @@ class BigfootProbe(EddyNgSensor):
             with self.start_sampler(calculate_heights=False) as sampler:
                 tstart, tend = scan_between(tstart_pos, tend_pos, passes)
                 sampler.wait_for_sample_at_time(tend, max_wait_time=1.0)
-                sampler.finish()
-                sampler.trim_to_times(tstart, tend)
 
-                np_times = np.asarray(sampler.times)
-                np_rf = np.asarray(sampler.freqs)
-                valid = ~np.isnan(np_rf)
-                np_times, np_rf = np_times[valid], np_rf[valid]
-                np_pos = np.asarray([self._get_trapq_position(t)[0][axindex] for t in np_times])
+            sampler.trim_to_times(tstart, tend)
 
-                write_debug(axis)
+            np_times = np.asarray(sampler.times)
+            np_rf = np.asarray(sampler.freqs)
+            valid = ~np.isnan(np_rf)
+            np_times, np_rf = np_times[valid], np_rf[valid]
+            np_pos = np.asarray([self._get_trapq_position(t)[0][axindex] for t in np_times])
 
-                def gaussian(x, a, x0, sigma, offset):
-                    return a * np.exp(-((x - x0) ** 2) / (2 * sigma**2)) + offset
+            write_debug(axis)
 
-                p0 = [
-                    np_rf.max() - np_rf.min(),  # a
-                    np_pos[np.argmax(np_rf)],  # x0
-                    (np_pos.max() - np_pos.min()) / 4,  # sigma
-                    np_rf.min(),
-                ]  # offset
+            def gaussian(x, a, x0, sigma, offset):
+                return a * np.exp(-((x - x0) ** 2) / (2 * sigma**2)) + offset
 
-                bounds = ([0, np_pos.min(), 1e-6, 0], [np.inf, np_pos.max(), (np_pos.max() - np_pos.min()) * 2, np.inf])
+            p0 = [
+                np_rf.max() - np_rf.min(),  # a
+                np_pos[np.argmax(np_rf)],  # x0
+                (np_pos.max() - np_pos.min()) / 4,  # sigma
+                np_rf.min(),
+            ]  # offset
 
-                popt, _ = curve_fit(gaussian, np_pos, np_rf, p0=p0, bounds=bounds, maxfev=10000)
-                a, x0, sigma, offset = popt
-                val = gaussian(x0, *popt)
+            bounds = ([0, np_pos.min(), 1e-6, 0], [np.inf, np_pos.max(), (np_pos.max() - np_pos.min()) * 2, np.inf])
 
-                self._log_msg(
-                    f"{axis} {x0:.3f} (fv {val:.6f} sigma {sigma:.6f} over {tend - tstart:.3f}s, {len(sampler.times)} samples)"
-                )
-                result[axindex] = float(x0)
+            popt, _ = curve_fit(gaussian, np_pos, np_rf, p0=p0, bounds=bounds, maxfev=10000)
+            a, x0, sigma, offset = popt
+            val = gaussian(x0, *popt)
+
+            self._log_msg(
+                f"{axis} {x0:.3f} (fv {val:.6f} sigma {sigma:.6f} over {tend - tstart:.3f}s, {len(sampler.times)} samples)"
+            )
+            result[axindex] = float(x0)
 
         # we're moving at speed mm/sec. we're sampling at rcount_sec.
         rcount_sec = self._sensor.get_rcount_sec()

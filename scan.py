@@ -246,22 +246,21 @@ class BedMeshScanHelper:
         with self._eddy.start_sampler() as sampler:
             path_times = self._scan_path()
             sampler.wait_for_sample_at_time(path_times[-1] + sample_time * 2.0)
-            sampler.finish()
 
-            heights = sampler.find_heights_at_times([(t - sample_time / 2.0, t + sample_time / 2.0) for t in path_times])
+        heights = sampler.find_heights_at_times([(t - sample_time / 2.0, t + sample_time / 2.0) for t in path_times])
 
-            # Note plus tap_offset here, vs -tap_offset when probing. These are actual
-            # heights, the other is "offset from real"
-            heights = [h + self._eddy._tap_offset for h in heights]
+        # Note plus tap_offset here, vs -tap_offset when probing. These are actual
+        # heights, the other is "offset from real"
+        heights = [h + self._eddy._tap_offset for h in heights]
 
-            with open("/tmp/mesh.csv", "w") as mfile:
-                mfile.write("time,x,y,z\n")
-                for i in range(len(self._mesh_path)):
-                    t = path_times[i]
-                    x = self._mesh_path[i][0]
-                    y = self._mesh_path[i][1]
-                    z = heights[i]
-                    mfile.write(f"{t},{x},{y},{z}\n")
+        with open("/tmp/mesh.csv", "w") as mfile:
+            mfile.write("time,x,y,z\n")
+            for i in range(len(self._mesh_path)):
+                t = path_times[i]
+                x = self._mesh_path[i][0]
+                y = self._mesh_path[i][1]
+                z = heights[i]
+                mfile.write(f"{t},{x},{y},{z}\n")
 
-            self._set_bed_mesh(heights)
+        self._set_bed_mesh(heights)
 
