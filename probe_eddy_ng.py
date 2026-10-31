@@ -549,7 +549,7 @@ class ProbeEddy:
         # functionality like start_session
         self._printer.add_object("probe", self)
 
-        self._bed_mesh_helper = BedMeshScanHelper(self, config)
+        self._bed_mesh_helper = BedMeshScanHelper(self, config) if config.has_section("bed_mesh") else None
 
         # TODO: get rid of this
         if hasattr(probe, "ProbeCommandHelper"):
@@ -840,6 +840,8 @@ class ProbeEddy:
             self.save_samples_path = None
 
     def cmd_BED_MESH(self, gcmd: GCodeCommand):
+        if self._bed_mesh_helper is None:
+            raise self._printer.command_error("No [bed_mesh] section configured")
         self._bed_mesh_helper.scan()
 
     cmd_STATUS_help = "Query the last raw coil value and status"
