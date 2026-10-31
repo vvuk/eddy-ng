@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Optional, final, TYPE_CHECKING
 
-from .compat import mcu, pins
+from .compat import mcu, pins, manual_probe
 from .scan import ProbeEddyDistanceCollector
 
 if TYPE_CHECKING:
@@ -219,3 +219,49 @@ class ProbeEddyEndstopWrapper:
     # Kalico's METHOD=rapid_scan looks for this on probe.mcu_probe
     def begin_collect_distance(self):
         return ProbeEddyDistanceCollector(self.eddy)
+
+
+# Newer Klipper (v0.13.0-665+) homes Z with probe:z_virtual_endstop through
+# the probe session interface instead of treating the endstop as an
+# mcu_endstop in home_rails: G28 calls start_probe_session, forces the start
+# position, then calls run_probe for each homing attempt and shifts the
+# toolhead Z by the result's bed_z. This session does the same dive the old
+# home_rails path did, via probing_move on the endstop wrapper (so the
+# homing_move_begin/end handlers still move to the start position and run
+# the sampler).
+@final
+class ProbeEddyHomingSession:
+    def __init__(self, eddy: ProbeEddy, gcmd):
+        self.eddy = eddy
+        self._printer = eddy._printer
+        self._toolhead = self._printer.lookup_object("toolhead")
+        self._results = []
+
+        if not eddy.calibrated():
+            raise self._printer.command_error("EDDYng not calibrated!")
+
+    def run_probe(self, gcmd, *args, **kwargs):
+        th = self._toolhead
+        curtime = self._printer.get_reactor().monotonic()
+        z_min = th.get_kinematics().get_status(curtime)["axis_minimum"][2]
+
+        pos = th.get_position()
+        pos[2] = z_min
+        speed = gcmd.get_float("PROBE_SPEED", self.eddy.params.probe_speed, above=0.0)
+
+        phoming = self._printer.lookup_object("homing")
+        check_movement = not phoming.check_probe_first_home(gcmd)
+        epos = phoming.probing_move(self.eddy._endstop_wrapper, pos, speed, check_movement=check_movement)
+
+        # The endstop triggered with the probe at home_trigger_height; G28
+        # subtracts bed_z (= trigger z - home_trigger_height) from the toolhead Z
+        offsets = (self.eddy.params.x_offset, self.eddy.params.y_offset, self.eddy.params.home_trigger_height)
+        self._results.append(manual_probe.create_probe_result(epos, offsets))
+
+    def pull_probed_results(self):
+        res = self._results
+        self._results = []
+        return res
+
+    def end_probe_session(self):
+        self._results = []

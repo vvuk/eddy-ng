@@ -28,7 +28,7 @@ from .compat import (
 from .sampler import ProbeEddyProbeResult
 from .fmap import ProbeEddyFrequencyMap
 from .tap import TapResult, TapConfig, compute_tap_z, tap_filter_sos
-from .endstop import ProbeEddyEndstopWrapper
+from .endstop import ProbeEddyEndstopWrapper, ProbeEddyHomingSession
 from .scan import ProbeEddyScanningProbe
 from . import plots
 from .base import EddyNgSensor
@@ -874,6 +874,11 @@ class ProbeEddy(EddyNgSensor):
         }
 
     def start_probe_session(self, gcmd):
+        # Newer Klipper homes Z via the probe session; it only sets
+        # HOME_ATTEMPT_NUM for those. Don't route on whether Z is homed:
+        # homing_override's set_position_z marks Z homed before G28 Z runs.
+        if gcmd.get("HOME_ATTEMPT_NUM", None) is not None:
+            return ProbeEddyHomingSession(self, gcmd)
         session = ProbeEddyScanningProbe(self, gcmd)
         session._start_session()
         return session
