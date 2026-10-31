@@ -152,9 +152,11 @@ class ProbeEddyParams:
         self.allow_unsafe = config.getboolean("allow_unsafe", self.allow_unsafe)
         self.debug = config.getboolean("debug", self.debug)
         self.max_errors = config.getint("max_errors", self.max_errors)
-        self.primary = config.getboolean("primary", default=self.primary)
 
         self.bigfoot = config.getboolean("bigfoot", self.bigfoot)
+        # A bigfoot sensor sits alongside the regular probe, so it shouldn't
+        # claim the commands without a SENSOR=/CHIP= by default
+        self.primary = config.getboolean("primary", default=not self.bigfoot)
         if self.bigfoot:
             self.bigfoot_scan_position = config.getfloatlist("bigfoot_scan_position", count=3, default=None)
             return
