@@ -57,9 +57,8 @@ PRODUCT_CARTOGRAPHER = 2
 PRODUCT_MELLOW_FLY = 3
 PRODUCT_LDC1612_INTERNAL_CLK = 4
 
-HOME_MODE_NONE = 0
+# should match sensor_ldc1612_ng.c
 HOME_MODE_HOME = 1
-HOME_MODE_WMA = 2
 HOME_MODE_SOS = 3
 
 # should match sensor_ldc1612_ng.c
@@ -399,7 +398,7 @@ class LDC1612_ng:
 
     def cmd_LDC_RESET(self, gcmd):
         if self._data_timer is not None:
-            gcmd.respond_info(f"Streaming active, stopping before reset")
+            gcmd.respond_info("Streaming active, stopping before reset")
             self.stop_streaming()
 
         self.set_reg(REG_RESET_DEV, 0x0001)
@@ -407,7 +406,7 @@ class LDC1612_ng:
         reactor = self.printer.get_reactor()
         reactor.pause(reactor.monotonic() + 0.500)
         self._init_chip(force=True)
-        gcmd.respond_info(f"Reset complete")
+        gcmd.respond_info("Reset complete")
 
     def _build_config(self):
         cmdqueue = self._i2c.get_command_queue()
@@ -455,12 +454,10 @@ class LDC1612_ng:
 
         self._mcu.register_response(self._handle_data, "ldc1612_ng_data", self._oid)
 
-        if hasattr(self._mcu, "register_serial_response"):
-            # infuriating: these used to be able to be registered for optional
-            # things (that the firmware never sends)
-            #self._mcu.register_serial_response(self._handle_debug_print, "debug_print m=%*s")
-            pass
-        else:
+        # Newer Klipper (with register_serial_response) no longer allows
+        # registering responses the firmware may never send, so debug_print
+        # output is only available on older Klipper and Kalico.
+        if not hasattr(self._mcu, "register_serial_response"):
             self._mcu.register_response(self._handle_debug_print, "debug_print")
 
     def _handle_debug_print(self, params):
@@ -554,13 +551,11 @@ class LDC1612_ng:
     def to_ldc_freqval(self, freq):
         return int(freq * (1 << 28) / self._freq_conv - (self._ldc_offset_reg << 12) + 0.5)
 
-    def from_ldc_freqval(self, val, ignore_err=False):
-        if (val & 0xF0000000) != 0 and not ignore_err:
+    def from_ldc_freqval(self, val):
+        if (val & 0xF0000000) != 0:
             raise self.printer.command_error(f"LDC1612 frequency value has error bits: {hex(val)}")
         return round((val + (self._ldc_offset_reg << 12)) * self._freq_conv / (1 << 28), 3)
 
-    def ldc_freqval_error(self, val):
-        return val >> 28
 
     #
     # Homing
@@ -573,18 +568,11 @@ class LDC1612_ng:
         trigger_freq: float,
         start_freq: float,
         start_time: float,
-        mode: str = "home",
         tap_threshold: Optional[float] = None,
         max_errors: int = 0,
     ):
-        MODES = {
-            "home": HOME_MODE_HOME,
-            "sos": HOME_MODE_SOS,
-        }
-        mode_val = MODES.get(mode.lower(), None)
-        if mode_val is None:
-            raise self.printer.command_error(f"Invalid mode: {mode}")
-
+        # a threshold means a tap, using the sos filter set via set_sos_section
+        mode = HOME_MODE_SOS if tap_threshold is not None else HOME_MODE_HOME
         t_freqvl = self.to_ldc_freqval(trigger_freq)
         s_freqval = self.to_ldc_freqval(start_freq)
         start_time_mcu = self._mcu.print_time_to_clock(start_time) if start_time > 0 else 0
@@ -606,7 +594,7 @@ class LDC1612_ng:
                 t_freqvl,
                 s_freqval,
                 start_time_mcu,
-                mode_val,
+                mode,
                 tap_threshold_val,
                 max_errors,
             ]
@@ -762,28 +750,14 @@ class LDC1612_ng:
     def get_deglitch(self):
         return self.read_reg(REG_MUX_CONFIG) & ~0x0208
 
-    def set_deglitch(self, val: int):
-        logging.info(f"LDC1612ng {self._name} deglitch set {val}")
-        self.set_reg(REG_MUX_CONFIG, val | 0x0208)
-
     def get_drive_current(self) -> int:
         return self._drive_current
 
-    def set_drive_current(self, cval: int, maxfreq: float = None):
+    def set_drive_current(self, cval: int):
         if cval < 0 or cval > 31:
             raise self.printer.command_error("Drive current must be between 0 and 31")
         if self._drive_current == cval:
             return
-
-        if maxfreq is not None:
-            if maxfreq < 1_000_000.0:
-                self.set_deglitch(DEGLITCH_1_0MHZ)
-            elif maxfreq < 3_300_000.0:
-                self.set_deglitch(DEGLITCH_3_3MHZ)
-            elif maxfreq < 10_000_000.0:
-                self.set_deglitch(DEGLITCH_10MHZ)
-            else:
-                self.set_deglitch(DEGLITCH_33MHZ)
 
         logging.info(f"LDC1612ng {self._name} set drive current {cval}")
         self._drive_current = cval

@@ -76,10 +76,9 @@ enum {
 // should match ldc1612_ng.py
 #define HOME_MODE_NONE 0
 #define HOME_MODE_HOME 1
-#define HOME_MODE_WMA 2
 #define HOME_MODE_SOS 3
 
-// should match probe_eddy.py
+// should match probe_eddy_ng.py
 #define REASON_ERROR_SENSOR 0
 #define REASON_ERROR_PROBE_TOO_LOW 1
 #define REASON_ERROR_TOO_EARLY 2
@@ -115,9 +114,6 @@ enum {
 #define STATUS_ERR_AHE 0x0400
 // amplitude low error
 #define STATUS_ERR_ALE 0x0200
-
-// Homing configuration
-#define FREQ_WINDOW_SIZE 16
 
 #define MAX_SOS_SECTIONS 4
 
@@ -162,9 +158,7 @@ struct ldc1612_ng_homing {
     // The final error that caused an abort
     uint32_t error;
 
-    union {
-        struct ldc1612_ng_homing_sos_tap sos_tap;
-    };
+    struct ldc1612_ng_homing_sos_tap sos_tap;
 };
 
 struct ldc1612_ng {
@@ -181,9 +175,6 @@ struct ldc1612_ng {
     uint8_t flags;
     uint16_t last_status;
     uint32_t last_read_value;
-
-    // Samples per second (configurable)
-    uint32_t data_rate;
 
     // homing triggers
     struct trsync *ts;
@@ -317,11 +308,11 @@ read_reg_data0(struct ldc1612_ng *ld)
 
 // Notify trsync of event
 static void
-notify_trigger(struct ldc1612_ng *ld, uint32_t time, uint8_t reason)
+notify_trigger(struct ldc1612_ng *ld, uint8_t reason)
 {
-    ld->homing.mode = 0;
+    ld->homing.mode = HOME_MODE_NONE;
     trsync_do_trigger(ld->ts, reason);
-    dprint2("notify_trigger: %u at %u", reason, time);
+    dprint2("notify_trigger: %u", reason);
 }
 
 void
@@ -543,18 +534,18 @@ command_ldc1612_ng_setup_home(uint32_t *args)
     if (trigger_freq == 0 || trsync_oid == 0) {
         dprint("resetting homing/tapping");
         ld->ts = NULL;
-        lh->mode = 0;
+        lh->mode = HOME_MODE_NONE;
         return;
     }
 
     if (ld->rest_ticks == 0) {
-        notify_trigger(ld, 0, other_reason_base);
+        notify_trigger(ld, other_reason_base);
         dprint("sensor not started!");
         return;
     }
 
-    if (lh->mode > 0) {
-        notify_trigger(ld, 0, other_reason_base);
+    if (lh->mode != HOME_MODE_NONE) {
+        notify_trigger(ld, other_reason_base);
         dprint("homing already set up!");
         return;
     }
@@ -582,7 +573,6 @@ command_ldc1612_ng_setup_home(uint32_t *args)
         lh->sos_tap.tap_threshold = tap_threshold / 65536.0f;
         dprint2("setup sos sf=%u tf=%u tap=%f", start_freq, trigger_freq, lh->sos_tap.tap_threshold);
         break;
-    case HOME_MODE_WMA:
     default:
         shutdown("bad homing mode");
     }
@@ -608,7 +598,7 @@ command_ldc1612_ng_finish_home(uint32_t *args)
     uint32_t error = lh->error;
 
     ld->ts = NULL;
-    lh->mode = 0;
+    lh->mode = HOME_MODE_NONE;
 
     sendf("ldc1612_ng_finish_home_reply oid=%c trigger_clock=%u tap_start_clock=%u error=%u"
           , args[0], trigger_time, tap_start_time, error);
@@ -627,19 +617,6 @@ ldc1612_ng_update(struct ldc1612_ng *ld, uint8_t oid)
     irq_disable();
     ld->flags &= ~LDC_PENDING;
     irq_enable();
-
-  #if false
-    char bits[33] = { 0 };
-    for (int i = 0; i < 32; i++) {
-      if (status & (1 << i)) {
-        bits[31 - i] = '1';
-      } else {
-        bits[31 - i] = '0';
-      }
-    }
-
-    dprint(bits);
-#endif
 
     if (!(status & STATUS_UNREADCONV0))
         return;
@@ -735,7 +712,7 @@ check_error(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
     lh->error = data;
 
     // Sensor reports an issue - cancel homing
-    notify_trigger(ld, 0, ld->other_reason_base + REASON_ERROR_SENSOR);
+    notify_trigger(ld, ld->other_reason_base + REASON_ERROR_SENSOR);
     return false;
 }
 
@@ -760,7 +737,7 @@ check_safe_start(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
     if (lh->safe_start_time != 0 && timer_is_before(time, lh->safe_start_time)) {
         dprint1("early");
         dprint2("EARLY! time=%u < %u", time, lh->safe_start_time);
-        notify_trigger(ld, 0, ld->other_reason_base + REASON_ERROR_TOO_EARLY);
+        notify_trigger(ld, ld->other_reason_base + REASON_ERROR_TOO_EARLY);
         return false;
     }
 
@@ -797,7 +774,7 @@ check_homing(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
         return;
     
     if (data > lh->homing_trigger_freq) {
-        notify_trigger(ld, time, ld->success_reason);
+        notify_trigger(ld, ld->success_reason);
         lh->trigger_time = time;
         dprint2("home t=%u f=%u", time, data);
     }
@@ -841,7 +818,7 @@ check_sos_tap(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
         float diff = sos_tap->tap_start_value - val;
         if (diff >= sos_tap->tap_threshold) {
             lh->trigger_time = time;
-            notify_trigger(ld, time, ld->success_reason);
+            notify_trigger(ld, ld->success_reason);
             dprint2("tap st=%u tt=%u l=%f (f=%f)", lh->tap_start_time, time, sos_tap->tap_start_value - val, freq);
             return;
         }
