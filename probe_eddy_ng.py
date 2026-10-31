@@ -3331,6 +3331,21 @@ class BedMeshScanHelper:
                 ki += 1
             matrix.append(row)
 
+        # heights may have NaNs in them if there were no samples during a point's
+        # scan time; fill these in with the average of the valid adjacent points
+        for j in range(self._y_points):
+            for i in range(self._x_points):
+                if not math.isnan(matrix[j][i]):
+                    continue
+                adjacent = [
+                    matrix[nj][ni]
+                    for nj, ni in ((j - 1, i), (j + 1, i), (j, i - 1), (j, i + 1))
+                    if 0 <= nj < self._y_points and 0 <= ni < self._x_points and not math.isnan(matrix[nj][ni])
+                ]
+                if not adjacent:
+                    raise self._printer.command_error(f"No sample for mesh point [{i},{j}] and all adjacent samples are missing")
+                matrix[j][i] = sum(adjacent) / len(adjacent)
+
         params = self._bed_mesh.bmc.mesh_config.copy()
         params.update(
             {
@@ -3370,43 +3385,6 @@ class BedMeshScanHelper:
             sampler.finish()
 
             heights = sampler.find_heights_at_times([(t - sample_time / 2.0, t + sample_time / 2.0) for t in path_times])
-
-            # heights may have NaNs in it if there were no samples during our scan time.
-            # fill these in with averages
-            for j in range(self._y_points):
-                for i in range(self._x_points):
-                    idx = j*self._y_points + i
-                    if not math.isnan(heights[idx]):
-                        continue
-                    zsum = 0.0
-                    zcount = 0
-                    if j > 1:
-                        if x > 1:
-                            hv = heights[(j-1)*self._y_points + x-1]
-                            if not math.isnan(hv):
-                                zsum += hv
-                                zcount += 1
-                        if x <= (self._x_points-1):
-                            hv = heights[(j-1)*self._y_points + x+1]
-                            if not math.isnan(hv):
-                                zsum += hv
-                                zcount += 1
-                    if j <= (self._y_points-1):
-                        if x > 1:
-                            hv = heights[(j+1)*self._y_points + x-1]
-                            if not math.isnan(hv):
-                                zsum += hv
-                                zcount += 1
-                        if x <= (self._x_points-1):
-                            hv = heights[(j+1)*self._y_points + x+1]
-                            if not math.isnan(hv):
-                                zsum += hv
-                                zcount += 1
-
-                    if zcount == 0:
-                        raise self._printer.command_error(f"No sample for [{i},{j}] and all adjacent samples are NaN")
-
-                    heights[idx] = zsum / zcount
 
             # Note plus tap_offset here, vs -tap_offset when probing. These are actual
             # heights, the other is "offset from real"
