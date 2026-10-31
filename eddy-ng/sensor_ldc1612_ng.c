@@ -224,6 +224,7 @@ static void check_sos_tap(struct ldc1612_ng* ld, uint32_t data, uint32_t time);
 //
 static struct task_wake ldc1612_ng_wake;
 
+#if SUPPORT_CARTOGRAPHER
 static void
 spin_us(uint32_t us)
 {
@@ -233,6 +234,7 @@ spin_us(uint32_t us)
             break;
     }
 }
+#endif
 
 static int
 check_intb_asserted(struct ldc1612_ng *ld)
@@ -642,8 +644,6 @@ ldc1612_ng_update(struct ldc1612_ng *ld, uint8_t oid)
       .data = data,
       .accum_val = 0.0f,
     };
-
-    uint32_t sos_fval = 0;
 
     switch (ld->homing.mode) {
     case HOME_MODE_HOME:
