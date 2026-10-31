@@ -365,18 +365,7 @@ config_ldc1612_ng(uint32_t oid, uint32_t i2c_oid, uint8_t product, int32_t intb_
         break;
 #if SUPPORT_CARTOGRAPHER
     case PRODUCT_CARTOGRAPHER:
-        // The Cartographer hardware uses a timer in the STM32F0
-        // to generate a 24MHz reference clock for the ldc1612.
-        // Uses a new _with_max setup here because otherwise we
-        // can't actually get to 24MHz from 48MHz. This could be
-        // configured from the python side but that requires
-        // adding a bunch of new commands.
-        gpio_pwm_setup_with_max(GPIO('B', 4), 1, 1, 2);
-
-        spin_us(10000);
-
-        // This enables the ldc1612; could be tied to the
-        // shutdown pin?
+        // This enables the ldc1612
         gpio_out_setup(GPIO('A', 15), 0);
 
         spin_us(50000);
