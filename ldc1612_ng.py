@@ -8,7 +8,6 @@ import math
 import logging
 import struct
 import threading
-import traceback
 from dataclasses import dataclass
 from typing import List, Optional
 import numpy as np
@@ -655,7 +654,6 @@ class LDC1612_ng:
         self._ldc1612_ng_start_stop_cmd.send([self._oid, rest_ticks])
 
     def stop_streaming(self):
-        traceback.print_stack()
         self._ldc1612_ng_start_stop_cmd.send_wait_ack([self._oid, 0])
         reactor = self.printer.get_reactor()
         reactor.unregister_timer(self._data_timer)
@@ -686,8 +684,6 @@ class LDC1612_ng:
         if not self._data_callback:
             raise self.printer.command_error("DATA WITHOUT CALLBACK")
 
-        reactor = self.printer.get_reactor()
-
         times: list[float] = []
         values: list[int] = []
         accum_values: list[float] = []
@@ -711,9 +707,6 @@ class LDC1612_ng:
                 times.append(t)
                 values.append(raw_data)
                 accum_values.append(raw_accum)
-
-        print_time_now = self._mcu.estimated_print_time(reactor.monotonic())
-        logging.info(f"samples now: {print_time_now} sample times: {times[:2]}...{times[-2:]} values: {values[:2]}...{values[-2:]} sosv: {accum_values[:2]}...{accum_values[-2:]}")
 
         data = LDC1612_ng_sample_data(times=times, raw_freqs=values, accum_vals=accum_values)
         self._data_callback(data)
