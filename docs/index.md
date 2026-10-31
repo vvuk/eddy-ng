@@ -23,24 +23,41 @@ The tap makes contact with the bed. By default it never goes below Z=-0.250 (rel
   - [Cartographer v3 (USB/CAN)](cartographer.md)
   - [Mellow Fly toolboards with an LDC1612](mellow-fly.md)
 
-  Other LDC1612 probes should work with `sensor_type: ldc1612` or `ldc1612_internal_clk` and some [tuning](advanced.md#sensor-tuning).
+  Other LDC1612 probes should also work; see [Other LDC1612 probes](other-probes.md).
 - You must be comfortable building and flashing Klipper firmware to the probe's MCU and editing your printer config. On Klipper, eddy-ng also changes two Klipper source files, so Klipper will show as "dirty". Kalico supports add-ons and needs no source changes.
+
+## Setup checklist
+
+1. [Install eddy-ng](installation.md).
+2. Build and flash the firmware, and configure your probe: [BTT Eddy](btt-eddy.md), [Cartographer](cartographer.md), [Mellow Fly](mellow-fly.md) or [another LDC1612 probe](other-probes.md).
+3. Set up [safe homing, bed mesh, and QGL or Z tilt](safety.md).
+4. Check that eddy-ng can talk to the sensor, run `PROBE_EDDY_NG_SETUP`, test homing, and `SAVE_CONFIG` ([Calibration](calibration.md)).
+5. Do a first [tap](tap.md), check Z=0 with paper, and adjust `tap_adjust_z`.
+6. Add tap and the bed mesh to your [print start and end macros](printing.md).
+7. Optionally, set up [profiles](profiles.md) for more build plates or per-material tap settings.
+
+Each page ends with a link to the next step.
 
 ## Documentation
 
+Setup, in order:
+
 1. [Installation](installation.md)
-2. [Safety](safety.md): homing, QGL, Z tilt and bed mesh setup
-3. Probe setup: [BTT Eddy](btt-eddy.md), [Cartographer](cartographer.md), [Mellow Fly](mellow-fly.md)
+2. Probe setup: [BTT Eddy](btt-eddy.md), [Cartographer](cartographer.md), [Mellow Fly](mellow-fly.md), [other LDC1612 probes](other-probes.md)
+3. [Safety](safety.md): homing, bed mesh, QGL and Z tilt
 4. [Calibration](calibration.md)
 5. [Tap](tap.md)
-6. [Profiles](profiles.md): build plates and per-material tap settings
-7. [Macros](macros.md): homing and print start/end
-8. [Advanced](advanced.md): drive current, sensor tuning, multiple sensors, debug files
-9. [Troubleshooting](troubleshooting.md)
-10. [Commands](commands.md)
-11. [Configuration reference](configuration.md)
-12. [Nozzle alignment](nozzle-alignment.md) (experimental)
-13. [Changes](changes.md)
+6. [Printing](printing.md): print start and end macros, bed mesh, the tap offset
+7. [Profiles](profiles.md): build plates and per-material tap settings
+
+Reference:
+
+- [Troubleshooting](troubleshooting.md)
+- [Commands](commands.md)
+- [Configuration reference](configuration.md)
+- [Advanced](advanced.md): drive current, sensor tuning, debug files
+- [Nozzle alignment](nozzle-alignment.md) (experimental)
+- [Changes](changes.md)
 
 ## Help and support
 

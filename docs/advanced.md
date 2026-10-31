@@ -9,7 +9,9 @@ At each drive current, the sensor can only read heights in a certain range. Too 
 - **Homing** needs readings from about 5mm down to 0.5mm (setup requires this range). Homing must start above `home_trigger_height` + `home_trigger_safe_start_offset` (3mm by default) and triggers at `home_trigger_height` (2mm).
 - **Tap** needs readings from `tap_start_z` (3mm by default) down to contact.
 
-One drive current may not cover both ranges. `reg_drive_current` is used for homing and everything else, and `tap_drive_current` for tap (it defaults to `reg_drive_current`). Each needs its own calibration: `PROBE_EDDY_NG_SETUP` does both, or use `PROBE_EDDY_NG_CALIBRATE DRIVE_CURRENT=<n>`.
+One drive current may not cover both ranges, so each [plate](profiles.md#plate-profiles) has a homing drive current, used for homing and everything else, and a tap drive current. Each needs its own calibration. `PROBE_EDDY_NG_SETUP` picks and calibrates both. To choose one yourself, calibrate it with `PROBE_EDDY_NG_CALIBRATE DRIVE_CURRENT=<n> USE_FOR=tap` (or `USE_FOR=homing`, or `USE_FOR=homing,tap`), and `SAVE_CONFIG`.
+
+For the `default` plate, `reg_drive_current` and `tap_drive_current` in `[probe_eddy_ng ...]` set them too. A [tap profile](profiles.md#tap-profiles) can also override them while it's loaded.
 
 The coil design matters a lot. The BTT Eddy's small coil is sensitive to temperature and nearby metal and may need manual tuning; other probes usually work after setup.
 
@@ -23,7 +25,11 @@ PROBE_EDDY_NG_TEST_DRIVE_CURRENT DRIVE_CURRENT=16
 
 This moves from `START_Z` (default `calibration_z_max`, 15mm) down to `TARGET_Z` (default 0) and reports the range of heights where the sensor gave readings. No paper test is needed.
 
-Start with your homing drive current plus 1 or 2. If the range is too high (doesn't reach low enough), try one higher; if it's too low, one lower. Don't go more than a few steps from the default. Once you find a value, set `tap_drive_current` (or `reg_drive_current`) in your config and calibrate it.
+Start with your homing drive current plus 1 or 2. If the range is too high (doesn't reach low enough), try one higher; if it's too low, one lower. Don't go more than a few steps from the default. Once you find a value, calibrate it for tap (with the bed warm, as for any calibration) and `SAVE_CONFIG`:
+
+```
+PROBE_EDDY_NG_CALIBRATE DRIVE_CURRENT=16 USE_FOR=tap
+```
 
 If no drive current covers what you need, move the sensor: higher if it can't read low enough, lower if it can't read high enough.
 
@@ -42,10 +48,6 @@ These `[probe_eddy_ng ...]` options change how the LDC1612 is configured. The `s
 
 `LDC_NG_DUMP` shows the current register settings, and `LDC_NG_SET` (`DEGLITCH=`, `OFFSET=`, `SETTLE=` in ms, `RCOUNT=` in ms) changes them at runtime for experimenting. `LDC_NG_CALIBRATE_DRIVE_CURRENT` asks the chip for a starting drive current; run it with the sensor about 10mm above the bed.
 
-## Multiple sensors
-
-Every `[probe_eddy_ng <name>]` section's commands take `SENSOR=<name>` (and the `LDC_NG_*` commands `CHIP=<name>`). They also work without it for the primary sensor, which is any section without `primary: false`. Only one section can be the Z probe; an extra sensor, like a [nozzle alignment](nozzle-alignment.md) sensor (which defaults to `primary: false`), must not be primary.
-
 ## Debug files
 
 | File | Written by |
@@ -58,6 +60,3 @@ Every `[probe_eddy_ng <name>]` section's commands take `SENSOR=<name>` (and the 
 
 `debug: true` also writes much more detail to `klippy.log`. Include these files when reporting problems.
 
-## Moving from other probes
-
-There's no specific guide yet. You need a `[probe_eddy_ng ...]` section with your sensor's `sensor_type` and I2C settings (`i2c_mcu`, `i2c_bus`, and `i2c_address` if it isn't the default 42), and possibly some of the [sensor tuning](#sensor-tuning) options.

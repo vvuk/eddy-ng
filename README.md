@@ -37,7 +37,7 @@ cd ~/eddy-ng
 
 ## Documentation
 
-The full documentation is in [`docs/`](docs/index.md): [installation](docs/installation.md), [safety](docs/safety.md), [calibration](docs/calibration.md), [tap](docs/tap.md), [profiles](docs/profiles.md), [commands](docs/commands.md), the [configuration reference](docs/configuration.md) and more.
+The full documentation is in [`docs/`](docs/index.md): [installation](docs/installation.md), [safety](docs/safety.md), [calibration](docs/calibration.md), [tap](docs/tap.md), [printing](docs/printing.md), [profiles](docs/profiles.md), [commands](docs/commands.md), the [configuration reference](docs/configuration.md) and more.
 
 ## Updating
 

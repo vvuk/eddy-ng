@@ -2,6 +2,8 @@
 
 These options go in the `[probe_eddy_ng <name>]` section. Defaults are shown; options without a default are required.
 
+> ⚠️ eddy-ng saves some of these options with `SAVE_CONFIG`: the drive currents, `tap_adjust_z` and `tap_adjust_z_<material>`. On Klipper, `SAVE_CONFIG` fails if one of them is also set in an `[include]`d file. See [Saving and include files](profiles.md#saving-and-include-files).
+
 ## Sensor
 
 - `sensor_type`: `btt_eddy`, `cartographer`, `mellow_fly`, `ldc1612` (a generic LDC1612 with a 12MHz external clock) or `ldc1612_internal_clk` (a generic LDC1612 using its internal oscillator). Sets the clock settings, the default drive current and the drive currents `SETUP` tries.
@@ -15,7 +17,7 @@ These options go in the `[probe_eddy_ng <name>]` section. Defaults are shown; op
 ## General
 
 - `x_offset`, `y_offset`: the sensor's position relative to the nozzle. They can't both be 0 (the sensor can't be at the nozzle).
-- `reg_drive_current`: the drive current for homing and probing. Defaults to the sensor type's default (15; 26 for Cartographer). `SETUP` saves the value it picks.
+- `reg_drive_current`: the drive current for homing and probing, for the `default` plate. Defaults to the sensor type's default (15; 26 for Cartographer). `SETUP` and `CALIBRATE USE_FOR=homing` save it, for whichever [plate](profiles.md#plate-profiles) is active.
 - `probe_speed: 5.0`: speed for homing and probing moves.
 - `lift_speed: 10.0`: speed for raising the toolhead.
 - `move_speed: 50.0`: speed for XY moves during calibration and tap.
@@ -31,7 +33,7 @@ These options go in the `[probe_eddy_ng <name>]` section. Defaults are shown; op
 
 These can also be set per [tap profile](profiles.md#tap-profiles), except `tap_trigger_safe_start_height`.
 
-- `tap_drive_current`: the drive current for tap. Defaults to `reg_drive_current`. It needs its own calibration; `SETUP` saves the value it picks.
+- `tap_drive_current`: the drive current for tap, for the `default` plate. Defaults to `reg_drive_current`. It needs its own calibration. `SETUP` and `CALIBRATE USE_FOR=tap` save it, for whichever plate is active. In a tap profile, it overrides the plate's value while the profile is loaded.
 - `tap_start_z: 3.0`: the height each tap starts from. The tap drive current must be able to read from here down to `tap_target_z`.
 - `tap_target_z: -0.250`: the lowest Z a tap moves to. If no tap is detected by then, the tap fails. Do not set this very low, as it will cause your toolhead to try to push through your build plate in the case of a failed tap. A value like -0.250 is no worse than moving the nozzle down one or two notches too far when doing manual Z adjustment.
 - `tap_threshold: 250`: how far (in Hz) the filtered signal must drop from its last peak to detect a tap. Lower is more sensitive but can trigger before contact. See [Tuning](tap.md#tuning).
@@ -61,7 +63,7 @@ These can also be set per [tap profile](profiles.md#tap-profiles), except `tap_t
 
 ## Multiple sensors
 
-- `primary: True`: whether this sensor's commands also work without `SENSOR=`. Defaults to `False` for nozzle alignment sensors. See [Multiple sensors](advanced.md#multiple-sensors).
+- `primary: True`: whether this sensor's commands also work without `SENSOR=` (and the `LDC_NG_*` commands without `CHIP=`). Only one section can be primary. Defaults to `False` for [nozzle alignment](nozzle-alignment.md) sensors, which is the only supported second sensor; there can only be one Z probe.
 - `bigfoot: False`, `bigfoot_scan_position`: make this an upward-facing nozzle alignment sensor. See [Nozzle alignment](nozzle-alignment.md).
 
 ## Profile sections

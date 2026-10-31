@@ -23,14 +23,28 @@ These instructions assume a standard setup like the one KIAUH creates: Klipper i
    - **Klipper:** links the Python code into `klippy/extras/probe_eddy_ng/` and the firmware code into `src/`, adds the firmware code to `src/Makefile`, and patches `klippy/extras/bed_mesh.py` so that `BED_MESH_CALIBRATE METHOD=rapid_scan` works with eddy-ng.
    - **Kalico:** links the Python code as a plugin and the firmware code as a firmware extra. No Kalico files are changed.
 
-3. Build and flash the firmware for the MCU your sensor is connected to, then configure the probe:
+3. Build and flash the firmware for the MCU your sensor is connected to, as described on your probe's page (step 4). In `make menuconfig`:
+   - **Klipper:** eddy-ng is built along with Klipper's own LDC1612 support, so make sure "Support ldc1612 eddy current sensor" is enabled under "Optional features" (it is by default).
+   - **Kalico:** enable "Include eddy-ng ldc1612 support" under "Firmware Extras".
+4. Set up your probe's firmware and configuration:
    - [BTT Eddy](btt-eddy.md)
    - [Cartographer](cartographer.md)
    - [Mellow Fly](mellow-fly.md)
+   - [Other LDC1612 probes](other-probes.md)
 
-   In `make menuconfig`:
-   - **Klipper:** eddy-ng is built along with Klipper's own LDC1612 support, so make sure "Support ldc1612 eddy current sensor" is enabled under "Optional features" (it is by default).
-   - **Kalico:** enable "Include eddy-ng ldc1612 support" under "Firmware Extras".
+## Klipper and Kalico differences
+
+eddy-ng works on both, with these differences:
+
+| | Klipper | Kalico |
+|---|---|---|
+| Installing | `install.sh` modifies `src/Makefile` and `klippy/extras/bed_mesh.py` | No changes to Kalico |
+| Updating Klipper/Kalico | Uninstall eddy-ng first (see [below](#update-klipper-or-kalico)) | Just update |
+| `BED_MESH_CALIBRATE METHOD=rapid_scan` | Yes | October 2026 or newer |
+| `METHOD=tap` on probe commands ([Probing with tap](tap.md#probing-with-tap)) | Yes | No |
+| Leveling that starts high and moves down ([Safety](safety.md#quad-gantry-leveling)) | Needs a macro | Built in (`adaptive_horizontal_move_z`) |
+| `SAVE_CONFIG` of a value also set in an included file ([details](profiles.md#saving-and-include-files)) | Fails | Works if the values match, or always with `autosave_includes` |
+| Cartographer clock (`static_pwm_clock`) | October 2025 or newer | January 2026 or newer |
 
 ## Install plotly and scipy (recommended)
 

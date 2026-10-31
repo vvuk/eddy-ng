@@ -31,7 +31,9 @@ Setup picks the drive current with the widest usable range for homing (needs 0.5
 Use `PROBE_EDDY_NG_CALIBRATE` if setup fails, or to calibrate a specific drive current.
 
 1. Home X and Y and warm the bed as above.
-2. Move the nozzle to a convenient spot and run `PROBE_EDDY_NG_CALIBRATE DRIVE_CURRENT=<n>`. Without `DRIVE_CURRENT`, it calibrates the current homing drive current.
+2. Move the nozzle to a convenient spot and run `PROBE_EDDY_NG_CALIBRATE`:
+   - `DRIVE_CURRENT=<n>`: the drive current to calibrate. Default: the current homing drive current.
+   - `USE_FOR=homing`, `USE_FOR=tap` or `USE_FOR=homing,tap`: make the active plate use this drive current for homing, tap, or both. Without it, the plate keeps the drive currents it had, and the new calibration is only used if one of them is this drive current.
 3. Do the paper test, then `ACCEPT`.
 
 The result looks like:
@@ -46,7 +48,13 @@ DC 15: valid range 0.025 to 14.950, spread 2.12% (freq 3011234.0 to 3075681.0), 
 
 Calibration writes `/tmp/eddy-calibration.csv` and, with plotly installed, an interactive graph in `/tmp/eddy-calibration.html`.
 
-If you calibrate a drive current other than the homing one, set it as `tap_drive_current` (or `reg_drive_current` for homing) in your config.
+For example, to calibrate drive current 16 and use it for tap:
+
+```
+PROBE_EDDY_NG_CALIBRATE DRIVE_CURRENT=16 USE_FOR=tap
+```
+
+The drive currents are saved with the plate's calibration. For the `default` plate, you can also set `reg_drive_current` and `tap_drive_current` in `[probe_eddy_ng ...]` instead.
 
 ## Test before saving
 
@@ -68,6 +76,8 @@ Calibration is staged but not saved yet. First check it:
 3. Move to Z=2 and run `PEPS` again. It should read close to 2.0, within ±0.025mm or so. Try a few heights in the 1–3mm range. If it's far off, recalibrate.
 4. Run `SAVE_CONFIG`.
 
+   > ⚠️ On Klipper, `SAVE_CONFIG` fails with "conflicts with included value" if `[probe_eddy_ng ...]` is in an `[include]`d file that sets `reg_drive_current` or `tap_drive_current`, and calibration picked a different value. Remove those options from the included file (calibration saves them), or move the section to `printer.cfg`. See [Saving and include files](profiles.md#saving-and-include-files).
+
 If homing fails with sensor errors, see [Troubleshooting](troubleshooting.md#sensor-errors-during-homing).
 
 `PROBE_EDDY_NG_CALIBRATION_STATUS` shows the active plate's calibrated drive currents and their ranges.
@@ -79,4 +89,4 @@ If homing fails with sensor errors, see [Troubleshooting](troubleshooting.md#sen
 3. Make sure you have `QUAD_GANTRY_LEVEL` or `Z_TILT_ADJUST` set up according to the instructions in [Safety](safety.md#quad-gantry-leveling) to avoid potential nozzle crashes, then check that it succeeds.
 4. `BED_MESH_CALIBRATE METHOD=rapid_scan` succeeds.
 
-Then set up [Tap](tap.md).
+Next: [Tap](tap.md).

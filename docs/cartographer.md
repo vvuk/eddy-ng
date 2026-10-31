@@ -6,6 +6,10 @@ eddy-ng supports the **Cartographer V3** (STM32F042), over USB or CAN. The Carto
 
 The firmware settings and pins below come from Timofey Titavets' [Cartographer reverse engineering thread](https://klipper.discourse.group/t/cartographer-v3-v4-reverse-engineering/25018) on the Klipper forum.
 
+## Cartographer V4
+
+The V4 uses an STM32G431 with different pins, and its LDC1612 clock is derived from the MCU's 170MHz clock (e.g. 21.25 or 28.33MHz). eddy-ng doesn't support it yet: its Cartographer firmware support is STM32F0-only, and it has no setting for a non-standard LDC1612 clock frequency. See the [forum thread](https://klipper.discourse.group/t/cartographer-v3-v4-reverse-engineering/25018) for the V4's build settings and pins.
+
 ## Firmware
 
 You'll replace the Cartographer firmware with Klipper firmware that includes eddy-ng. To go back, follow the [Cartographer firmware instructions](https://docs.cartographer3d.com/cartographer-probe/firmware).
@@ -102,8 +106,4 @@ max_temp: 125
 - The Cartographer uses a fixed drive current of 26, so `PROBE_EDDY_NG_SETUP` only tries that value.
 - The thermistor (PA4) is optional.
 
-Then set up [Safety](safety.md) and [Macros](macros.md), and go to [Calibration](calibration.md).
-
-## Cartographer V4
-
-The V4 uses an STM32G431 with different pins, and its LDC1612 clock is derived from the MCU's 170MHz clock (e.g. 21.25 or 28.33MHz). eddy-ng doesn't support it yet: its Cartographer firmware support is STM32F0-only, and it has no setting for a non-standard LDC1612 clock frequency. See the [forum thread](https://klipper.discourse.group/t/cartographer-v3-v4-reverse-engineering/25018) for the V4's build settings and pins.
+Next: [Safety](safety.md).

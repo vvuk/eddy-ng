@@ -29,7 +29,9 @@ bigfoot_scan_position: 188.0, 267.0, 2.0
 
 `bigfoot_scan_position` is the X and Y of the center of the sensor, and the Z to scan the nozzle at. It's optional; without it, every scan needs `X`, `Y` and `Z`.
 
-A nozzle alignment sensor isn't the Z probe, so its section doesn't need calibration, offsets or tap settings, and defaults to `primary: false`.
+A nozzle alignment sensor isn't the Z probe, so its section doesn't need calibration, offsets or tap settings.
+
+It defaults to `primary: false`, so commands without `SENSOR=` (and `LDC_NG_*` commands without `CHIP=`) still go to your Z probe. To use `PROBE_EDDY_NG_STATUS` or the `LDC_NG_*` commands on the nozzle alignment sensor, pass `SENSOR=bigfoot` (or `CHIP=bigfoot`), using your section's name.
 
 ## Commands
 

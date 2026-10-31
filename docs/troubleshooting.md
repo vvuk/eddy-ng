@@ -26,8 +26,8 @@ The saved calibration is from an eddy-ng version whose calibration format can't 
 
 - If setup fails entirely (no homing drive current), try moving the sensor and running setup again, or calibrate by hand with `PROBE_EDDY_NG_CALIBRATE`.
 - If setup finds a homing drive current but not a tap one, look for one with `PROBE_EDDY_NG_TEST_DRIVE_CURRENT` (see [Advanced](advanced.md#finding-drive-currents-by-hand)):
-  - Homing ideally needs valid readings across the whole 0–15mm range, but something like 1–10mm is fine. Set it as `reg_drive_current`.
-  - Tap needs valid readings from a few hundredths of a mm up to at least `tap_start_z` (3mm). Set it as `tap_drive_current` and calibrate it with `PROBE_EDDY_NG_CALIBRATE DRIVE_CURRENT=<n>`.
+  - Homing ideally needs valid readings across the whole 0–15mm range, but something like 1–10mm is fine. Calibrate it with `PROBE_EDDY_NG_CALIBRATE DRIVE_CURRENT=<n> USE_FOR=homing`.
+  - Tap needs valid readings from a few hundredths of a mm up to at least `tap_start_z` (3mm). Calibrate it with `PROBE_EDDY_NG_CALIBRATE DRIVE_CURRENT=<n> USE_FOR=tap`.
   - If the range starts too high, try a drive current one higher; if it ends too low, one lower.
 - If no drive current works, move the sensor. If the lowest readable height is too high, move the sensor 1mm higher.
 
@@ -52,7 +52,7 @@ If the sensor occasionally reports a single error in the middle of good readings
 
 ### Sensor errors during tap
 
-These have the same causes as errors during homing. If they only happen during tap, use a different drive current for tap only (`tap_drive_current`), as above.
+These have the same causes as errors during homing. If they only happen during tap, use a different drive current for tap only (`USE_FOR=tap`), as above.
 
 ### "Probe completed movement before triggering"
 
@@ -93,7 +93,7 @@ The tap profile sets a drive current the plate has no calibration for. Load a di
 
 ### SAVE_CONFIG fails with "conflicts with included value"
 
-Klipper's `SAVE_CONFIG` can't save a value that's also set in an `[include]`d file. Move that option (e.g. `tap_adjust_z_pla`) to `printer.cfg`, or remove it from the included file. On Kalico, `[danger_options] autosave_includes: True` avoids this. See [Profiles](profiles.md#saving-and-include-files).
+Klipper's `SAVE_CONFIG` can't save a value that's also set in an `[include]`d file, and saves nothing until that's fixed. The error names the section and option. Remove that option from the included file, or move the section to `printer.cfg`. On Kalico, `[danger_options] autosave_includes: True` avoids this. See [Saving and include files](profiles.md#saving-and-include-files) for which commands save which values.
 
 ## Other
 

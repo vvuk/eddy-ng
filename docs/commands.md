@@ -1,6 +1,6 @@
 # Commands
 
-Every `PROBE_EDDY_NG_<name>` command is also available as `EDDYNG_<name>`. All of them take `SENSOR=<name>` to choose a `[probe_eddy_ng <name>]` section; without it, they use the primary sensor (see [Multiple sensors](advanced.md#multiple-sensors)).
+Every `PROBE_EDDY_NG_<name>` command is also available as `EDDYNG_<name>`. All of them take `SENSOR=<name>` to choose a `[probe_eddy_ng <name>]` section; without it, they use the primary sensor (see `primary` in the [configuration reference](configuration.md#multiple-sensors)). You only need `SENSOR=` with a [nozzle alignment](nozzle-alignment.md) sensor.
 
 ## Setup and calibration
 
@@ -11,6 +11,7 @@ Every `PROBE_EDDY_NG_<name>` command is also available as `EDDYNG_<name>`. All o
 
 **`PROBE_EDDY_NG_CALIBRATE`**: calibrate one drive current, starting with a paper test. Calibrates the active plate.
 - `DRIVE_CURRENT=`: default is the current homing drive current.
+- `USE_FOR=`: `homing`, `tap` or `homing,tap`: make the active plate use this drive current for homing, tap or both. Default: neither; the plate's drive currents don't change.
 - `START_Z=`: height to calibrate down from. Default `calibration_z_max`.
 - `TARGET_Z=`: height to calibrate down to. Default 0.
 - `SPEED=`, `LIFT_SPEED=`: move speeds.
@@ -75,7 +76,7 @@ Klipper's own probe commands (`PROBE`, `QUAD_GANTRY_LEVEL` and so on) take `METH
 See [Profiles](profiles.md).
 
 **`PROBE_EDDY_NG_PLATE_PROFILE`**: with no parameters, list the plates.
-- `LOAD=<plate>`: switch to a plate. Un-homes Z.
+- `LOAD=<plate>`: switch to a plate. Clears the offsets from the last tap, even if the plate is already active, and un-homes Z if it's a different plate.
 - `CREATE=<plate>`: create an uncalibrated plate and switch to it. Add `COPY=1` to copy the active plate's calibration.
 - `REMOVE=<plate>`: remove a plate. It can't be the active plate or `default_plate`.
 

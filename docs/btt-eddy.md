@@ -20,6 +20,12 @@ If the BTT Eddy was set up with Klipper's own `probe_eddy_current` before:
 - Delete the `probe_eddy_current` and `temperature_probe` sections from the saved settings at the bottom of `printer.cfg`.
 - If your `[bed_mesh]` section was in `eddy.cfg`, move it to `printer.cfg`.
 
+## Going back to BTT's Eddy support
+
+1. Run `./install.sh --uninstall` in `~/eddy-ng`.
+2. Restore your previous Eddy config.
+3. Rebuild and reflash Klipper.
+
 ## Firmware
 
 1. [Install eddy-ng](installation.md).
@@ -64,10 +70,6 @@ x_offset: ...
 y_offset: ...
 ```
 
-This is the minimum. Also set up [Safety](safety.md) and [Macros](macros.md), then go to [Calibration](calibration.md).
+This is the minimum. You may also need `[bed_mesh]` and other printer-specific sections.
 
-## Going back to BTT's Eddy support
-
-1. Run `./install.sh --uninstall` in `~/eddy-ng`.
-2. Restore your previous Eddy config.
-3. Rebuild and reflash Klipper.
+Next: [Safety](safety.md).

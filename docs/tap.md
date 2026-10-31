@@ -2,7 +2,7 @@
 
 Tap moves the nozzle down onto the bed and detects the moment it stops getting closer: the sensor reading flattens out while the steppers keep moving. That's where the nozzle touched the bed.
 
-Anything else that stops the nozzle also counts, especially filament on the nozzle tip, which gives a Z that's too high. Clean the nozzle before tapping (see [Macros](macros.md#start-print)).
+Anything else that stops the nozzle also counts, especially filament on the nozzle tip, which gives a Z that's too high. Clean the nozzle before tapping (see [Printing](printing.md#start-print)).
 
 ## First tap
 
@@ -39,6 +39,8 @@ You can set it in three ways:
 - `tap_adjust_z: 0.025` in your config.
 - `PROBE_EDDY_NG_SET_TAP_ADJUST_Z VALUE=0.025` (or `ADJUST=0.005` to add to it), then `SAVE_CONFIG`.
 - After a tap, babystep until the first layer looks right, then click the "save Z offset" button in Mainsail/Fluidd (which runs `Z_OFFSET_APPLY_PROBE`) and `SAVE_CONFIG`. eddy-ng replaces `Z_OFFSET_APPLY_PROBE` so that it updates `tap_adjust_z`.
+
+> ⚠️ The last two save `tap_adjust_z` with `SAVE_CONFIG`. On Klipper, that fails if `tap_adjust_z` is also set in an `[include]`d file; see [Saving and include files](profiles.md#saving-and-include-files).
 
 Different filaments often need different values. [Tap profiles](profiles.md#tap-profiles) store a `tap_adjust_z` per material, and the commands above update the value for the loaded material.
 
@@ -77,3 +79,5 @@ PROBE METHOD=tap
 ```
 
 This taps at the current position with the same parameters as `PROBE_EDDY_NG_TAP` (`SAMPLES`, `THRESHOLD` or `TAP_THRESHOLD`, `TARGET_Z`, `ADJUST_Z`, ...), and reports the Z where the nozzle touched the bed plus `tap_adjust_z`. Unlike `PROBE_EDDY_NG_TAP`, it doesn't re-home Z or change the G-code offset. Use it to measure Z offsets yourself (for example per tool), or with other probe commands, like `QUAD_GANTRY_LEVEL METHOD=tap`. The result is in `printer.probe.last_probe_position.z`.
+
+Next: [Printing](printing.md).
