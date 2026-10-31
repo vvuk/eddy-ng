@@ -42,6 +42,7 @@ from .profiles import (
 )
 from .endstop import ProbeEddyEndstopWrapper, ProbeEddyHomingSession
 from .scan import ProbeEddyScanningProbe
+from .autosetup import ProbeEddyZeroFinder
 from . import plots
 from .base import EddyNgSensor
 
@@ -235,6 +236,7 @@ class ProbeEddy(EddyNgSensor):
             [
                 ["PROBE_STATIC", "PEPS"],
                 "SETUP",
+                "AUTO_SETUP",
                 "CALIBRATE",
                 "CALIBRATION_STATUS",
                 "CLEAR_CALIBRATION",
@@ -931,6 +933,16 @@ class ProbeEddy(EddyNgSensor):
             th_pos[2] = 0.0
             self._set_toolhead_position(th_pos)
 
+        self._run_setup(gcmd, debug)
+        self._z_not_homed()
+
+    # Find and calibrate the homing and tap drive currents, with Z=0 being
+    # where the nozzle touches the bed (or the paper test height) at the
+    # current XY position. Returns whether a homing drive current was found.
+    def _run_setup(self, gcmd: GCodeCommand, debug: bool) -> bool:
+        th = self._printer.lookup_object("toolhead")
+        th_pos = th.get_position()
+
         orig_drive_current = self.current_drive_current()
         start_dc = self._sensor.drive_current_range[1]
         end_dc = self._sensor.drive_current_range[0]
@@ -1023,8 +1035,7 @@ class ProbeEddy(EddyNgSensor):
                 "Unable to find valid homing drive current. Verify sensor height and consult documentation for troubleshooting."
             )
             self._sensor.set_drive_current(orig_drive_current)
-            self._z_not_homed()
-            return
+            return False
 
         self._dc_to_fmap[best_homing.drive_current] = best_homing
         self._plate.reg_drive_current = best_homing.drive_current
@@ -1044,7 +1055,40 @@ class ProbeEddy(EddyNgSensor):
         self.reset_drive_current()
         self.save_config()
         self._warn_tap_profile_uncalibrated()
-        self._z_not_homed()
+        return True
+
+    cmd_AUTO_SETUP_help = (
+        "Setup without a paper test: find Z=0 by touching the bed with the nozzle, "
+        + "then find and calibrate drive currents like SETUP"
+    )
+
+    def cmd_AUTO_SETUP(self, gcmd: GCodeCommand):
+        if not self._xy_homed():
+            raise self._printer.command_error("X and Y must be homed before setup")
+
+        debug = gcmd.get_int("DEBUG", 1 if self.params.debug else 0) == 1
+        orig_drive_current = self.current_drive_current()
+        drive_current: int = gcmd.get_int("DRIVE_CURRENT", orig_drive_current, minval=1, maxval=31)
+        finder = ProbeEddyZeroFinder(self, gcmd, drive_current)
+
+        # Whatever the last tap set up is about to be replaced
+        self._tap_offset = 0.0
+        self._clear_tap_gcode_adjustment()
+
+        try:
+            self._sensor.set_drive_current(drive_current)
+            finder.find_zero()
+        except Exception:
+            self._z_not_homed()
+            raise
+        finally:
+            self._sensor.set_drive_current(orig_drive_current)
+
+        # Z is homed now, with Z=0 where the nozzle touches the bed (plus
+        # tap_adjust_z), which is what the paper test would give SETUP
+        self._log_msg("Auto setup: found Z=0, calibrating...")
+        if not self._run_setup(gcmd, debug):
+            self._z_not_homed()
 
     cmd_CALIBRATE_help = (
         "Calibrate the eddy current sensor. Specify DRIVE_CURRENT to calibrate for a different drive current "
@@ -1602,17 +1646,32 @@ class ProbeEddy(EddyNgSensor):
     # Tap SAMPLES times (up to MAX_SAMPLES) at the current XY position, and
     # return the combined tap Z, its stddev and the overshoot. Raises if no
     # good tap Z could be computed. Leaves the toolhead above the bed.
-    def run_taps(self, gcmd: GCodeCommand, orig_drive_current: int) -> Tuple[float, float, float]:
+    #
+    # AUTO_SETUP taps before there's a calibration, with these overrides:
+    # drive_current and target_z replace the defaults; z_base is added to
+    # START_Z and TARGET_Z (and is part of the returned tap Z); gate_freqs
+    # are the frequencies the tap must pass through before a tap is looked
+    # for, instead of the frequencies at home_trigger_height and
+    # tap_trigger_safe_start_height from the calibration.
+    def run_taps(
+        self,
+        gcmd: GCodeCommand,
+        orig_drive_current: int,
+        drive_current: Optional[int] = None,
+        target_z: Optional[float] = None,
+        z_base: float = 0.0,
+        gate_freqs: Optional[Tuple[float, float]] = None,
+    ) -> Tuple[float, float, float]:
         tap_drive_current: int = gcmd.get_int(
             name="DRIVE_CURRENT",
-            default=self._tap_drive_current,
+            default=drive_current or self._tap_drive_current,
             minval=1,
             maxval=31,
         )
         tap_speed: float = gcmd.get_float("SPEED", self.params.tap_speed, above=0.0)
         lift_speed: float = gcmd.get_float("RETRACT_SPEED", self.params.lift_speed, above=0.0)
         tap_start_z: float = gcmd.get_float("START_Z", self.params.tap_start_z, above=2.0)
-        target_z: float = gcmd.get_float("TARGET_Z", self.params.tap_target_z)
+        target_z: float = gcmd.get_float("TARGET_Z", self.params.tap_target_z if target_z is None else target_z)
         tap_threshold: float = gcmd.get_float("THRESHOLD", None)  # None so we have a sentinel value
         tap_threshold: float = gcmd.get_float("TT", tap_threshold)  # alias for THRESHOLD
         tap_threshold: float = gcmd.get_float("TAP_THRESHOLD", tap_threshold)  # Klipper's name for it
@@ -1635,6 +1694,8 @@ class ProbeEddy(EddyNgSensor):
             write_every_tap_plot = write_plot_arg > 1
 
         tapcfg = TapConfig(threshold=tap_threshold, sos=self._tap_sos)
+        if gate_freqs is not None:
+            tapcfg.safe_freq, tapcfg.trigger_freq = gate_freqs
 
         results = []
         tap_z = None
@@ -1654,8 +1715,8 @@ class ProbeEddy(EddyNgSensor):
                     self.save_samples_path = f"/tmp/tap-samples-{sample_i + 1}.csv"
 
                 tap = self.do_one_tap(
-                    start_z=tap_start_z,
-                    target_z=target_z,
+                    start_z=tap_start_z + z_base,
+                    target_z=target_z + z_base,
                     tap_speed=tap_speed,
                     lift_speed=lift_speed,
                     tapcfg=tapcfg,
@@ -1701,7 +1762,7 @@ class ProbeEddy(EddyNgSensor):
         # If we didn't compute a tap_z report the error
         if tap_z is None:
             # raise toolhead on failed tap
-            th.manual_move([None, None, tap_start_z], lift_speed)
+            th.manual_move([None, None, tap_start_z + z_base], lift_speed)
             err_msg = "Tap failed:"
             if tap_stddev is not None:
                 err_msg += f" stddev {tap_stddev:.3f} > {samples_stddev:.3f}."

@@ -66,7 +66,8 @@ class ProbeEddyEndstopWrapper:
     def _handle_homing_move_begin(self, hmove):
         if self not in hmove.get_mcu_endstops():
             return
-        self._sampler = self.eddy.start_sampler()
+        # AUTO_SETUP taps before there's a calibration
+        self._sampler = self.eddy.start_sampler(calculate_heights=self.eddy.calibrated())
         # if we're doing a tap, we're already in the right position;
         # otherwise move there
         if self.tap_config is None:
@@ -119,11 +120,15 @@ class ProbeEddyEndstopWrapper:
             # the home_trigger_height maybe by default given where tap might
             # start
             safe_time = 0
-            # initial freq to pass through
-            safe_freq = self.eddy.height_to_freq(self._home_trigger_height)
-            # second freq to pass through; toolhead acceleration
-            # must be smooth after this point
-            trigger_freq = self.eddy.height_to_freq(self.eddy.params.tap_trigger_safe_start_height)
+            if self.tap_config.safe_freq is not None:
+                safe_freq = self.tap_config.safe_freq
+                trigger_freq = self.tap_config.trigger_freq
+            else:
+                # initial freq to pass through
+                safe_freq = self.eddy.height_to_freq(self._home_trigger_height)
+                # second freq to pass through; toolhead acceleration
+                # must be smooth after this point
+                trigger_freq = self.eddy.height_to_freq(self.eddy.params.tap_trigger_safe_start_height)
 
         trigger_completion = self._dispatch.start(print_time)
 

@@ -26,6 +26,27 @@ If the raw value is `0xffffffff` or similar, eddy-ng can't talk to the sensor. C
 
 Setup picks the drive current with the widest usable range for homing (needs 0.5mm to 5mm) and for tap (needs 0.025mm to 3mm); these may be the same. It saves both calibrations and un-homes Z. If it can't find a tap drive current, homing still works; see [Troubleshooting](troubleshooting.md#setup-cant-find-homing-or-tap-values).
 
+## Automatic setup without a paper test
+
+`PROBE_EDDY_NG_AUTO_SETUP` does the same as `SETUP`, but finds Z=0 itself, by touching the bed with the nozzle. It works without a calibration and with Z not homed.
+
+1. Clean the nozzle. Filament on the nozzle makes Z=0 too high, just like it does for [tap](tap.md).
+2. Home X and Y, and heat the bed, as for `SETUP`.
+3. Move the nozzle to the center of the bed, anywhere above it, and run `PROBE_EDDY_NG_AUTO_SETUP`.
+
+   ***⚠️ Watch your printer the first time and be ready to hit the e-stop or pull the power in case something goes wrong!***
+
+Auto setup:
+
+1. Raises the toolhead 5mm (`LIFT=`), then moves it down in steps, reading the sensor while the toolhead is still. The steps start small and grow to 2mm while the sensor doesn't see the bed yet, and are 0.2mm once it does.
+2. Stops when a step raises the sensor's frequency by much less than the steps before it. Until the nozzle touches the bed, each step down raises the frequency more than the last one. Once it touches, the toolhead can't get any closer. The nozzle presses into the bed by at most about one step.
+3. Taps a few times from just above that point, like `PROBE_EDDY_NG_TAP`, to find Z=0 accurately. Z=0 includes `tap_adjust_z`.
+4. Calibrates drive currents like `SETUP`.
+
+Z stays homed afterwards. Then test the calibration as described below, and `SAVE_CONFIG`.
+
+If auto setup reports that it found no contact, check that both the nozzle and the sensor are over the bed. If its tap doesn't agree with where it found contact, clean the nozzle and try again. On printers where the sensor keeps getting closer to the bed while the nozzle presses into it (a very flexible toolhead mount), contact can't be detected this way; use `SETUP`.
+
 ## Manual calibration
 
 Use `PROBE_EDDY_NG_CALIBRATE` if setup fails, or to calibrate a specific drive current.

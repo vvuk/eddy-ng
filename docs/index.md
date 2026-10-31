@@ -31,7 +31,7 @@ The tap makes contact with the bed. By default it never goes below Z=-0.250 (rel
 1. [Install eddy-ng](installation.md).
 2. Build and flash the firmware, and configure your probe: [BTT Eddy](btt-eddy.md), [Cartographer](cartographer.md), [Mellow Fly](mellow-fly.md) or [another LDC1612 probe](other-probes.md).
 3. Set up [safe homing, bed mesh, and QGL or Z tilt](safety.md).
-4. Check that eddy-ng can talk to the sensor, run `PROBE_EDDY_NG_SETUP`, test homing, and `SAVE_CONFIG` ([Calibration](calibration.md)).
+4. Check that eddy-ng can talk to the sensor, run `PROBE_EDDY_NG_SETUP` (or `PROBE_EDDY_NG_AUTO_SETUP` to skip the paper test), test homing, and `SAVE_CONFIG` ([Calibration](calibration.md)).
 5. Do a first [tap](tap.md), check Z=0 with paper, and adjust `tap_adjust_z`.
 6. Add tap and the bed mesh to your [print start and end macros](printing.md).
 7. Optionally, set up [profiles](profiles.md) for more build plates or per-material tap settings.

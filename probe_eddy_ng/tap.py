@@ -39,6 +39,10 @@ class TapResult:
 class TapConfig:
     threshold: float
     sos: List[List[float]]
+    # The frequencies to pass through before a tap is looked for, when
+    # they don't come from the calibration (see run_taps)
+    safe_freq: Optional[float] = None
+    trigger_freq: Optional[float] = None
 
 
 # Compute the average tap_z from a set of tap results, taking the cluster of
