@@ -51,6 +51,7 @@ from .compat import (
 from . import ldc1612_ng
 from .sampler import ProbeEddySampler, ProbeEddyProbeResult
 from .fmap import ProbeEddyFrequencyMap
+from .tap import TapResult, TapConfig, compute_tap_z, tap_filter_sos
 
 try:
     import plotly  # noqa
@@ -470,7 +471,7 @@ class ProbeEddy:
         # runtime configurable
         self._tap_adjust_z = self.params.tap_adjust_z
 
-        self._tap_sos = self._tap_filter_sos()
+        self._tap_sos = tap_filter_sos(self.params, self._sensor._data_rate, self._printer.config_error)
 
         # define our own commands
         self.define_commands(self._gcode)
@@ -1543,28 +1544,13 @@ class ProbeEddy:
         finally:
             self._sensor.set_drive_current(drive_current)
 
-    @dataclass
-    class TapResult:
-        error: Optional[Exception]
-        probe_z: float
-        toolhead_z: float
-        overshoot: float
-        tap_time: float
-        tap_start_time: float
-        tap_end_time: float
-
-    @dataclass
-    class TapConfig:
-        threshold: float
-        sos: List[List[float]]
-
     def do_one_tap(
         self,
         start_z: float,
         target_z: float,
         tap_speed: float,
         lift_speed: float,
-        tapcfg: ProbeEddy.TapConfig,
+        tapcfg: TapConfig,
     ) -> TapResult:
         self.probe_to_start_position(start_z)
 
@@ -1600,7 +1586,7 @@ class ProbeEddy:
                     # we detected a tap but it was too close to our target z
                     # to be trusted
                     # TODO: use velocity to determine this
-                    return ProbeEddy.TapResult(
+                    return TapResult(
                         error=Exception("Tap detected too close to target z"),
                         toolhead_z=finish_z,
                         probe_z=probe_z,
@@ -1622,7 +1608,7 @@ class ProbeEddy:
                 # If just sensor errors, let the caller handle it
                 self._log_error(f"Tap failed with Z at {finish_z:.3f}: {err}")
                 if any(m in str(err) for m in ("Sensor error", "Probe completed movement", "Probe triggered prior")):
-                    return ProbeEddy.TapResult(
+                    return TapResult(
                         error=err,
                         toolhead_z=finish_z,
                         probe_z=0.0,
@@ -1652,7 +1638,7 @@ class ProbeEddy:
         tap_end_time = self._endstop_wrapper.last_trigger_time
         tap_time = self.tap_time(tap_start_time, tap_end_time)
 
-        return ProbeEddy.TapResult(
+        return TapResult(
             error=None,
             probe_z=probe_z,
             toolhead_z=finish_z,
@@ -1661,34 +1647,6 @@ class ProbeEddy:
             tap_start_time=tap_start_time,
             tap_end_time=tap_end_time,
         )
-
-    # The tap filter's second-order sections. The default filter at the common
-    # data rates is precomputed so scipy isn't needed.
-    def _tap_filter_sos(self) -> List[List[float]]:
-        # fmt: off
-        if self.params.is_default_butter_config() and self._sensor._data_rate == 250:
-            return [
-                [ 0.046131802093312926, 0.09226360418662585, 0.046131802093312926, 1.0, -1.3297767184682712, 0.5693902189294331, ],
-                [ 1.0, -2.0, 1.0, 1.0, -1.845000600983779, 0.8637525213328747, ],
-            ]
-        if self.params.is_default_butter_config() and self._sensor._data_rate == 500:
-            return [
-                [ 0.013359200027856505, 0.02671840005571301, 0.013359200027856505, 1.0, -1.686278256753083, 0.753714473246724, ],
-                [ 1.0, -2.0, 1.0, 1.0, -1.9250515947328444, 0.9299234737648037, ],
-            ]
-        # fmt: on
-        if not scipy:
-            raise self._printer.config_error(
-                "ProbeEddy: a custom tap filter (tap_butter_* settings) or a samples_per_second other than 250 or 500 "
-                "requires scipy, which is not available; please install scipy or use the defaults"
-            )
-        return scipy.signal.butter(
-            self.params.tap_butter_order,
-            [self.params.tap_butter_lowcut, self.params.tap_butter_highcut],
-            btype="bandpass",
-            fs=self._sensor._data_rate,
-            output="sos",
-        ).tolist()
 
     # Where the tap is placed between the start of tap detection and the
     # time the threshold was crossed
@@ -1760,7 +1718,7 @@ class ProbeEddy:
             write_tap_plot = write_plot_arg > 0
             write_every_tap_plot = write_plot_arg > 1
 
-        tapcfg = ProbeEddy.TapConfig(threshold=tap_threshold, sos=self._tap_sos)
+        tapcfg = TapConfig(threshold=tap_threshold, sos=self._tap_sos)
 
         results = []
         tap_z = None
@@ -1810,7 +1768,7 @@ class ProbeEddy:
                 )
 
                 if len(results) >= samples:
-                    tap_z, tap_stddev, tap_overshoot = self._compute_tap_z(results, samples, samples_stddev, use_median)
+                    tap_z, tap_stddev, tap_overshoot = compute_tap_z(results, samples, samples_stddev, use_median)
                     if tap_z is not None:
                         break
         finally:
@@ -1899,33 +1857,10 @@ class ProbeEddy:
 
         self._log_debug("EDDYng Tap end\n")
 
-    # Compute the average tap_z from a set of tap results, taking the cluster of
-    # `samples` taps with the lowest standard deviation
-    @staticmethod
-    def _compute_tap_z(taps: List[ProbeEddy.TapResult], samples: int, req_stddev: float, use_median: bool) -> Tuple[float, float, float]:
-        if len(taps) < samples:
-            return None, None, None
-
-        # The lowest-stddev subset of a given size is always a run of
-        # consecutive values once they're sorted, so only those need checking.
-        taps = sorted(taps, key=lambda t: t.probe_z)
-        tap_zs = np.array([t.probe_z for t in taps])
-        start = min(range(len(taps) - samples + 1), key=lambda i: np.std(tap_zs[i : i + samples]))
-        cluster = taps[start : start + samples]
-        std_min = float(np.std(tap_zs[start : start + samples]))
-
-        if std_min > req_stddev:
-            return None, std_min, None
-        if use_median:
-            # the cluster is sorted; use the overshoot of the same tap
-            mid = cluster[samples // 2]
-            return float(mid.probe_z), std_min, float(mid.overshoot)
-        return float(np.mean([t.probe_z for t in cluster])), std_min, float(np.mean([t.overshoot for t in cluster]))
-
     # Write a tap plot. This also has logic to compute the averages
     # and the filter mostly-exactly how it's done on the probe MCU itself
     # (vs using numpy or similar) to make these graphs more reprensetative
-    def _write_tap_plot(self, tap: ProbeEddy.TapResult, tapnum: int = -1):
+    def _write_tap_plot(self, tap: TapResult, tapnum: int = -1):
         if not plotly:
             return
 
@@ -2218,7 +2153,7 @@ class ProbeEddyEndstopWrapper:
         self._reactor = eddy._reactor
 
         # filled in by the outside for a tap
-        self.tap_config: Optional[ProbeEddy.TapConfig] = None
+        self.tap_config: Optional[TapConfig] = None
 
         self._dispatch = mcu.TriggerDispatch(self._mcu)
 
