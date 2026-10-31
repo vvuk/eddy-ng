@@ -1725,7 +1725,7 @@ class ProbeEddy:
 
         tap_start_time = self._endstop_wrapper.last_tap_start_time
         tap_end_time = self._endstop_wrapper.last_trigger_time
-        tap_time = tap_start_time + (tap_end_time - tap_start_time) * self.params.tap_time_position
+        tap_time = self.tap_time(tap_start_time, tap_end_time)
 
         return ProbeEddy.TapResult(
             error=None,
@@ -1764,6 +1764,11 @@ class ProbeEddy:
             fs=self._sensor._data_rate,
             output="sos",
         ).tolist()
+
+    # Where the tap is placed between the start of tap detection and the
+    # time the threshold was crossed
+    def tap_time(self, tap_start_time: float, trigger_time: float) -> float:
+        return tap_start_time + (trigger_time - tap_start_time) * self.params.tap_time_position
 
     def _compute_butter_tap(self, sampler):
         if not scipy:
@@ -2032,7 +2037,7 @@ class ProbeEddy:
         s_t = s_t - time_start
         tap_start_time = self._last_sampler.memos.get("tap_start_time", time_start) - time_start
         tap_end_time = self._last_sampler.memos.get("trigger_time", time_start) - time_start
-        trigger_time = tap_start_time + (tap_end_time - tap_start_time) * self.params.tap_time_position
+        trigger_time = self.tap_time(tap_start_time, tap_end_time)
         tap_threshold = self._last_sampler.memos.get("tap_threshold", 0)
 
         time_len = s_t.max()
@@ -2448,7 +2453,7 @@ class ProbeEddyEndstopWrapper:
             self.last_trigger_time = trigger_time
             self.last_tap_start_time = tap_start_time
             if is_tap:
-                return tap_start_time + (trigger_time - tap_start_time) * self.eddy.params.tap_time_position
+                return self.eddy.tap_time(tap_start_time, trigger_time)
             return trigger_time
 
         # various errors
