@@ -451,13 +451,20 @@ class LDC1612_ng:
             cq=cmdqueue,
         )
 
-        self._mcu.register_response(self._handle_data, "ldc1612_ng_data", self._oid)
+        self._register_response(self._handle_data, "ldc1612_ng_data oid=%c seq=%c ov=%c fmt=%c data=%*s", self._oid)
+        # only sent by firmware built with CONFIG_WANT_EDDY_NG_DEBUG
+        self._register_response(self._handle_debug_print, "debug_print m=%*s", optional=True)
 
-        # Newer Klipper (with register_serial_response) no longer allows
-        # registering responses the firmware may never send, so debug_print
-        # output is only available on older Klipper and Kalico.
-        if not hasattr(self._mcu, "register_serial_response"):
-            self._mcu.register_response(self._handle_debug_print, "debug_print")
+    # Klipper replaced mcu.register_response(cb, name, oid) with
+    # register_serial_response(cb, msgformat, oid), which validates the
+    # format against the firmware; Kalico still has the former.
+    def _register_response(self, cb, msgformat, oid=None, optional=False):
+        if hasattr(self._mcu, "register_serial_response"):
+            if optional and not self._mcu.check_valid_response(msgformat):
+                return
+            self._mcu.register_serial_response(cb, msgformat, oid)
+        else:
+            self._mcu.register_response(cb, msgformat.split()[0], oid)
 
     def _handle_debug_print(self, params):
         logging.info(params["m"])
