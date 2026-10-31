@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Dict, List, Optional, final
+from typing import Any, Dict, List, Optional, Tuple, final
 
 import numpy as np
 
@@ -27,7 +27,7 @@ from .compat import (
 )
 from .sampler import ProbeEddyProbeResult
 from .fmap import ProbeEddyFrequencyMap
-from .tap import TapResult, TapConfig, compute_tap_z, tap_filter_sos
+from .tap import TapResult, TapConfig, compute_tap_z, tap_filter_sos, is_tap_request, ProbeEddyTapSession
 from .endstop import ProbeEddyEndstopWrapper, ProbeEddyHomingSession
 from .scan import ProbeEddyScanningProbe
 from . import plots
@@ -858,6 +858,11 @@ class ProbeEddy(EddyNgSensor):
     #
 
     def get_offsets(self, *args, **kwargs):
+        # A tap probes with the nozzle itself, so there's no offset (Klipper
+        # passes the probe command's gcmd here)
+        gcmd = args[0] if args else kwargs.get("gcmd")
+        if is_tap_request(gcmd):
+            return (0.0, 0.0, 0.0)
         # the z offset is the trigger height, because the probe will trigger
         # at z=trigger_height (not at z=0)
         return (
@@ -879,6 +884,8 @@ class ProbeEddy(EddyNgSensor):
         # homing_override's set_position_z marks Z homed before G28 Z runs.
         if gcmd.get("HOME_ATTEMPT_NUM", None) is not None:
             return ProbeEddyHomingSession(self, gcmd)
+        if is_tap_request(gcmd):
+            return ProbeEddyTapSession(self)
         session = ProbeEddyScanningProbe(self, gcmd)
         session._start_session()
         return session
@@ -1172,9 +1179,10 @@ class ProbeEddy(EddyNgSensor):
     def tap_time(self, tap_start_time: float, trigger_time: float) -> float:
         return tap_start_time + (trigger_time - tap_start_time) * self.params.tap_time_position
 
-    def cmd_TAP_next(self, gcmd: GCodeCommand, orig_drive_current: int):
-        self._log_debug("\nEDDYng Tap begin")
-
+    # Tap SAMPLES times (up to MAX_SAMPLES) at the current XY position, and
+    # return the combined tap Z, its stddev and the overshoot. Raises if no
+    # good tap Z could be computed. Leaves the toolhead above the bed.
+    def run_taps(self, gcmd: GCodeCommand, orig_drive_current: int) -> Tuple[float, float, float]:
         tap_drive_current: int = gcmd.get_int(
             name="DRIVE_CURRENT",
             default=self._tap_drive_current,
@@ -1187,13 +1195,11 @@ class ProbeEddy(EddyNgSensor):
         target_z: float = gcmd.get_float("TARGET_Z", self.params.tap_target_z)
         tap_threshold: float = gcmd.get_float("THRESHOLD", None)  # None so we have a sentinel value
         tap_threshold: float = gcmd.get_float("TT", tap_threshold)  # alias for THRESHOLD
-        tap_adjust_z: float = gcmd.get_float("ADJUST_Z", self._tap_adjust_z)
-        do_retract: bool = gcmd.get_int("RETRACT", 1) == 1
+        tap_threshold: float = gcmd.get_float("TAP_THRESHOLD", tap_threshold)  # Klipper's name for it
         samples: int = gcmd.get_int("SAMPLES", self.params.tap_samples, minval=1)
         max_samples: int = gcmd.get_int("MAX_SAMPLES", self.params.tap_max_samples, minval=samples)
         samples_stddev: float = gcmd.get_float("SAMPLES_STDDEV", self.params.tap_samples_stddev, above=0.0)
         use_median: bool = gcmd.get_int("USE_MEDIAN", 1 if self.params.tap_use_median else 0) == 1
-        home_z: bool = gcmd.get_int("HOME_Z", 1) == 1
         write_plot_arg: int = gcmd.get_int("PLOT", None)
 
         if tap_threshold is None:
@@ -1285,10 +1291,25 @@ class ProbeEddy(EddyNgSensor):
             self._log_error(err_msg)
             raise self._printer.command_error("Tap failed")
 
+        self._last_tap_z = float(tap_z)
+        return tap_z, tap_stddev, tap_overshoot
+
+    def cmd_TAP_next(self, gcmd: GCodeCommand, orig_drive_current: int):
+        self._log_debug("\nEDDYng Tap begin")
+
+        lift_speed: float = gcmd.get_float("RETRACT_SPEED", self.params.lift_speed, above=0.0)
+        tap_adjust_z: float = gcmd.get_float("ADJUST_Z", self._tap_adjust_z)
+        do_retract: bool = gcmd.get_int("RETRACT", 1) == 1
+        samples: int = gcmd.get_int("SAMPLES", self.params.tap_samples, minval=1)
+        home_z: bool = gcmd.get_int("HOME_Z", 1) == 1
+
+        tap_z, tap_stddev, tap_overshoot = self.run_taps(gcmd, orig_drive_current)
+
+        th = self._toolhead
+
         # Adjust the computed tap_z by the user's tap_adjust_z, typically to raise
         # it to account for flex in the system (otherwise the Z would be too low)
         computed_tap_z = adjusted_tap_z = tap_z + tap_adjust_z
-        self._last_tap_z = float(tap_z)
 
         homed_to_str = ""
         if home_z:

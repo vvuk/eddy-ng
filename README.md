@@ -49,6 +49,16 @@ Everything `[bed_mesh]` supports works as usual, including `ADAPTIVE=1`, faulty 
 
 The old `EDDYNG_BED_MESH_EXPERIMENTAL` command has been removed.
 
+## Probing with tap
+
+On Klipper, probe commands accept `METHOD=tap` to probe by touching the bed with the nozzle, for example:
+
+```
+PROBE METHOD=tap
+```
+
+This taps at the current position, takes the same parameters as `PROBE_EDDY_NG_TAP` (`SAMPLES`, `THRESHOLD` or `TAP_THRESHOLD`, `TARGET_Z`, `ADJUST_Z`, ...), and reports the Z where the nozzle touched the bed plus `tap_adjust_z`. Unlike `PROBE_EDDY_NG_TAP`, it doesn't re-home Z or change the G-code offset, so it can be used to measure Z offsets yourself (e.g. per tool), or with other probe commands such as `QUAD_GANTRY_LEVEL METHOD=tap`. The result is available as `printer.probe.last_probe_position.z`.
+
 ## Updating
 
 Run a `git pull` and then run `./install.sh` again:

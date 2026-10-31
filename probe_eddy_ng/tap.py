@@ -8,12 +8,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, List, Optional, Tuple, final, TYPE_CHECKING
 
 import numpy as np
 
+from .compat import GCodeCommand, manual_probe, HAS_PROBE_RESULT_TYPE
+
 if TYPE_CHECKING:
     from .params import ProbeEddyParams
+    from .probe_eddy_ng import ProbeEddy
 
 try:
     import scipy  # noqa
@@ -89,3 +92,41 @@ def tap_filter_sos(params: ProbeEddyParams, data_rate: int, config_error) -> Lis
         output="sos",
     ).tolist()
 
+
+# Klipper's probe commands (PROBE, QUAD_GANTRY_LEVEL etc.) select a tap
+# with METHOD=tap
+def is_tap_request(gcmd: Optional[GCodeCommand]) -> bool:
+    return gcmd is not None and gcmd.get("METHOD", "automatic").lower() == "tap"
+
+
+# Probe session for METHOD=tap: taps at the current XY position (taking the
+# same parameters as PROBE_EDDY_NG_TAP) and reports where the nozzle touched
+# the bed, plus tap_adjust_z. Unlike PROBE_EDDY_NG_TAP, it doesn't change the
+# Z position, the gcode offset or the sensor tap offset.
+@final
+class ProbeEddyTapSession:
+    def __init__(self, eddy: ProbeEddy):
+        self.eddy = eddy
+        self._toolhead = eddy._printer.lookup_object("toolhead")
+        self._results = []
+
+    def run_probe(self, gcmd: GCodeCommand, *args: Any, **kwargs: Any):
+        th_pos = self._toolhead.get_position()
+        tap_z, _, _ = self.eddy.run_taps(gcmd, self.eddy._sensor.get_drive_current())
+        contact_z = float(tap_z + gcmd.get_float("ADJUST_Z", self.eddy._tap_adjust_z))
+        self.eddy._log_msg(f"Tap contact at z={contact_z:.3f} (tap at z={tap_z:.3f})")
+
+        # The nozzle is the probe, so the bed position is the toolhead position
+        if HAS_PROBE_RESULT_TYPE:
+            res = manual_probe.ProbeResult(th_pos[0], th_pos[1], contact_z, th_pos[0], th_pos[1], float(tap_z))
+        else:
+            res = [th_pos[0], th_pos[1], contact_z]
+        self._results.append(res)
+
+    def pull_probed_results(self):
+        res = self._results
+        self._results = []
+        return res
+
+    def end_probe_session(self):
+        self._results = []
