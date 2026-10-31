@@ -366,6 +366,11 @@ class ProbeEddy(EddyNgSensor):
     # Save the active plate's calibration
     def save_config(self):
         plate = self._plate
+        self._write_plate(plate)
+        plate_str = "" if plate.name == DEFAULT_PROFILE else f" for plate '{plate.name}'"
+        self._log_msg(f"Calibration saved{plate_str}. Issue a SAVE_CONFIG to write the values to your config file and restart Klipper.")
+
+    def _write_plate(self, plate: PlateProfile):
         section = plate.section
         configfile = self._printer.lookup_object("configfile")
 
@@ -404,9 +409,6 @@ class ProbeEddy(EddyNgSensor):
 
         for _, fmap in plate.fmaps.items():
             fmap.save_calibration(section)
-
-        plate_str = "" if plate.name == DEFAULT_PROFILE else f" for plate '{plate.name}'"
-        self._log_msg(f"Calibration saved{plate_str}. Issue a SAVE_CONFIG to write the values to your config file and restart Klipper.")
 
     def cmd_BED_MESH_EXPERIMENTAL(self, gcmd: GCodeCommand):
         raise self._printer.command_error("EDDYNG_BED_MESH_EXPERIMENTAL has been removed; use BED_MESH_CALIBRATE METHOD=rapid_scan instead")
@@ -594,7 +596,8 @@ class ProbeEddy(EddyNgSensor):
         gcode_move.homing_position[2] -= adjustment
         self._last_tap_gcode_adjustment = 0.0
 
-    def _activate_plate(self, plate: PlateProfile, created: bool = False):
+    # created: a new plate; copied: it has the old plate's calibration
+    def _activate_plate(self, plate: PlateProfile, created: bool = False, copied: bool = False):
         if plate is self._plate:
             self._log_msg(f"EDDYng: plate '{plate.name}' is already active.")
             return
@@ -615,7 +618,12 @@ class ProbeEddy(EddyNgSensor):
         self._clear_tap_gcode_adjustment()
         self._z_not_homed()
 
-        if created:
+        if copied:
+            self._log_msg(
+                f"EDDYng: plate is now '{plate.name}' (new, calibration copied from '{old.name}'). Z is no longer homed. "
+                "SAVE_CONFIG to make it permanent."
+            )
+        elif created:
             self._log_msg(
                 f"EDDYng: plate is now '{plate.name}' (new, not calibrated; was '{old.name}'). Z is no longer homed. "
                 "Run PROBE_EDDY_NG_SETUP, then SAVE_CONFIG."
@@ -676,10 +684,18 @@ class ProbeEddy(EddyNgSensor):
         action, value = actions[0]
         return action, profile_name(value, gcmd.error)
 
-    cmd_PLATE_PROFILE_help = "Load (LOAD=), create (CREATE=) or remove (REMOVE=) a plate profile, or list them"
+    # COPY=1 with CREATE= starts the new profile from the active one
+    def _profile_copy(self, gcmd: GCodeCommand, action: Optional[str]) -> bool:
+        copy = gcmd.get_int("COPY", 0, minval=0, maxval=1)
+        if copy and action != "CREATE":
+            raise gcmd.error("COPY= can only be used with CREATE=")
+        return bool(copy)
+
+    cmd_PLATE_PROFILE_help = "Load (LOAD=), create (CREATE=, COPY=1 to copy the active plate's calibration) or remove (REMOVE=) a plate profile, or list them"
 
     def cmd_PLATE_PROFILE(self, gcmd: GCodeCommand):
         action, name = self._profile_action(gcmd)
+        copy = self._profile_copy(gcmd, action)
         configfile = self._printer.lookup_object("configfile")
 
         if action is None:
@@ -695,9 +711,18 @@ class ProbeEddy(EddyNgSensor):
             if name in self._plates:
                 raise gcmd.error(f"Plate '{name}' already exists")
             plate = PlateProfile(name, plate_section_prefix(self._name) + name)
-            configfile.set(plate.section, "calibration_version", str(ProbeEddyFrequencyMap.calibration_version))
+            if copy:
+                # fmaps are replaced, never changed in place, by calibration,
+                # so the two plates can share them
+                source = self._plate
+                plate.fmaps = dict(source.fmaps)
+                plate.reg_drive_current = source.reg_drive_current
+                plate.tap_drive_current = source.tap_drive_current
+                self._write_plate(plate)
+            else:
+                configfile.set(plate.section, "calibration_version", str(ProbeEddyFrequencyMap.calibration_version))
             self._plates[name] = plate
-            self._activate_plate(plate, created=True)
+            self._activate_plate(plate, created=True, copied=copy)
             return
 
         if name not in self._plates:
@@ -721,10 +746,11 @@ class ProbeEddy(EddyNgSensor):
         configfile.remove_section(plate.section)
         self._log_msg(f"EDDYng: removed plate '{name}'. SAVE_CONFIG to make it permanent.")
 
-    cmd_TAP_PROFILE_help = "Load (LOAD= and optionally MATERIAL=), create (CREATE=) or remove (REMOVE=) a tap profile, or list them"
+    cmd_TAP_PROFILE_help = "Load (LOAD= and optionally MATERIAL=), create (CREATE=, COPY=1 to copy the active tap profile) or remove (REMOVE=) a tap profile, or list them"
 
     def cmd_TAP_PROFILE(self, gcmd: GCodeCommand):
         action, name = self._profile_action(gcmd)
+        copy = self._profile_copy(gcmd, action)
         material = gcmd.get("MATERIAL", None)
         if material is not None and action != "LOAD":
             raise gcmd.error("MATERIAL= can only be used with LOAD=")
@@ -745,20 +771,26 @@ class ProbeEddy(EddyNgSensor):
         if action == "CREATE":
             if name in self._tap_profiles:
                 raise gcmd.error(f"Tap profile '{name}' already exists")
-            source = self._tap_profile
-            tap_profile = TapProfile(
-                name,
-                TAP_SECTION_PREFIX + name,
-                params=dict(source.params),
-                reg_drive_current=source.reg_drive_current,
-                tap_drive_current=source.tap_drive_current,
-                tap_adjust_z=source.tap_adjust_z,
-                material_adjust_z=dict(source.material_adjust_z),
-            )
+            if copy:
+                source = self._tap_profile
+                tap_profile = TapProfile(
+                    name,
+                    TAP_SECTION_PREFIX + name,
+                    params=dict(source.params),
+                    reg_drive_current=source.reg_drive_current,
+                    tap_drive_current=source.tap_drive_current,
+                    tap_adjust_z=source.tap_adjust_z,
+                    material_adjust_z=dict(source.material_adjust_z),
+                )
+                created = f"created tap profile '{name}' as a copy of '{source.name}'"
+            else:
+                # the [probe_eddy_ng] tap settings, with tap_adjust_z 0
+                tap_profile = TapProfile(name, TAP_SECTION_PREFIX + name)
+                created = f"created tap profile '{name}' with the default tap settings and tap_adjust_z 0"
             for option, value in tap_profile.options().items():
                 configfile.set(tap_profile.section, option, value)
             self._tap_profiles[name] = tap_profile
-            self._log_msg(f"EDDYng: created tap profile '{name}' from '{source.name}'. SAVE_CONFIG to make it permanent.")
+            self._log_msg(f"EDDYng: {created}. SAVE_CONFIG to make it permanent.")
             self._activate_tap_profile(tap_profile, self._material)
             return
 

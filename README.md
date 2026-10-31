@@ -75,12 +75,14 @@ PROBE_EDDY_NG_PLATE_PROFILE CREATE=textured_pei   # create an empty plate and sw
 PROBE_EDDY_NG_SETUP                               # calibrate the active plate
 SAVE_CONFIG
 
+PROBE_EDDY_NG_PLATE_PROFILE CREATE=pei_2 COPY=1   # create a plate with the active plate's calibration
+
 PROBE_EDDY_NG_PLATE_PROFILE LOAD=textured_pei     # switch plates
 PROBE_EDDY_NG_PLATE_PROFILE REMOVE=old_plate
 PROBE_EDDY_NG_PLATE_PROFILE                       # list plates
 ```
 
-`SETUP` and `CALIBRATE` always calibrate the active plate. Switching plates un-homes Z and clears the offsets from the last tap, since they came from the old plate's calibration. After a restart (including the one after `SAVE_CONFIG`), the plate named by `default_plate:` in `[probe_eddy_ng ...]` is active (or `default`), so load the plate you're using in your `PRINT_START` macro.
+`COPY=1` is useful for a plate that behaves like one you've already calibrated: it starts out with the same calibration, and `SETUP` or `CALIBRATE` on it later won't change the original. `SETUP` and `CALIBRATE` always calibrate the active plate. Switching plates un-homes Z and clears the offsets from the last tap, since they came from the old plate's calibration. After a restart (including the one after `SAVE_CONFIG`), the plate named by `default_plate:` in `[probe_eddy_ng ...]` is active (or `default`), so load the plate you're using in your `PRINT_START` macro.
 
 Plate profiles are stored in `[probe_eddy_ng_plate <sensor> <plate>]` sections in the `SAVE_CONFIG` block.
 
@@ -99,12 +101,13 @@ tap_adjust_z_petg: 0.040
 
 ```
 PROBE_EDDY_NG_TAP_PROFILE LOAD=textured MATERIAL=PETG
-PROBE_EDDY_NG_TAP_PROFILE CREATE=hot      # copy the active tap profile and switch to the copy
+PROBE_EDDY_NG_TAP_PROFILE CREATE=hot      # create a tap profile with the default tap settings and switch to it
+PROBE_EDDY_NG_TAP_PROFILE CREATE=hot COPY=1   # ... or start from a copy of the active tap profile
 PROBE_EDDY_NG_TAP_PROFILE REMOVE=hot
 PROBE_EDDY_NG_TAP_PROFILE                 # list tap profiles
 ```
 
-Material names are case-insensitive and can contain letters, digits, `_`, `-`, `+` and `.` (e.g. `ASA-GF`). Spaces are turned into underscores, so `MATERIAL="PLA Silk"` uses `tap_adjust_z_pla_silk`. If the profile has no value for the material, the default `tap_adjust_z` is used, with a warning. `PROBE_EDDY_NG_SET_TAP_ADJUST_Z` and `Z_OFFSET_APPLY_PROBE` change the value for the loaded tap profile and material, and `SAVE_CONFIG` saves it. If a tap profile changes the homing drive current, loading it un-homes Z. A tap profile can only use drive currents the active plate is calibrated for.
+Without `COPY=1`, a new tap profile has the tap settings from `[probe_eddy_ng ...]` and a `tap_adjust_z` of 0. Material names are case-insensitive and can contain letters, digits, `_`, `-`, `+` and `.` (e.g. `ASA-GF`). Spaces are turned into underscores, so `MATERIAL="PLA Silk"` uses `tap_adjust_z_pla_silk`. If the profile has no value for the material, the default `tap_adjust_z` is used, with a warning. `PROBE_EDDY_NG_SET_TAP_ADJUST_Z` and `Z_OFFSET_APPLY_PROBE` change the value for the loaded tap profile and material, and `SAVE_CONFIG` saves it. If a tap profile changes the homing drive current, loading it un-homes Z. A tap profile can only use drive currents the active plate is calibrated for.
 
 Klipper's `SAVE_CONFIG` refuses to save a value that's also set in an `[include]`d file, so set the per-material values you'll adjust from the console in `printer.cfg` itself, or let the commands create them. (Kalico can update included files with `[danger_options] autosave_includes: True`.) `REMOVE=` can only remove profiles created with `CREATE=`.
 
