@@ -1140,7 +1140,7 @@ class ProbeEddy:
         best_tap = None
         saw_success = False
         for cur_dc in range(start_dc, end_dc - 1, -1):
-            mapping, fth_rms, _ = self._create_mapping(
+            mapping = self._create_mapping(
                 self.params.calibration_z_max,
                 0.0,  # z_target
                 self.params.probe_speed,
@@ -1160,8 +1160,8 @@ class ProbeEddy:
                 )
                 mapping = None
 
-            if mapping is not None and (fth_rms is None or fth_rms > 0.025):
-                self._log_msg(f"DC {cur_dc}: calibration error rate is too high ({fth_rms})")
+            if mapping is not None and mapping._ftoh_rms > 0.025:
+                self._log_msg(f"DC {cur_dc}: calibration error rate is too high ({mapping._ftoh_rms:.3f})")
                 mapping = None
 
             if mapping is None:
@@ -1271,7 +1271,7 @@ class ProbeEddy:
             self.params.move_speed,
         )
 
-        mapping, fth_fit, htf_fit = self._create_mapping(
+        mapping = self._create_mapping(
             cal_z_max,
             z_target,
             probe_speed,
@@ -1280,7 +1280,7 @@ class ProbeEddy:
             report_errors=True,
             write_debug_files=True,
         )
-        if mapping is None or fth_fit is None or htf_fit is None:
+        if mapping is None:
             self._log_error("Calibration failed")
             return
 
@@ -1299,7 +1299,7 @@ class ProbeEddy:
         drive_current: int,
         report_errors: bool,
         write_debug_files: bool,
-    ) -> Tuple[ProbeEddyFrequencyMap, float, float]:
+    ) -> Optional[ProbeEddyFrequencyMap]:
         th = self._printer.lookup_object("toolhead")
         th_pos = th.get_position()
 
@@ -1321,11 +1321,11 @@ class ProbeEddy:
                 self._log_error(f"Drive current {drive_current}: No samples collected. This could be a hardware issue or an incorrect drive current.")
             else:
                 self._log_warning(f"Drive current {drive_current}: Warning: no samples collected.")
-            return None, None, None
+            return None
 
         # and build a map
         mapping = ProbeEddyFrequencyMap(self)
-        fth_fit, htf_fit = mapping.calibrate_from_values(
+        ok = mapping.calibrate_from_values(
             drive_current,
             times,
             freqs,
@@ -1335,7 +1335,7 @@ class ProbeEddy:
             write_debug_files,
         )
 
-        return mapping, fth_fit, htf_fit
+        return mapping if ok else None
 
     def _capture_samples_down_to(self, z_target: float, probe_speed: float) -> tuple[List[float], List[float], List[float], List[float]]:
         th = self._printer.lookup_object("toolhead")
@@ -1382,7 +1382,7 @@ class ProbeEddy:
         debug: bool = gcmd.get_int("DEBUG", 0) == 1
         self._log_msg(f"Testing Z={z_start:.3f} to Z={z_end:.3f}")
 
-        mapping, fth, htf = self._create_mapping(
+        mapping = self._create_mapping(
             z_start,
             z_end,
             self.params.probe_speed,
@@ -1391,7 +1391,7 @@ class ProbeEddy:
             report_errors=False,
             write_debug_files=debug,
         )
-        if mapping is None or fth is None or htf is None:
+        if mapping is None:
             self._log_error(f"Test failed: drive current {drive_current} is not usable.")
 
     #
@@ -2771,13 +2771,14 @@ class ProbeEddyFrequencyMap:
         raw_vels_list: List[float],
         report_errors: bool,
         write_debug_files: bool,
-    ):
+    ) -> bool:
         if len(raw_freqs_list) != len(raw_heights_list):
             raise ValueError("freqs and heights must be the same length")
 
         if len(raw_freqs_list) == 0:
-            self._eddy._log_info("calibrate_from_values: empty list")
-            return None, None
+            if report_errors:
+                self._eddy._log_error(f"Drive current {drive_current}: Calibration failed, no valid samples received.")
+            return False
 
         # everything must be a np.array or things get confused below
         times = np.asarray(raw_times)
@@ -2796,13 +2797,6 @@ class ProbeEddyFrequencyMap:
                     data_file.write(f"{s_t},{s_f},{s_z},{s_v}\n")
                 self._eddy._log_info(f"Wrote {len(freqs)} samples to /tmp/eddy-calibration.csv")
 
-        if len(freqs) == 0 or len(heights) == 0:
-            if report_errors:
-                self._eddy._log_error(
-                    f"Drive current {drive_current}: Calibration failed, couldn't compute averages ({len(raw_freqs_list)}, {len(raw_heights_list)}), probably due to no valid samples received."
-                )
-            return None, None
-
         max_height = float(heights.max())
         min_height = float(heights.min())
         min_freq = float(freqs.min())
@@ -2816,14 +2810,14 @@ class ProbeEddyFrequencyMap:
                     f"Drive current {drive_current} error: max height for valid samples is too low: {max_height:.3f} < 2.5. Possible causes: bad drive current, bad sensor mount height."
                 )
                 if not self._eddy.params.allow_unsafe:
-                    return None, None
+                    return False
 
             if min_height > 0.65:  # this is a bit arbitrary; but if it's this far off we shouldn't trust it
                 self._eddy._log_error(
                     f"Drive current {drive_current} error: min height for valid samples is too high: {min_height:.3f} > 0.65. Possible causes: bad drive current, bad sensor mount height."
                 )
                 if not self._eddy.params.allow_unsafe:
-                    return None, None
+                    return False
 
             if min_height > 0.025:
                 self._eddy._log_msg(
@@ -2867,7 +2861,7 @@ class ProbeEddyFrequencyMap:
                     f"Drive current {drive_current} error: calibration error margin is too high ({rmse_fth:.3f}). Possible causes: bad drive current, bad sensor mount height."
                 )
                 if not self._eddy.params.allow_unsafe:
-                    return None, None
+                    return False
 
         self._ftoh = ftoh_low_fn
         self._htof = htof_low_fn
@@ -2890,7 +2884,7 @@ class ProbeEddyFrequencyMap:
                 vels=vels,
             )
 
-        return rmse_fth, rmse_htf
+        return True
 
     def _write_calibration_plot(
         self,
