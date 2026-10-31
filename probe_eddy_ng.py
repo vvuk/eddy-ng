@@ -3244,24 +3244,17 @@ class ProbeEddyFrequencyMap:
         fig.write_html("/tmp/eddy-calibration.html")
 
     def freq_to_height(self, freq: float) -> float:
-        if self._ftoh is None:
-            raise self._eddy._printer.command_error("Calling freq_to_height on uncalibrated map")
-        invfreq = 1.0 / freq
-        if self._ftoh_high is not None and invfreq < self._ftoh.domain[0]:
-            return float(self._ftoh_high(invfreq))
-        return float(self._ftoh(invfreq))
+        return float(self.freqs_to_heights_np(np.asarray([freq]))[0])
 
-    def freqs_to_heights_np(self, freqs: np.array) -> np.array:
+    def freqs_to_heights_np(self, freqs: np.ndarray) -> np.ndarray:
         if self._ftoh is None:
             raise self._eddy._printer.command_error("Calling freqs_to_heights on uncalibrated map")
-        invfreqs = 1.0 / freqs
+        invfreqs = 1.0 / np.asarray(freqs, dtype=float)
+        heights = self._ftoh(invfreqs)
         if self._ftoh_high is not None:
-            heights = np.zeros(len(invfreqs))
-            low_freq_vals = invfreqs > self._ftoh.domain[1]
-            heights[low_freq_vals] = np.vectorize(self._ftoh_high, otypes=[float])(invfreqs[low_freq_vals])
-            heights[~low_freq_vals] = np.vectorize(self._ftoh, otypes=[float])(invfreqs[~low_freq_vals])
-        else:
-            heights = self._ftoh(invfreqs)
+            # higher heights mean lower frequencies, i.e. larger inverse frequencies
+            high = invfreqs > self._ftoh.domain[1]
+            heights[high] = self._ftoh_high(invfreqs[high])
         return heights
 
     def height_to_freq(self, height: float) -> float:
