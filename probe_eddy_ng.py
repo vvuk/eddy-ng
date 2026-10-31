@@ -32,33 +32,27 @@ from typing import (
     final,
 )
 
-try:
-    from klippy import mcu, pins, chelper
-    from klippy.printer import Printer
-    from klippy.configfile import ConfigWrapper
-    from klippy.configfile import error as configerror
-    from klippy.gcode import GCodeCommand
-    from klippy.toolhead import ToolHead
-    from klippy.extras import probe, manual_probe, bed_mesh
-    from klippy.extras.homing import HomingMove
+if __package__ in (None, "", "extras"):
+    # Loaded as a single file from klippy/extras: an install from before
+    # eddy-ng became a package
+    raise ImportError("eddy-ng's install layout has changed; please re-run eddy-ng's install.sh")
 
-    IS_KALICO = True
-    HAS_PROBE_RESULT_TYPE = False
-except ImportError:
-    import mcu
-    import pins
-    import chelper
-    from klippy import Printer
-    from configfile import ConfigWrapper
-    from configfile import error as configerror
-    from gcode import GCodeCommand
-    from toolhead import ToolHead
-    from . import probe, manual_probe, bed_mesh
-    from .homing import HomingMove
-
-    IS_KALICO = False
-    HAS_PROBE_RESULT_TYPE = hasattr(manual_probe, "ProbeResult")
-
+from .compat import (
+    mcu,
+    pins,
+    chelper,
+    Printer,
+    ConfigWrapper,
+    configerror,
+    GCodeCommand,
+    ToolHead,
+    probe,
+    manual_probe,
+    bed_mesh,
+    HomingMove,
+    IS_KALICO,
+    HAS_PROBE_RESULT_TYPE,
+)
 from . import ldc1612_ng
 
 try:
@@ -3168,7 +3162,3 @@ def bed_mesh_ProbeManager_start_probe_override(self, gcmd):
         self.rapid_scan_helper.perform_rapid_scan(gcmd)
     else:
         self.probe_helper.start_probe(gcmd)
-
-
-def load_config_prefix(config: ConfigWrapper):
-    return ProbeEddy(config)

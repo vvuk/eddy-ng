@@ -17,11 +17,7 @@ from scipy.optimize import curve_fit
 
 if TYPE_CHECKING:
     from .probe_eddy_ng import ProbeEddy
-
-    try:
-        from klippy.toolhead import ToolHead
-    except ImportError:
-        from toolhead import ToolHead
+    from .compat import ToolHead
 
 
 class BigfootProbe:

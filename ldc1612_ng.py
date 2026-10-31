@@ -12,16 +12,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 import numpy as np
 
-try:
-    from klippy.extras import bus
-    from klippy.printer import Printer
-
-    IS_KALICO = True
-except ImportError:
-    from . import bus
-    from klippy import Printer
-
-    IS_KALICO = False
+from .compat import bus, Printer
 
 MIN_MSG_TIME = 0.100
 
