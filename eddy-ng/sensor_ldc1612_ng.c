@@ -297,10 +297,10 @@ uint32_t
 read_reg_data0(struct ldc1612_ng *ld)
 {
     uint8_t d[4];
-    irq_disable();
+    // No irq_disable here: i2c may rely on interrupts, and reading the MSB
+    // latches the LSB on the LDC1612 so the two reads are coherent anyway.
     read_reg(ld, REG_DATA0_MSB, &d[0]);
     read_reg(ld, REG_DATA0_LSB, &d[2]);
-    irq_enable();
 
     uint32_t data = ((uint32_t)d[0] << 24)
                   | ((uint32_t)d[1] << 16)
