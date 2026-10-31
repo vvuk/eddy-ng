@@ -2699,15 +2699,13 @@ class ProbeEddyFrequencyMap:
         self.freq_range = (math.inf, -math.inf)
         self._ftoh: Optional[npp.Polynomial] = None
         self._ftoh_high: Optional[npp.Polynomial] = None
-        self._htof: Optional[npp.Polynomial] = None
         self._ftoh_rms = None
-        self._htof_rms = None
 
     def __format__(self, _spec):
+        fit = f"fit {self._ftoh_rms:.3f}" if self._ftoh_rms is not None else "fit unknown"
         return (
             f"DC {self.drive_current}: valid range {self.height_range[0]:.3f} to {self.height_range[1]:.3f}, "
-            + f"spread {self.freq_spread():.2f}% (freq {self.freq_range[0]:.1f} to {self.freq_range[1]:.1f})  "
-            + f"fit {self._ftoh_rms:.3f}, {self._htof_rms:.3f})"
+            + f"spread {self.freq_spread():.2f}% (freq {self.freq_range[0]:.1f} to {self.freq_range[1]:.1f}), {fit}"
         )
 
 
@@ -2727,7 +2725,6 @@ class ProbeEddyFrequencyMap:
 
         ftoh = data.get("ftoh", None)
         ftoh_high = data.get("ftoh_high", None)
-        htof = data.get("htof", None)
         dc = data.get("dc", None)
         h_range = data.get("h_range", (math.inf, -math.inf))
         f_range = data.get("f_range", (math.inf, -math.inf))
@@ -2737,7 +2734,6 @@ class ProbeEddyFrequencyMap:
 
         self._ftoh = ftoh
         self._ftoh_high = ftoh_high
-        self._htof = htof
         self.height_range = h_range
         self.freq_range = f_range
         self.drive_current = drive_current
@@ -2746,7 +2742,7 @@ class ProbeEddyFrequencyMap:
         return True
 
     def save_calibration(self):
-        if self._ftoh is None or self._htof is None:
+        if self._ftoh is None:
             return
 
         configfile = self._eddy._printer.lookup_object("configfile")
@@ -2754,7 +2750,6 @@ class ProbeEddyFrequencyMap:
             "v": self.calibration_version,
             "ftoh": self._ftoh,
             "ftoh_high": self._ftoh_high,
-            "htof": self._htof,
             "h_range": self.height_range,
             "f_range": self.freq_range,
             "dc": self.drive_current,
@@ -2835,7 +2830,6 @@ class ProbeEddyFrequencyMap:
         high_samples = heights >= ProbeEddyFrequencyMap.low_z_threshold - 0.5
 
         ftoh_low_fn = npp.Polynomial.fit(1.0 / freqs[low_samples], heights[low_samples], deg=9)
-        htof_low_fn = npp.Polynomial.fit(heights[low_samples], 1.0 / freqs[low_samples], deg=9)
 
         if np.count_nonzero(high_samples) > 50:
             ftoh_high_fn = npp.Polynomial.fit(1.0 / freqs[high_samples], heights[high_samples], deg=9)
@@ -2849,11 +2843,6 @@ class ProbeEddyFrequencyMap:
             1.0 / freqs[low_samples],
             heights[low_samples],
         )
-        rmse_htf = np_rmse(
-            htof_low_fn,
-            heights[low_samples],
-            1.0 / freqs[low_samples],
-        )
 
         if report_errors:
             if rmse_fth > 0.050:
@@ -2864,10 +2853,8 @@ class ProbeEddyFrequencyMap:
                     return False
 
         self._ftoh = ftoh_low_fn
-        self._htof = htof_low_fn
         self._ftoh_high = ftoh_high_fn
         self._ftoh_rms = rmse_fth
-        self._htof_rms = rmse_htf
         self.drive_current = drive_current
         self.height_range = [min_height, max_height]
         self.freq_range = [min_freq, max_freq]
@@ -2880,7 +2867,6 @@ class ProbeEddyFrequencyMap:
                 freqs,
                 heights,
                 rmse_fth,
-                rmse_htf,
                 vels=vels,
             )
 
@@ -2892,13 +2878,12 @@ class ProbeEddyFrequencyMap:
         freqs,
         heights,
         rmse_fth,
-        rmse_htf,
         vels=None,
     ):
         if not plotly:
             return
 
-        if self._ftoh is None or self._htof is None:
+        if self._ftoh is None:
             logging.warning("write_calibration_plot: null calibration?")
             return
 
@@ -2941,9 +2926,9 @@ class ProbeEddyFrequencyMap:
         fig.add_trace(
             go.Scatter(
                 x=times[low_samples],
-                y=1.0 / self._htof(heights[low_samples]),
+                y=1.0 / self._heights_to_invfreqs(heights[low_samples]),
                 mode="lines",
-                name=f"F ({rmse_htf:.2f})",
+                name="F (fit)",
                 yaxis="y2",
             )
         )
@@ -2994,13 +2979,33 @@ class ProbeEddyFrequencyMap:
             heights[high] = self._ftoh_high(invfreqs[high])
         return heights
 
-    def height_to_freq(self, height: float) -> float:
-        if self._htof is None:
+    # The freq -> height fit is monotonic over the calibrated range, so invert
+    # it by evaluating it on a dense grid of inverse frequencies and
+    # interpolating. Returns the grid as (heights, inverse frequencies).
+    def _inverse_grid(self) -> Tuple[np.ndarray, np.ndarray]:
+        if self._ftoh is None:
             raise self._eddy._printer.command_error("Calling height_to_freq on uncalibrated map")
-        return 1.0 / float(self._htof(height))
+        top = self._ftoh_high if self._ftoh_high is not None else self._ftoh
+        invfreqs = np.linspace(self._ftoh.domain[0], top.domain[1], 4000)
+        # guard against any small wiggles in the polynomial fits
+        heights = np.maximum.accumulate(self.freqs_to_heights_np(1.0 / invfreqs))
+        return heights, invfreqs
+
+    # clamps to the calibrated range
+    def _heights_to_invfreqs(self, heights: np.ndarray) -> np.ndarray:
+        grid_heights, grid_invfreqs = self._inverse_grid()
+        return np.interp(heights, grid_heights, grid_invfreqs)
+
+    def height_to_freq(self, height: float) -> float:
+        grid_heights, grid_invfreqs = self._inverse_grid()
+        if not grid_heights[0] <= height <= grid_heights[-1]:
+            raise self._eddy._printer.command_error(
+                f"Height {height:.3f} is outside the calibrated range ({grid_heights[0]:.3f} to {grid_heights[-1]:.3f}) for drive current {self.drive_current}"
+            )
+        return 1.0 / float(np.interp(height, grid_heights, grid_invfreqs))
 
     def calibrated(self) -> bool:
-        return self._ftoh is not None and self._htof is not None
+        return self._ftoh is not None
 
 
 @final
