@@ -796,6 +796,9 @@ class LDC1612_ng:
 
         self._init_chip()
         self._next_seq = 0
+        # anything still pending belongs to a previous stream
+        with self._data_lock:
+            self._pending_data = []
         self._data_callback = callback
         self._data_interval = callback_interval
 
