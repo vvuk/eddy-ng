@@ -823,6 +823,9 @@ command_ldc1612_ng_set_sos_section(uint32_t *args)
     if (values_len != 4*6) {
         shutdown("ldc1612_ng: wrong sos section length");
     }
+    if (section >= MAX_SOS_SECTIONS) {
+        shutdown("ldc1612_ng: too many sos sections");
+    }
 
     // these commands need to come in order of increasing section
     ld->sos_filter.num_sections = section + 1;
