@@ -1184,7 +1184,7 @@ class ProbeEddy:
         best_tap = None
         saw_success = False
         for cur_dc in range(start_dc, end_dc - 1, -1):
-            mapping, _, _ = self._create_mapping(
+            mapping, fth_rms, _ = self._create_mapping(
                 self.params.calibration_z_max,
                 0.0,  # z_target
                 self.params.probe_speed,
@@ -1195,7 +1195,17 @@ class ProbeEddy:
             )
 
             # ignore anything with max height range < 3.0
-            if mapping.height_range[1] < 3.0 or mapping.height_range[0] > 1.0:
+            if mapping is not None and (mapping.height_range[1] < 3.0 or mapping.height_range[0] > 1.0):
+                mapping = None
+
+            if mapping is not None and mapping.freq_spread() < 0.30:
+                self._log_warning(
+                    f"DC {cur_dc}: frequency spread {mapping.freq_spread():.2f}% is very low. (The sensor is probably mounted too high; the height includes any case thickness.)"
+                )
+                mapping = None
+
+            if mapping is not None and (fth_rms is None or fth_rms > 0.025):
+                self._log_msg(f"DC {cur_dc}: calibration error rate is too high ({fth_rms})")
                 mapping = None
 
             if mapping is None:
@@ -1217,6 +1227,7 @@ class ProbeEddy:
                 "Unable to find valid homing drive current. Verify sensor height and consult documentation for troubleshooting."
             )
             self._sensor.set_drive_current(orig_drive_current)
+            self._z_not_homed()
             return
 
         self._dc_to_fmap[best_homing.drive_current] = best_homing
