@@ -21,11 +21,16 @@ OLD_KLIPPER_FILES = [
     "klippy/extras/eddy_ng_bigfoot.py",
 ]
 # Files and directories not to copy with --copy
-COPY_IGNORE = shutil.ignore_patterns(".git", "__pycache__", "*.pyc", ".ruff_cache", ".beads")
+COPY_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc")
 
 
 def get_script_dir():
     return os.path.dirname(os.path.realpath(__file__))
+
+
+# The python package, installed as a Kalico plugin or a Klipper extra
+def get_module_dir():
+    return os.path.join(get_script_dir(), "probe_eddy_ng")
 
 
 def remove_path(path: str):
@@ -83,10 +88,10 @@ def install_kalico(target_dir: str, uninstall: bool, copy: bool):
         sys.exit(0)
 
     if copy:
-        shutil.copytree(get_script_dir(), python_module_path, ignore=COPY_IGNORE)
+        shutil.copytree(get_module_dir(), python_module_path, ignore=COPY_IGNORE)
         shutil.copytree(os.path.join(get_script_dir(), "eddy-ng"), firmware_module_path)
     else:
-        os.symlink(get_script_dir(), python_module_path)
+        os.symlink(get_module_dir(), python_module_path)
         os.symlink(os.path.join(get_script_dir(), "eddy-ng"), firmware_module_path)
 
     print("Installed links to firmware and plugin modules.")
@@ -106,7 +111,7 @@ def install_klipper(target_dir: str, uninstall: bool, copy: bool):
 
     print("Installing files...")
     for src_path, dest in (
-        (get_script_dir(), KLIPPER_MODULE_DIR),
+        (get_module_dir(), KLIPPER_MODULE_DIR),
         (os.path.join(get_script_dir(), "eddy-ng/sensor_ldc1612_ng.c"), KLIPPER_FIRMWARE_FILE),
     ):
         dest_path = os.path.join(target_dir, dest)

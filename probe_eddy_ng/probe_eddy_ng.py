@@ -14,10 +14,6 @@ from typing import Any, Dict, List, Optional, final
 
 import numpy as np
 
-if __package__ in (None, "", "extras"):
-    # Loaded as a single file from klippy/extras: an install from before
-    # eddy-ng became a package
-    raise ImportError("eddy-ng's install layout has changed; please re-run eddy-ng's install.sh")
 
 from .compat import (
     ConfigWrapper,
