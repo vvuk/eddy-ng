@@ -365,9 +365,6 @@ class ProbeEddyProbeResult:
     tend: float = 0.0
     errors: int = 0
 
-    @property
-    def valid(self):
-        return len(self.samples) > 0
 
     @property
     def value(self):
@@ -980,29 +977,15 @@ class ProbeEddy:
         )
 
     def probe_static_height(self, duration: float = 0.100) -> ProbeEddyProbeResult:
-        now = self._print_time_now()
-        tend = now + (duration + self._sensor._ldc_settle_time)
         with self.start_sampler() as sampler:
-            self._reactor.pause(self._reactor.monotonic() + duration)
-            while tend >= self._print_time_now():
-                self._reactor.pause(self._reactor.monotonic() + 0.050)
-                break
+            start_time = self._print_time_now() + self._sensor._ldc_settle_time
+            sampler.wait_for_sample_at_time(start_time + duration)
+            sampler.finish()
+            times, heights = sampler.heights_between(start_time, math.inf)
 
-        if sampler.raw_count == 0:
-            return ProbeEddyProbeResult([])
-
-        etime = sampler.times[-1]
-        stime = etime - duration
-
-        first_idx = bisect.bisect_left(sampler.times, stime)
-        times = np.asarray(sampler.times[first_idx:])
-        heights = np.asarray(sampler.heights[first_idx:])
-        valid = ~np.isnan(heights)
-        if not valid.any():
+        if len(heights) == 0:
             raise self._printer.command_error(f"No valid samples in time range (errors: {sampler.error_counts})")
-
-        errors = sampler.error_count
-        return ProbeEddyProbeResult.make(times[valid], heights[valid], errors=errors)
+        return ProbeEddyProbeResult.make(times, heights, errors=sampler.error_count)
 
     cmd_PROBE_help = "Probe the height using the eddy current sensor, moving the toolhead to the home trigger height, or Z if specified."
 
@@ -1492,9 +1475,6 @@ class ProbeEddy:
         th.wait_moves()
 
         r = self.probe_static_height(duration)
-        if not r.valid:
-            raise self._printer.command_error("Probe captured no samples!")
-
         height = r.value
         height += self._tap_offset
 
@@ -2674,72 +2654,35 @@ class ProbeEddySampler:
         return True
 
 
-    def find_heights_at_times(self, intervals):
+    # The times and heights of the valid (non-error) samples in [start_time, end_time)
+    def heights_between(self, start_time: float, end_time: float) -> Tuple[np.ndarray, np.ndarray]:
+        if self.heights is None:
+            raise self._printer.command_error("ProbeEddySampler: no height mapping")
         self._update_samples()
-        times = self.times
-        heights = np.asarray(self.heights)
-        num_samples = len(times)
+        istart = bisect.bisect_left(self.times, start_time)
+        iend = bisect.bisect_left(self.times, end_time, lo=istart)
+        times = np.asarray(self.times[istart:iend])
+        heights = np.asarray(self.heights[istart:iend])
+        valid = ~np.isnan(heights)
+        return times[valid], heights[valid]
 
+    # The median height in each (start, end) interval, nan for intervals without valid samples
+    def find_heights_at_times(self, intervals) -> List[float]:
         interval_heights = []
-        i = 0
         for iv_start, iv_end in intervals:
-            while i < num_samples and times[i] < iv_start:
-                i += 1
-            istart = i
-
-            while i < num_samples and times[i] < iv_end:
-                i += 1
-            iend = i
-
-            iv_heights = heights[istart:iend]
-            iv_heights = iv_heights[~np.isnan(iv_heights)]
-            if len(iv_heights) == 0:
+            _, heights = self.heights_between(iv_start, iv_end)
+            if len(heights) == 0:
                 self.eddy._log_msg(f"Warning: no valid samples in time range {iv_start}-{iv_end}")
                 interval_heights.append(math.nan)
             else:
-                interval_heights.append(float(np.median(iv_heights)))
-
+                interval_heights.append(float(np.median(heights)))
         return interval_heights
 
-    def find_height_at_time(self, start_time, end_time):
-        if end_time < start_time:
-            raise self._printer.command_error("find_height_at_time: end_time is before start_time")
-
-        self._update_samples()
-
-        if len(self.times) == 0:
-            raise self._printer.command_error("No samples at all, so none in time range")
-
-        if not self.heights:
-            raise self._printer.command_error("Update samples didn't compute heights")
-
-        self.eddy._log_debug(
-            f"find_height_at_time: looking between {start_time:.3f}s-{end_time:.3f}s, inside {len(self.times)} samples, time range {self.times[0]:.3f}s to {self.times[-1]:.3f}s"
-        )
-
-        # find the first sample that is >= start_time
-        start_idx = bisect.bisect_left(self.times, start_time)
-        if start_idx >= len(self.times):
-            raise self._printer.command_error("Nothing after start_time?")
-
-        # find the last sample that is < end_time
-        end_idx = start_idx
-        while end_idx < len(self.times) and self.times[end_idx] < end_time:
-            end_idx += 1
-
-        # average the heights of the valid samples in the range
-        heights = np.asarray(self.heights[start_idx:end_idx])
-        heights = heights[~np.isnan(heights)]
-        if len(heights) == 0:
-            raise self._printer.command_error(f"no valid samples between time {start_time:.1f} and {end_time:.1f}!")
-        hmin, hmax = np.min(heights), np.max(heights)
-        mean = np.mean(heights)
-        median = np.median(heights)
-        self.eddy._log_debug(
-            f"find_height_at_time: {len(heights)} samples, median: {median:.3f}, mean: {mean:.3f} (range {hmin:.3f}-{hmax:.3f})"
-        )
-
-        return float(median)
+    def find_height_at_time(self, start_time, end_time) -> float:
+        height = self.find_heights_at_times([(start_time, end_time)])[0]
+        if math.isnan(height):
+            raise self._printer.command_error(f"no valid samples between time {start_time:.3f} and {end_time:.3f}!")
+        return height
 
 
 @final
