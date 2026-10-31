@@ -596,12 +596,12 @@ class ProbeEddy(EddyNgSensor):
         gcode_move.homing_position[2] -= adjustment
         self._last_tap_gcode_adjustment = 0.0
 
-    # created: a new plate; copied: it has the old plate's calibration
+    # created: a new plate; copied: it has the old plate's calibration.
+    # Loading the plate that's already active still clears the tap offsets,
+    # so that a print start macro that loads its plate always starts from
+    # the same state; Z stays homed, since the calibration it was homed with
+    # hasn't changed.
     def _activate_plate(self, plate: PlateProfile, created: bool = False, copied: bool = False):
-        if plate is self._plate:
-            self._log_msg(f"EDDYng: plate '{plate.name}' is already active.")
-            return
-
         missing = self._uncalibrated_drive_currents(self._tap_profile, plate)
         if plate.fmaps and missing:
             raise self._printer.command_error(
@@ -613,10 +613,11 @@ class ProbeEddy(EddyNgSensor):
         self._plate = plate
         if self._reg_drive_current:
             self._sensor.set_drive_current(self._reg_drive_current)
-        # both of these came from a tap on the old plate
+        # both of these came from the last tap
         self._tap_offset = 0.0
         self._clear_tap_gcode_adjustment()
-        self._z_not_homed()
+        if plate is not old:
+            self._z_not_homed()
 
         if copied:
             self._log_msg(
@@ -628,6 +629,8 @@ class ProbeEddy(EddyNgSensor):
                 f"EDDYng: plate is now '{plate.name}' (new, not calibrated; was '{old.name}'). Z is no longer homed. "
                 "Run PROBE_EDDY_NG_SETUP, then SAVE_CONFIG."
             )
+        elif plate is old:
+            self._log_msg(f"EDDYng: plate '{plate.name}' reloaded; cleared the offsets from the last tap.")
         else:
             self._log_msg(f"EDDYng: plate is now '{plate.name}' (was '{old.name}'). Z is no longer homed.")
 
@@ -1045,10 +1048,23 @@ class ProbeEddy(EddyNgSensor):
 
     cmd_CALIBRATE_help = (
         "Calibrate the eddy current sensor. Specify DRIVE_CURRENT to calibrate for a different drive current "
-        + "than the default. Specify START_Z to set a different calibration start point."
+        + "than the default, and USE_FOR=homing, tap or homing,tap to make the active plate use it. "
+        + "Specify START_Z to set a different calibration start point."
     )
 
+    # USE_FOR=homing, tap or homing,tap: what the active plate should use a
+    # newly calibrated drive current for
+    def _calibrate_use_for(self, gcmd: GCodeCommand) -> List[str]:
+        use_for = [u.strip().lower() for u in gcmd.get("USE_FOR", "").split(",") if u.strip()]
+        for u in use_for:
+            if u not in ("homing", "tap"):
+                raise gcmd.error(f"USE_FOR: unknown use '{u}' (use homing, tap or homing,tap)")
+        return use_for
+
     def cmd_CALIBRATE(self, gcmd: GCodeCommand):
+        # check this before the paper test rather than after it
+        self._calibrate_use_for(gcmd)
+
         if not self._xy_homed():
             raise self._printer.command_error("X and Y must be homed before calibrating")
 
@@ -1123,7 +1139,27 @@ class ProbeEddy(EddyNgSensor):
             return
 
         self._dc_to_fmap[drive_current] = mapping
+        use_for = self._calibrate_use_for(gcmd)
+        if "homing" in use_for:
+            self._plate.reg_drive_current = drive_current
+        if "tap" in use_for:
+            self._plate.tap_drive_current = drive_current
         self.save_config()
+
+        if use_for:
+            self._log_msg(f"Plate '{self._plate.name}' now uses drive current {drive_current} for {' and '.join(use_for)}.")
+            overridden = [
+                u
+                for u, dc in (("homing", self._tap_profile.reg_drive_current), ("tap", self._tap_profile.tap_drive_current))
+                if u in use_for and dc
+            ]
+            if overridden:
+                self._log_warning(
+                    f"Tap profile '{self._tap_profile.name}' sets its own drive current for {' and '.join(overridden)}, "
+                    "which is used instead while it's loaded."
+                )
+        if "homing" in use_for:
+            self.reset_drive_current()
         self._warn_tap_profile_uncalibrated()
 
         # reset the Z homing state after alibration
