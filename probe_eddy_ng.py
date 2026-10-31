@@ -988,19 +988,21 @@ class ProbeEddy:
                 self._reactor.pause(self._reactor.monotonic() + 0.050)
                 break
 
-        if sampler.height_count == 0:
+        if sampler.raw_count == 0:
             return ProbeEddyProbeResult([])
 
         etime = sampler.times[-1]
         stime = etime - duration
 
         first_idx = bisect.bisect_left(sampler.times, stime)
-        #self._log_msg(f"probe_static_height: len({len(sampler.times)}), first_idx: {first_idx}, stime: {stime} etime: {etime}")
-        if first_idx == len(sampler.times):
-            raise self._printer.command_error(f"No samples in time range (errors: {sampler.error_counts})")
+        times = np.asarray(sampler.times[first_idx:])
+        heights = np.asarray(sampler.heights[first_idx:])
+        valid = ~np.isnan(heights)
+        if not valid.any():
+            raise self._printer.command_error(f"No valid samples in time range (errors: {sampler.error_counts})")
 
         errors = sampler.error_count
-        return ProbeEddyProbeResult.make(sampler.times[first_idx:], sampler.heights[first_idx:], errors=errors)
+        return ProbeEddyProbeResult.make(times[valid], heights[valid], errors=errors)
 
     cmd_PROBE_help = "Probe the height using the eddy current sensor, moving the toolhead to the home trigger height, or Z if specified."
 
@@ -1361,16 +1363,10 @@ class ProbeEddy:
             first_sample_time = th.get_last_move_time()
             th.manual_move([None, None, z_target], probe_speed)
             last_sample_time = th.get_last_move_time()
-            # Can't use wait_for_sample_at_time here, because the tail end of
-            # samples might be errors so they won't be passed to the sampler.
-            # Should fix that, but for now just wait an extra half second which
-            # should be more than enough.
-            # sampler.wait_for_sample_at_time(last_sample_time)
-            th.dwell(0.500)
             th.wait_moves()
+            sampler.wait_for_sample_at_time(last_sample_time)
             sampler.finish()
 
-        # the samples are a list of [print_time, freq, dummy_height] tuples
         if sampler.raw_count == 0:
             return None, None, None, None
 
@@ -1382,6 +1378,8 @@ class ProbeEddy:
         for i in range(sampler.raw_count):
             s_t = sampler.times[i]
             s_freq = sampler.freqs[i]
+            if math.isnan(s_freq):
+                continue
             s_pos, s_v = self._get_trapq_position(s_t)
             s_z = s_pos[2]
             if first_sample_time < s_t < last_sample_time and s_z >= z_target:
@@ -1543,7 +1541,6 @@ class ProbeEddy:
         # are not "low amplitude"
         if now_height is None:
             ale_count = ahe_count = 0
-            status = self._sensor.latched_status_str()
             for i in range(5):
                 status = self._sensor.latched_status_str()
                 if "ALE" in status:
@@ -1767,10 +1764,13 @@ class ProbeEddy:
 
         trigger_freq = self.height_to_freq(self.params.home_trigger_height)
 
+        s_t = np.asarray(sampler.times)
         s_f = np.asarray(sampler.freqs)
         first_one = np.argmax(s_f >= trigger_freq)
-        s_t = np.asarray(sampler.times[first_one:])
-        s_f = np.asarray(sampler.freqs[first_one:])
+        # the firmware skips error samples, so the filter here does too
+        valid = ~np.isnan(s_f[first_one:])
+        s_t = s_t[first_one:][valid]
+        s_f = s_f[first_one:][valid]
 
         lowcut = self.params.tap_butter_lowcut
         highcut = self.params.tap_butter_highcut
@@ -2157,7 +2157,7 @@ class ProbeEddy:
         self._log_info("Eddy sampling finished")
         sampler = self._sampler
         self._sampler.finish()
-        gcmd.respond_info(f"Stopped stream ({len(sampler.times)} samples, {sampler.error_count} errors)")
+        gcmd.respond_info(f"Stopped stream ({len(sampler.times)} samples, of which {sampler.error_count} errors)")
 
 
 # Probe interface that does only scanning, no up/down movement.
@@ -2508,6 +2508,7 @@ class ProbeEddySampler:
         self.times = []
         self.raw_freqs = []
         self.accum_vals = []
+        # error samples are kept, with nan freqs and heights
         self.freqs = []
         self.heights = [] if self._fmap is not None else None
 
@@ -2516,10 +2517,6 @@ class ProbeEddySampler:
     @property
     def raw_count(self):
         return len(self.times)
-
-    @property
-    def height_count(self):
-        return len(self.heights) if self.heights else 0
 
     # this is just a handy way to communicate values between different parts of the system,
     # specifically to record things like trigger times for plotting
@@ -2539,26 +2536,13 @@ class ProbeEddySampler:
     # bulk sample callback for when new data arrives
     # from the probe
     def _add_hw_data(self, data: ldc1612_ng.LDC1612_ng_sample_data):
-        has_errors = False
+        self.times.extend(data.times)
+        self.raw_freqs.extend(data.raw_freqs)
+        self.accum_vals.extend(data.accum_vals)
+
         for rf in data.raw_freqs:
-            if (rf >> 28) != 0:
-                has_errors = True
-                break
-
-        if not has_errors:
-            self.times.extend(data.times)
-            self.raw_freqs.extend(data.raw_freqs)
-            self.accum_vals.extend(data.accum_vals)
-            return
-
-        for i in range(len(data.times)):
-            rf = data.raw_freqs[i]
             err = rf >> 28
-            if err == 0:
-                self.times.append(data.times[i])
-                self.raw_freqs.append(rf)
-                self.accum_vals.append(data.accum_vals[i])
-            else:
+            if err != 0:
                 self._errors += 1
                 for i in range(4):
                     if err & (1 << i) != 0:
@@ -2601,7 +2585,9 @@ class ProbeEddySampler:
         conv_add, conv_mul = self._sensor.freqval_conversion_values()
 
         start_idx = len(self.freqs)
-        freqs_np = (np.asarray(self.raw_freqs[start_idx:]) + conv_add) * conv_mul
+        raw = np.asarray(self.raw_freqs[start_idx:], dtype=np.int64)
+        freqs_np = (raw + conv_add) * conv_mul
+        freqs_np[(raw >> 28) != 0] = np.nan
         self.freqs.extend(freqs_np.tolist())
 
         if self._fmap is not None:
@@ -2616,21 +2602,22 @@ class ProbeEddySampler:
     def error_counts(self):
         return list(self._error_counts)
 
-    # get the last sampled height
-    def get_last_height(self) -> float:
+    # wait for a valid sample from the current time on and get its height,
+    # or None if there isn't one within max_wait_time
+    def get_height_now(self, max_wait_time=1.000) -> Optional[float]:
         if self.heights is None:
             raise self._printer.command_error("ProbeEddySampler: no height mapping")
-        self._update_samples()
-        if len(self.heights) == 0:
-            raise self._printer.command_error("ProbeEddySampler: no samples")
-        return self.heights[-1]
-
-    # wait for a sample for the current time and get a new height
-    def get_height_now(self) -> Optional[float]:
-        now = self.eddy._print_time_now()
-        if not self.wait_for_sample_at_time(now, max_wait_time=1.000, raise_error=False):
-            return None
-        return self.get_last_height()
+        wait_start = sample_time = self.eddy._print_time_now()
+        while True:
+            remaining = max_wait_time - (self.eddy._print_time_now() - wait_start)
+            if remaining <= 0.0 or not self.wait_for_sample_at_time(sample_time, max_wait_time=remaining, raise_error=False):
+                return None
+            self._update_samples()
+            height = self.heights[-1]
+            if not math.isnan(height):
+                return height
+            # an error sample; wait for the next one
+            sample_time = math.nextafter(self.times[-1], math.inf)
 
     # Wait until a sample for the given time arrives
     def wait_for_sample_at_time(self, sample_print_time, max_wait_time=0.250, raise_error=True) -> bool:
@@ -2704,13 +2691,13 @@ class ProbeEddySampler:
                 i += 1
             iend = i
 
-            if istart == iend:
-                # no samples in this range
-                self.eddy._log_msg(f"Warning: no samples in time range {iv_start}-{iv_end}")
+            iv_heights = heights[istart:iend]
+            iv_heights = iv_heights[~np.isnan(iv_heights)]
+            if len(iv_heights) == 0:
+                self.eddy._log_msg(f"Warning: no valid samples in time range {iv_start}-{iv_end}")
                 interval_heights.append(math.nan)
             else:
-                median = np.median(heights[istart:iend])
-                interval_heights.append(float(median))
+                interval_heights.append(float(np.median(iv_heights)))
 
         return interval_heights
 
@@ -2740,10 +2727,11 @@ class ProbeEddySampler:
         while end_idx < len(self.times) and self.times[end_idx] < end_time:
             end_idx += 1
 
-        # average the heights of the samples in the range
-        heights = self.heights[start_idx:end_idx]
+        # average the heights of the valid samples in the range
+        heights = np.asarray(self.heights[start_idx:end_idx])
+        heights = heights[~np.isnan(heights)]
         if len(heights) == 0:
-            raise self._printer.command_error(f"no samples between time {start_time:.1f} and {end_time:.1f}!")
+            raise self._printer.command_error(f"no valid samples between time {start_time:.1f} and {end_time:.1f}!")
         hmin, hmax = np.min(heights), np.max(heights)
         mean = np.mean(heights)
         median = np.median(heights)

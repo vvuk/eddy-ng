@@ -203,6 +203,8 @@ class BigfootProbe:
 
                 np_times = np.asarray(sampler.times)
                 np_rf = np.asarray(sampler.freqs)
+                valid = ~np.isnan(np_rf)
+                np_times, np_rf = np_times[valid], np_rf[valid]
                 np_pos = np.asarray([self.eddy._get_trapq_position(t)[0][axindex] for t in np_times])
 
                 write_debug(axis)
