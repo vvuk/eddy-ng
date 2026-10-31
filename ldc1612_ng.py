@@ -418,7 +418,6 @@ class LDC1612_ng:
     ):
         MODES = {
             "home": HOME_MODE_HOME,
-            "wma": HOME_MODE_WMA,
             "sos": HOME_MODE_SOS,
         }
         mode_val = MODES.get(mode.lower(), None)

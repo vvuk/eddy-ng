@@ -199,8 +199,8 @@ class ProbeEddyParams:
     # the case of a failed tap. A value like -0.250 is no worse than moving the
     # nozzle down one or two notches too far when doing manual Z adjustment.
     tap_target_z: float = -0.250
-    # the tap mode to use. 'wma' is a derivative of weighted moving average,
-    # 'butter' is a butterworth filter
+    # the tap mode to use. 'butter' is a butterworth filter, and is the
+    # only mode currently supported by the firmware.
     tap_mode: str = "butter"
     # The threshold at which to detect a tap. This value is raw sensor value
     # specific. A good value can be obtained by running [....] and examining
@@ -291,7 +291,7 @@ class ProbeEddyParams:
         return self.tap_butter_lowcut == 5.0 and self.tap_butter_highcut == 25.0 and self.tap_butter_order == 2
 
     def load_from_config(self, config: ConfigWrapper):
-        mode_choices = ["wma", "butter"]
+        mode_choices = ["butter"]
 
         self.probe_speed = config.getfloat("probe_speed", self.probe_speed, above=0.0)
         self.lift_speed = config.getfloat("lift_speed", self.lift_speed, above=0.0)
@@ -323,11 +323,10 @@ class ProbeEddyParams:
         self.tap_adjust_z = config.getfloat("tap_adjust_z", self.tap_adjust_z)
         self.calibration_points = config.getint("calibration_points", self.calibration_points)
 
+        if config.get("tap_mode", self.tap_mode).lower() == "wma":
+            raise config.error("ProbeEddy: tap_mode 'wma' is no longer supported; remove tap_mode (and tap_threshold) to use 'butter'")
         self.tap_mode = config.getchoice("tap_mode", mode_choices, self.tap_mode)
-        default_tap_threshold = 1000.0  # for wma
-        if self.tap_mode == "butter":
-            default_tap_threshold = 250.0
-        self.tap_threshold = config.getfloat("tap_threshold", default_tap_threshold)
+        self.tap_threshold = config.getfloat("tap_threshold", 250.0)
 
         self.scan_sample_time = config.getfloat("scan_sample_time", self.scan_sample_time, above=0.0)
         self.scan_sample_time_delay = config.getfloat("scan_sample_time_delay", self.scan_sample_time_delay, minval=0.0)
@@ -382,7 +381,7 @@ class ProbeEddyParams:
 
         if need_scipy and not scipy:
             raise printer.config_error(
-                "ProbeEddy: butter mode with custom filter parameters requires scipy, which is not available; please install scipy, use the defaults, or use wma mode"
+                "ProbeEddy: butter mode with custom filter parameters requires scipy, which is not available; please install scipy or use the defaults"
             )
 
 
@@ -1855,7 +1854,7 @@ class ProbeEddy:
         write_plot_arg: int = gcmd.get_int("PLOT", None)
 
         mode: str = gcmd.get("MODE", self.params.tap_mode).lower()
-        if mode not in ("wma", "butter"):
+        if mode != "butter":
             raise self._printer.command_error(f"Invalid mode: {mode}")
 
         # if the mode is different than the params, then require
@@ -2517,8 +2516,6 @@ class ProbeEddyEndstopWrapper:
                 for i in range(len(sos)):
                     self.eddy._sensor.set_sos_section(i, sos[i])
                 mode = "sos"
-            elif self.tap_config.mode == "wma":
-                mode = "wma"
             else:
                 raise self._printer.command_error(f"Invalid tap mode: {self.tap_config.mode}")
             tap_threshold = self.tap_config.threshold
