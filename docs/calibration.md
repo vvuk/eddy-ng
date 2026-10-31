@@ -55,7 +55,11 @@ Calibration is staged but not saved yet. First check it:
 1. Run `PROBE_EDDY_NG_PROBE_STATIC` (`PEPS`). You should get a plausible height.
 2. Home Z.
 
-   > ⚠️ Make sure `[stepper_z]` uses `endstop_pin: probe:z_virtual_endstop`, and that the probe is over the bed when Z homes (see [Safety](safety.md)). Watch the printer the first time and be ready to hit the emergency stop.
+   > ⚠️ Homing uses the "virtual Z endstop" feature. Make sure that your Z stepper's endstop is set to `endstop_pin: probe:z_virtual_endstop`, otherwise homing will not use the eddy device and you may experience a nozzle crash if there is no other functioning endstop.
+
+   > ⚠️ You must have `safe_z_home` or a `homing_override` set up to move your toolhead to be over the bed before doing a Z home. The sensor needs metal underneath it, and if you try to home at 0,0 you'll have a bad time depending on the location of your sensor. See [Safety](safety.md#safe-homing).
+
+   ***⚠️ Watch your printer the first time and be ready to hit the e-stop or pull the power in case something goes wrong! If homing fails, your printer will keep trying to push your toolhead through your build plate.***
 
    ```
    G28 Z
@@ -72,7 +76,7 @@ If homing fails with sensor errors, see [Troubleshooting](troubleshooting.md#sen
 
 1. `PROBE_EDDY_NG_PROBE_STATIC` is accurate from 1mm to 3mm, and close up to 5mm.
 2. `PROBE_EDDY_NG_PROBE_ACCURACY` reports small deviations.
-3. With QGL or Z tilt set up as in [Safety](safety.md), `QUAD_GANTRY_LEVEL` or `Z_TILT_ADJUST` succeeds.
+3. Make sure you have `QUAD_GANTRY_LEVEL` or `Z_TILT_ADJUST` set up according to the instructions in [Safety](safety.md#quad-gantry-leveling) to avoid potential nozzle crashes, then check that it succeeds.
 4. `BED_MESH_CALIBRATE METHOD=rapid_scan` succeeds.
 
 Then set up [Tap](tap.md).

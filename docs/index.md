@@ -8,12 +8,12 @@ Eddy current probes are precise, but their readings drift as the conductivity of
 
 1. **Calibrate** once, at any temperature.
 2. **Home Z** with the sensor. This is a coarse home: good enough for homing, gantry leveling and other preparation, but not for printing.
-3. **Tap** just before printing, with the bed at print temperature and the nozzle warm (but not hot enough to ooze). The nozzle touches the bed, which sets Z precisely.
+3. **Tap** just before printing, with the bed at print temperature and the nozzle warm (but not hot -- you don't want filament drooling or damage to your build plate). The nozzle touches the bed, which sets Z precisely.
 4. At the same time, eddy-ng records the difference between the real height and what the sensor reads at that height. Bed meshes use this offset to correct for temperature drift.
 
 The tap makes contact with the bed. By default it never goes below Z=-0.250 (relative to the homed zero), which is no worse than jogging Z one notch too far. A successful tap stops as soon as contact is detected, usually well above that.
 
-> 🛑 Read [Safety](safety.md) before homing. Without the right `quad_gantry_level`/`z_tilt` and homing setup, the toolhead can crash into the bed.
+> 🛑 Make sure that you read the [quad gantry leveling](safety.md#quad-gantry-leveling) and [Z tilt adjust](safety.md#z-tilt-adjust) sections in [Safety](safety.md). Failure to set this up can cause your toolhead to crash into your build plate during these operations! Also read [safe homing](safety.md#safe-homing) before homing for the first time.
 
 ## Requirements
 

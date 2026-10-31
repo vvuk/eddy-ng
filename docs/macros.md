@@ -2,7 +2,7 @@
 
 ## Homing
 
-> ⚠️ Use `safe_z_home` or a `homing_override` to move the probe over the bed before homing Z (see [Safety](safety.md#homing)).
+> ⚠️ You must have `safe_z_home` or a `homing_override` set up to move your toolhead to be over the bed before doing a Z home. The sensor needs metal underneath it, and if you try to home at 0,0, you'll have a bad time depending on the location of your sensor. See [Safety](safety.md#safe-homing).
 
 A plain `G28 Z` works. For a slightly more precise home, re-read the height at the home trigger height after homing, e.g. in a `homing_override`:
 

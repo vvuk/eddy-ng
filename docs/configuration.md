@@ -33,7 +33,7 @@ These can also be set per [tap profile](profiles.md#tap-profiles), except `tap_t
 
 - `tap_drive_current`: the drive current for tap. Defaults to `reg_drive_current`. It needs its own calibration; `SETUP` saves the value it picks.
 - `tap_start_z: 3.0`: the height each tap starts from. The tap drive current must be able to read from here down to `tap_target_z`.
-- `tap_target_z: -0.250`: the lowest Z a tap moves to. If no tap is detected by then, the tap fails. Don't set this much lower: in a failed tap, the nozzle is pushed this far into the bed.
+- `tap_target_z: -0.250`: the lowest Z a tap moves to. If no tap is detected by then, the tap fails. Do not set this very low, as it will cause your toolhead to try to push through your build plate in the case of a failed tap. A value like -0.250 is no worse than moving the nozzle down one or two notches too far when doing manual Z adjustment.
 - `tap_threshold: 250`: how far (in Hz) the filtered signal must drop from its last peak to detect a tap. Lower is more sensitive but can trigger before contact. See [Tuning](tap.md#tuning).
 - `tap_speed: 3.0`: the speed of the tap move. The toolhead keeps moving briefly after the tap is detected, so keep this low.
 - `tap_adjust_z: 0.0`: added to the tap height. Positive values raise the nozzle. See [Adjusting tap Z](tap.md#adjusting-tap-z).

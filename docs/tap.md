@@ -12,7 +12,7 @@ With X, Y and Z homed, and the nozzle clean:
 PROBE_EDDY_NG_TAP
 ```
 
-This taps 3 to 5 times at the current position (see `tap_samples` in the [configuration reference](configuration.md#tap)). Each tap moves down at 3mm/s toward `tap_target_z` (-0.250 by default), stopping as soon as contact is detected. To be extra careful the first time, try `TARGET_Z=-0.100` or `SAMPLES=1`.
+This taps 3 to 5 times at the current position (see `tap_samples` in the [configuration reference](configuration.md#tap)). Each tap moves down at 3mm/s toward `tap_target_z` (-0.250 by default), stopping as soon as contact is detected. This will make contact with your build plate, at most down to `tap_target_z`. The risk of build plate or nozzle damage is minimal, but if you're concerned you can experiment with `TARGET_Z=-0.100`. You can also specify `SAMPLES=1` to only do one sample.
 
 When it succeeds, tap:
 

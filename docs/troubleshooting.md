@@ -61,13 +61,13 @@ The toolhead reached `tap_target_z` (-0.250 by default) without detecting a tap.
 1. the tap threshold is too high to detect the tap in time, or
 2. the calibration is off, and the real Z=0 is below `tap_target_z`.
 
-To check the second: put paper under the nozzle, move to Z=0, then step down by 0.1 until the paper can't move. If that's below `tap_target_z`, recalibrate, or lower `tap_target_z` (which allows more nozzle contact with the bed).
+To check the second: put paper under the nozzle, move to Z=0, then step down by 0.1 until the paper can't move. If that's below `tap_target_z`, you can redo calibration, or you can set a lower `tap_target_z`; but be aware that this increases the amount of nozzle-build plate contact.
 
 Otherwise, look at the [tap graph](tap.md#tap-graph) to see what's happening with the threshold.
 
 ### "Tap detected too close to target z"
 
-`tap_target_z` is where each tap is told to move to, and the move stops when contact is detected. It's a safety limit: the toolhead should always have made solid contact before getting there.
+`tap_target_z` is where each tap is told to move to, and the move stops when contact is detected. It acts as a final safety stop: "this is the lowest position the toolhead is told to move to, so if something bad happens, we're not going to keep grinding the toolhead into the plate". Set it so that if the toolhead gets moved to this Z coordinate, it will absolutely have made solid contact with the build plate before it gets there.
 
 Tap detects contact as the toolhead slowing down while the steppers keep moving. But the toolhead also slows down at the end of every move. A tap detected right at the end of the move can't be told apart from that deceleration, so it's rejected.
 
