@@ -1768,7 +1768,7 @@ class ProbeEddy:
 
                 # If just sensor errors, let the caller handle it
                 self._log_error(f"Tap failed with Z at {finish_z:.3f}: {err}")
-                if "Sensor error" or "Probe completed movement" or "Probe triggered prior" in str(err):
+                if any(m in str(err) for m in ("Sensor error", "Probe completed movement", "Probe triggered prior")):
                     return ProbeEddy.TapResult(
                         error=err,
                         toolhead_z=finish_z,
