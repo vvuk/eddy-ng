@@ -18,7 +18,7 @@ import time
 import numpy as np
 import numpy.polynomial as npp
 
-from functools import cmp_to_key
+
 
 
 from dataclasses import dataclass, field
@@ -3026,19 +3026,16 @@ class BedMeshScanHelper:
         self._x_offset = self._eddy.params.x_offset
         self._y_offset = self._eddy.params.y_offset
 
-        self._mesh_points, self._mesh_path = self._generate_path()
+        self._mesh_path = self._generate_path()
 
+    # A serpentine path: rows from min_y to max_y, alternating direction
     def _generate_path(self):
         x_vals = np.linspace(self._x_min, self._x_max, self._x_points)
         y_vals = np.linspace(self._y_min, self._y_max, self._y_points)
         path = []
-        reverse = False
-
-        for y in y_vals:
-            row = [(x, y, True) for x in (reversed(x_vals) if reverse else x_vals)]
-            path.extend(row)
-            reverse = not reverse
-        return path, path
+        for j, y in enumerate(y_vals):
+            path.extend((x, y) for x in (x_vals[::-1] if j % 2 else x_vals))
+        return path
 
     def _scan_path(self):
         th = self._eddy._toolhead
@@ -3054,38 +3051,11 @@ class BedMeshScanHelper:
         return times
 
     def _set_bed_mesh(self, heights):
-        # heights is in the order of the _mesh_path points; convert to
-        # be ordered min_y..max_y, min_x..max_x, then pull out the heights
-        indexed_points = []
-        i = 0
-        for x, y, include in self._mesh_path:
-            if not include:
-                continue
-            indexed_points.append((x, y, i))
-            i += 1
-
-        def sort_points(a, b):
-            if a[1] < b[1]:  # y first
-                return -1
-            if a[1] > b[1]:
-                return 1
-            if a[0] < b[0]:  # then x
-                return -1
-            if a[0] > b[0]:
-                return 1
-            return 0
-
-        indices = [ki for _, _, ki in sorted(indexed_points, key=cmp_to_key(sort_points))]
-
-        ki = 0
-        matrix = []
-        for _ in range(self._y_points):
-            row = []
-            for _ in range(self._x_points):
-                v = heights[indices[ki]]
-                row.append(self._scan_z - v)
-                ki += 1
-            matrix.append(row)
+        # heights is in _mesh_path order; undo the serpentine so rows go
+        # min_y..max_y and each row min_x..max_x
+        matrix = self._scan_z - np.asarray(heights, dtype=float).reshape(self._y_points, self._x_points)
+        matrix[1::2] = matrix[1::2, ::-1]
+        matrix = matrix.tolist()
 
         # heights may have NaNs in them if there were no samples during a point's
         # scan time; fill these in with the average of the valid adjacent points
@@ -3148,10 +3118,10 @@ class BedMeshScanHelper:
 
             with open("/tmp/mesh.csv", "w") as mfile:
                 mfile.write("time,x,y,z\n")
-                for i in range(len(self._mesh_points)):
+                for i in range(len(self._mesh_path)):
                     t = path_times[i]
-                    x = self._mesh_points[i][0]
-                    y = self._mesh_points[i][1]
+                    x = self._mesh_path[i][0]
+                    y = self._mesh_path[i][1]
                     z = heights[i]
                     mfile.write(f"{t},{x},{y},{z}\n")
 
