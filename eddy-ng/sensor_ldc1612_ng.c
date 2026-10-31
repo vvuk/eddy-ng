@@ -122,11 +122,14 @@ struct sosfilter_sos {
     float sos[MAX_SOS_SECTIONS*6];
 };
 
+// The filter runs on raw sample values relative to the last sample before
+// the filter started (an exact integer difference, then converted to float),
+// so the tap threshold is in raw sample units; the host scales it from Hz.
 struct ldc1612_ng_homing_sos_tap {
     float state[MAX_SOS_SECTIONS*4];
     float tap_threshold;
 
-    float frequency_offset;
+    uint32_t data_offset;
     float tap_start_value;
     float last_value;
 };
@@ -165,11 +168,6 @@ struct ldc1612_ng {
     struct timer timer;
     struct i2cdev_s *i2c;
     struct gpio_in intb_pin;
-
-    uint8_t product;
-    uint32_t sensor_fref;
-    float sensor_mul;
-    float sensor_off;
 
     uint32_t rest_ticks;
     uint8_t flags;
@@ -346,7 +344,7 @@ flush_buffer(struct ldc1612_ng *ld, uint8_t oid)
 }
 
 static void
-config_ldc1612_ng(uint32_t oid, uint32_t i2c_oid, uint8_t product, int32_t intb_pin, uint16_t in_div, uint16_t ref_div)
+config_ldc1612_ng(uint32_t oid, uint32_t i2c_oid, uint8_t product, int32_t intb_pin)
 {
     dprint2("EDDYng cfg o=%u i=%u b=%d", oid, i2c_oid, intb_pin);
 
@@ -358,20 +356,15 @@ config_ldc1612_ng(uint32_t oid, uint32_t i2c_oid, uint8_t product, int32_t intb_
         ld->intb_pin = gpio_in_setup(intb_pin, 1);
         ld->flags = LDC_HAVE_INTB;
     }
-    ld->product = product;
 
     switch (product) {
     case PRODUCT_UNKNOWN:
     case PRODUCT_BTT_EDDY:
-        ld->sensor_fref = 12000000 / ref_div;
-        break;
     case PRODUCT_MELLOW_FLY:
-        ld->sensor_fref = 40000000 / ref_div;
+    case PRODUCT_LDC1612_INTERNAL_CLK:
         break;
 #if SUPPORT_CARTOGRAPHER
     case PRODUCT_CARTOGRAPHER:
-        ld->sensor_fref = 24000000 / ref_div;
-
         // The Cartographer hardware uses a timer in the STM32F0
         // to generate a 24MHz reference clock for the ldc1612.
         // Uses a new _with_max setup here because otherwise we
@@ -397,45 +390,25 @@ config_ldc1612_ng(uint32_t oid, uint32_t i2c_oid, uint8_t product, int32_t intb_
         // pull that out on the python side.
         break;
 #endif
-    case PRODUCT_LDC1612_INTERNAL_CLK:
-        ld->sensor_fref = 43400000.0f / ref_div;
-        break;
     default:
         shutdown("ldc1612_ng: unknown product");
     }
-
-    float freq_conv = (float)ld->sensor_fref * (float)in_div;
-    ld->sensor_mul = freq_conv / (float)(1<<28);
-    ld->sensor_off = 0.0; // assume 0 for now, tbd
 }
 
 void
 command_config_ldc1612_ng(uint32_t *args)
 {
-    uint32_t oid = args[0];
-    uint32_t i2c_oid = args[1];
-    uint8_t product = args[2];
-    uint16_t in_div = args[3];
-    uint16_t ref_div = args[4];
-
-    config_ldc1612_ng(oid, i2c_oid, product, -1, in_div, ref_div);
+    config_ldc1612_ng(args[0], args[1], args[2], -1);
 }
-DECL_COMMAND(command_config_ldc1612_ng, "config_ldc1612_ng oid=%c i2c_oid=%c product=%i in_div=%hu ref_div=%hu");
+DECL_COMMAND(command_config_ldc1612_ng, "config_ldc1612_ng oid=%c i2c_oid=%c product=%i");
 
 void
 command_config_ldc1612_ng_with_intb(uint32_t *args)
 {
-    uint32_t oid = args[0];
-    uint32_t i2c_oid = args[1];
-    uint8_t product = args[2];
-    uint16_t in_div = args[3];
-    uint16_t ref_div = args[4];
-    uint32_t intb_pin = args[5];
-
-    config_ldc1612_ng(oid, i2c_oid, product, intb_pin, in_div, ref_div);
+    config_ldc1612_ng(args[0], args[1], args[2], args[3]);
 }
 DECL_COMMAND(command_config_ldc1612_ng_with_intb,
-             "config_ldc1612_ng_with_intb oid=%c i2c_oid=%c product=%i in_div=%hu ref_div=%hu intb_pin=%c");
+             "config_ldc1612_ng_with_intb oid=%c i2c_oid=%c product=%i intb_pin=%c");
 
 void
 command_query_ldc1612_ng_latched_status(uint32_t *args)
@@ -528,7 +501,7 @@ command_ldc1612_ng_setup_home(uint32_t *args)
     uint32_t start_freq = args[5];
     uint32_t start_time = args[6];
     uint8_t mode = args[7];
-    int32_t tap_threshold = args[8];
+    uint32_t tap_threshold_bits = args[8];
     uint8_t err_max = args[9];
 
     if (trigger_freq == 0 || trsync_oid == 0) {
@@ -570,7 +543,8 @@ command_ldc1612_ng_setup_home(uint32_t *args)
         dprint2("setup home sf=%u tf=%u", start_freq, trigger_freq);
         break;
     case HOME_MODE_SOS:
-        lh->sos_tap.tap_threshold = tap_threshold / 65536.0f;
+        // a float, in raw sample units
+        memcpy(&lh->sos_tap.tap_threshold, &tap_threshold_bits, sizeof(float));
         dprint2("setup sos sf=%u tf=%u tap=%f", start_freq, trigger_freq, lh->sos_tap.tap_threshold);
         break;
     default:
@@ -581,7 +555,7 @@ DECL_COMMAND(command_ldc1612_ng_setup_home,
              "ldc1612_ng_setup_home oid=%c"
              " trsync_oid=%c trigger_reason=%c other_reason_base=%c"
              " trigger_freq=%u start_freq=%u start_time=%u"
-             " mode=%c tap_threshold=%i err_max=%c");
+             " mode=%c tap_threshold_raw=%u err_max=%c");
 
 //
 // Once homing has finished, call this to clear the homing state and
@@ -789,22 +763,22 @@ check_sos_tap(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
     if (!check_error(ld, data, time))
         return;
 
-    float freq = data * ld->sensor_mul + ld->sensor_off;
-
-    // We need to offset the frequencies by the first
+    // We need to offset the values by the first
     // one we feed to the filter so we don't get a crazy
     // response at the start.
 
     // if we haven't even hit the safe_start_freq
     if (lh->homing_trigger_freq != 0) {
-        sos_tap->frequency_offset = freq;
+        sos_tap->data_offset = data;
         if (check_safe_start(ld, data, time))
             shutdown("bug"); // this should never return true in here
         return;
     }
 
-    float val = sosfilter(freq - sos_tap->frequency_offset, &ld->sos_filter, sos_tap->state);
-    //dprint("%f,%f", freq, val);
+    // error bits are clear (check_error), so these are 28-bit values and
+    // the difference is exact
+    float val = sosfilter((float)(int32_t)(data - sos_tap->data_offset),
+                          &ld->sos_filter, sos_tap->state);
 
     // this is the second threshold; but we want to feed the filter values
     // before this to avoid the initial impulse response
@@ -819,7 +793,7 @@ check_sos_tap(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
         if (diff >= sos_tap->tap_threshold) {
             lh->trigger_time = time;
             notify_trigger(ld, ld->success_reason);
-            dprint2("tap st=%u tt=%u l=%f (f=%f)", lh->tap_start_time, time, sos_tap->tap_start_value - val, freq);
+            dprint2("tap st=%u tt=%u l=%f (d=%u)", lh->tap_start_time, time, sos_tap->tap_start_value - val, data);
             return;
         }
     } else if (val > sos_tap->last_value) {

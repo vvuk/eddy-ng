@@ -64,6 +64,13 @@ HOME_MODE_SOS = 3
 # should match sensor_ldc1612_ng.c
 START_FLAG_SEND_FILTER_VALUE = 1 << 0
 
+SETUP_HOME_CMD = (
+    "ldc1612_ng_setup_home oid=%c"
+    " trsync_oid=%c trigger_reason=%c other_reason_base=%c"
+    " trigger_freq=%u start_freq=%u start_time=%u"
+    " mode=%c tap_threshold_raw=%u err_max=%c"
+)
+
 # ldc1612_ng_data sample layouts by fmt: mcu clock, raw value[, filter value]
 DATA_FORMATS = {
     0: "<II",
@@ -316,17 +323,11 @@ class LDC1612_ng:
             if pin_params["chip"] != mcu:
                 raise config.error("ldc1612 intb_pin must be on same mcu")
             mcu.add_config_cmd(
-                "config_ldc1612_ng_with_intb oid=%d i2c_oid=%d product=%i in_div=%hu ref_div=%hu intb_pin=%s"
-                % (
-                    oid,
-                    self._i2c.get_oid(),
-                    self._device_product,
-                        self._ldc_fin_divider, self._ldc_fref_divider,
-                    pin_params["pin"],
-                )
+                "config_ldc1612_ng_with_intb oid=%d i2c_oid=%d product=%i intb_pin=%s"
+                % (oid, self._i2c.get_oid(), self._device_product, pin_params["pin"])
             )
         else:
-            mcu.add_config_cmd("config_ldc1612_ng oid=%d i2c_oid=%d product=%i in_div=%hu ref_div=%hu" % (oid, self._i2c.get_oid(), self._device_product, self._ldc_fin_divider, self._ldc_fref_divider))
+            mcu.add_config_cmd("config_ldc1612_ng oid=%d i2c_oid=%d product=%i" % (oid, self._i2c.get_oid(), self._device_product))
 
         # Make sure the sensor is stopped on restart
         mcu.add_config_cmd(
@@ -411,12 +412,12 @@ class LDC1612_ng:
     def _build_config(self):
         cmdqueue = self._i2c.get_command_queue()
 
-        # Older firmware silently accepts the new config command (extra params are
-        # ignored) but never sends ldc1612_ng_data, so check for it explicitly,
-        # along with the most recent protocol change.
+        # Check for the most recent protocol changes explicitly, so that old
+        # firmware gets a clear message instead of an obscure failure later.
         for cmd in (
-            "config_ldc1612_ng oid=%c i2c_oid=%c product=%i in_div=%hu ref_div=%hu",
+            "config_ldc1612_ng oid=%c i2c_oid=%c product=%i",
             "ldc1612_ng_start_stop oid=%c rest_ticks=%u flags=%c",
+            SETUP_HOME_CMD,
         ):
             if self._mcu.try_lookup_command(cmd) is None:
                 raise self.printer.config_error(
@@ -432,13 +433,7 @@ class LDC1612_ng:
             cq=cmdqueue,
         )
 
-        self._ldc1612_ng_setup_home_cmd = self._mcu.lookup_command(
-            "ldc1612_ng_setup_home oid=%c"
-            " trsync_oid=%c trigger_reason=%c other_reason_base=%c"
-            " trigger_freq=%u start_freq=%u start_time=%u mode=%c tap_threshold=%i"
-            " err_max=%c",
-            cq=cmdqueue,
-        )
+        self._ldc1612_ng_setup_home_cmd = self._mcu.lookup_command(SETUP_HOME_CMD, cq=cmdqueue)
 
         self._ldc1612_ng_finish_home_cmd = self._mcu.lookup_query_command(
             "ldc1612_ng_finish_home oid=%c",
@@ -576,13 +571,16 @@ class LDC1612_ng:
         t_freqvl = self.to_ldc_freqval(trigger_freq)
         s_freqval = self.to_ldc_freqval(start_freq)
         start_time_mcu = self._mcu.print_time_to_clock(start_time) if start_time > 0 else 0
-        tap_threshold_val = int(tap_threshold * 65536.0) if tap_threshold is not None else 0
+        # The firmware filters raw sample values, so it wants the threshold
+        # (given in Hz) in raw units, as float bits
+        tap_threshold_raw = tap_threshold / self.freqval_conversion_values()[1] if tap_threshold is not None else 0.0
+        tap_threshold_val = struct.unpack("<I", struct.pack("<f", tap_threshold_raw))[0]
 
         if self._verbose:
             logging.info(
                 f"LDC1612_ng setup_home: {mode} trigger: {trigger_freq:.2f} ({t_freqvl}) "
                 f"safe: {start_freq:.2f} ({s_freqval}) @ {start_time:.2f} ({start_time_mcu}) "
-                f"trsync: {trsync_oid} {hit_reason} {other_reason_base} TAP: {tap_threshold} ({tap_threshold_val:x})"
+                f"trsync: {trsync_oid} {hit_reason} {other_reason_base} TAP: {tap_threshold} ({tap_threshold_raw:.1f} raw)"
             )
 
         self._ldc1612_ng_setup_home_cmd.send(
@@ -827,6 +825,8 @@ class LDC1612_ng:
         times: list[float] = []
         values: list[int] = []
         accum_values: list[float] = []
+        # the firmware's filter value is in raw sample units
+        filter_scale = self.freqval_conversion_values()[1]
 
         for seq, overflows, fmt, data_raw in pending_data:
             if overflows > 0:
@@ -849,7 +849,7 @@ class LDC1612_ng:
                 times.append(self._clock32_to_print_time(sample[0]))
                 values.append(sample[1])
                 # the filter value is only sent when requested (for plotting)
-                accum_values.append(sample[2] if len(sample) > 2 else math.nan)
+                accum_values.append(sample[2] * filter_scale if len(sample) > 2 else math.nan)
 
         if self._time_fit is not None:
             times = self._time_fit.add_reads(times)
