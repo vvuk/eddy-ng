@@ -98,7 +98,7 @@ def install_klipper(target_dir: str, uninstall: bool, copy: bool):
 
         if copy:
             print(f"Copying {src_file} to {dest_dir}/")
-            shutil.copyfile(src_file, dest_file)
+            shutil.copyfile(src_path, dest_file)
         else:
             link_path = os.path.relpath(os.path.realpath(src_path), dest_path)
             print(f"Linking {link_path} to {dest_dir}/")
