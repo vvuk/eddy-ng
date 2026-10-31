@@ -128,20 +128,20 @@ class ProbeEddy:
         self._full_name = config.get_name()
         self._name = self._full_name.split()[-1]
 
-        sensors = {
-            "ldc1612": ldc1612_ng.LDC1612_ng,
-            "btt_eddy": ldc1612_ng.LDC1612_ng,
-            "cartographer": ldc1612_ng.LDC1612_ng,
-            "mellow_fly": ldc1612_ng.LDC1612_ng,
-            "ldc1612_internal_clk": ldc1612_ng.LDC1612_ng,
-        }
-        sensor_type = config.getchoice("sensor_type", {s: s for s in sensors})
-
         self.params = ProbeEddyParams()
         self.params.load_from_config(config)
 
-        self._sensor_type = sensor_type
-        self._sensor = sensors[sensor_type](config, name=self._name, primary=self.params.primary)
+        # drive currents saved by older versions
+        old_saved_reg_drive_current = config.getint("saved_reg_drive_current", 0, minval=0, maxval=31)
+        old_saved_tap_drive_current = config.getint("saved_tap_drive_current", 0, minval=0, maxval=31)
+
+        self._sensor = ldc1612_ng.LDC1612_ng(
+            config,
+            name=self._name,
+            primary=self.params.primary,
+            drive_current=self.params.reg_drive_current or old_saved_reg_drive_current,
+            debug=self.params.debug,
+        )
         self._mcu = self._sensor.get_mcu()
         self._toolhead: ToolHead = None  # filled in _handle_connect
         self._trapq = None
@@ -185,11 +185,7 @@ class ProbeEddy:
         self._saved_reg_drive_current = asfc.getint(self._full_name, "reg_drive_current", fallback=None)
         self._saved_tap_drive_current = asfc.getint(self._full_name, "tap_drive_current", fallback=None)
 
-        # in case there's legacy drive currents
-        old_saved_reg_drive_current = asfc.getint(self._full_name, "saved_reg_drive_current", fallback=0)
-        old_saved_tap_drive_current = asfc.getint(self._full_name, "saved_tap_drive_current", fallback=0)
-
-        self._reg_drive_current = self.params.reg_drive_current or old_saved_reg_drive_current or self._sensor._drive_current
+        self._reg_drive_current = self._sensor.get_drive_current()
         self._tap_drive_current = self.params.tap_drive_current or old_saved_tap_drive_current or self._reg_drive_current
 
         # at what minimum physical height to start homing. It must be above the safe start position,
@@ -245,7 +241,7 @@ class ProbeEddy:
         # runtime configurable
         self._tap_adjust_z = self.params.tap_adjust_z
 
-        self._tap_sos = tap_filter_sos(self.params, self._sensor._data_rate, self._printer.config_error)
+        self._tap_sos = tap_filter_sos(self.params, self._sensor.data_rate, self._printer.config_error)
 
         # define our own commands
         self.define_commands(self._gcode)
@@ -677,7 +673,7 @@ class ProbeEddy:
 
     def probe_static_height(self, duration: float = 0.100) -> ProbeEddyProbeResult:
         with self.start_sampler() as sampler:
-            start_time = self._print_time_now() + self._sensor._ldc_settle_time
+            start_time = self._print_time_now() + self._sensor.settle_time
             sampler.wait_for_sample_at_time(start_time + duration)
             sampler.finish()
             times, heights = sampler.heights_between(start_time, math.inf)
@@ -791,8 +787,8 @@ class ProbeEddy:
             self._set_toolhead_position(th_pos)
 
         orig_drive_current = self.current_drive_current()
-        start_dc = self._sensor._drive_current_range[1]
-        end_dc = self._sensor._drive_current_range[0]
+        start_dc = self._sensor.drive_current_range[1]
+        end_dc = self._sensor.drive_current_range[0]
 
         start_dc: int = gcmd.get_int("START_DRIVE_CURRENT", start_dc, minval=0, maxval=31)
         end_dc: int = gcmd.get_int("END_DRIVE_CURRENT", end_dc, minval=0, maxval=31)

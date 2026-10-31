@@ -53,7 +53,7 @@ def compute_butter_tap(eddy: ProbeEddy, sampler: ProbeEddySampler):
         order,
         [lowcut, highcut],
         btype="bandpass",
-        fs=eddy._sensor._data_rate,
+        fs=eddy._sensor.data_rate,
         output="sos",
     )
     filtered = scipy.signal.sosfilt(sos, s_f - s_f[0])

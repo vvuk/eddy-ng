@@ -227,11 +227,12 @@ class ConversionTimeFit:
 
 # Interface class to LDC1612 mcu support
 class LDC1612_ng:
-    def __init__(self, config, name: str | None = None, primary: bool = True):
+    # drive_current is the initial drive current; 0 uses the product's default
+    def __init__(self, config, name: str | None = None, primary: bool = True, drive_current: int = 0, debug: bool = False):
         self.printer: Printer = config.get_printer()
 
         self._name = config.get_name().split()[-1]
-        self._verbose = config.getboolean("debug", False)
+        self._verbose = debug
 
         device_choices = {
             "ldc1612": PRODUCT_UNKNOWN,
@@ -240,40 +241,40 @@ class LDC1612_ng:
             "mellow_fly": PRODUCT_MELLOW_FLY,
             "ldc1612_internal_clk": PRODUCT_LDC1612_INTERNAL_CLK,
         }
-        self._device_product = config.getchoice("sensor_type", device_choices, PRODUCT_UNKNOWN)
+        self._device_product = config.getchoice("sensor_type", device_choices)
 
         # Fin0 = Fsensor0 / FIN_DIVIDER0
         # Fref0 = Fclk / FREF_DIVIDER0
         if self._device_product == PRODUCT_CARTOGRAPHER:
             self._ldc_freq_clk = 24_000_000
-            self._ldc_settle_time = 0.0001706
+            self.settle_time = 0.0001706
             self._ldc_fin_divider = 1
             self._ldc_fref_divider = 1
-            self._default_drive_current = 26
-            self._drive_current_range = (26, 26)
+            self.default_drive_current = 26
+            self.drive_current_range = (26, 26)
         elif self._device_product == PRODUCT_MELLOW_FLY:
             self._ldc_freq_clk = 40_000_000
-            self._ldc_settle_time = 0.00125
+            self.settle_time = 0.00125
             self._ldc_fin_divider = 1
             self._ldc_fref_divider = 3
-            self._default_drive_current = 15
-            self._drive_current_range = (14, 17)
+            self.default_drive_current = 15
+            self.drive_current_range = (14, 17)
         elif self._device_product == PRODUCT_LDC1612_INTERNAL_CLK:
             # A generic setup that usees internal LDC1612 clock
             # using LDC1612 internal typical clock frequency 43.4MHz
             self._ldc_freq_clk = 43_400_000
-            self._ldc_settle_time = 0.00125
+            self.settle_time = 0.00125
             self._ldc_fin_divider = 1
             self._ldc_fref_divider = 1
-            self._default_drive_current = 15
-            self._drive_current_range = (14, 20)
+            self.default_drive_current = 15
+            self.drive_current_range = (14, 20)
         else:  # Generic/BTT Eddy using external 12MHz clock source
             self._ldc_freq_clk = 12_000_000
-            self._ldc_settle_time = 0.005
+            self.settle_time = 0.005
             self._ldc_fin_divider = 1
             self._ldc_fref_divider = 2
-            self._default_drive_current = 15
-            self._drive_current_range = (14, 20)
+            self.default_drive_current = 15
+            self.drive_current_range = (14, 20)
 
         # allow overriding these
         self._ldc_fref_divider = config.getint("ldc_fref_divider", self._ldc_fref_divider)
@@ -282,18 +283,12 @@ class LDC1612_ng:
         self._ldc_freq_ref = self._ldc_freq_clk / self._ldc_fref_divider
         self._freq_conv = self._ldc_fin_divider * self._ldc_freq_ref
 
-        drive_current: int = config.getint("reg_drive_current", 0, minval=0, maxval=31)
-        saved_drive_current: int = config.getint("saved_reg_drive_current", 0, minval=0, maxval=31)
-        if drive_current == 0:
-            drive_current = saved_drive_current
-        if drive_current == 0:
-            drive_current = self._default_drive_current
-        self._drive_current = drive_current
+        self._drive_current = drive_current or self.default_drive_current
 
         self._deglitch: str = config.get("ldc_deglitch", "default").lower()
-        self._data_rate: int = config.getint("samples_per_second", 250, minval=50)
-        self._ldc_settle_time = min(self._ldc_settle_time, 1.0 / self._data_rate)
-        self._ldc_settle_time = config.getfloat("ldc_settle_time", self._ldc_settle_time)
+        self.data_rate: int = config.getint("samples_per_second", 250, minval=50)
+        self.settle_time = min(self.settle_time, 1.0 / self.data_rate)
+        self.settle_time = config.getfloat("ldc_settle_time", self.settle_time)
         # Frequency offset (in Hz) the chip subtracts before conversion; stored
         # as the OFFSET0 register value, which the conversions below account for
         self._ldc_offset_reg: int = self._offset_hz_to_reg(config.getint("ldc_offset", 0), config.error)
@@ -717,13 +712,13 @@ class LDC1612_ng:
 
         # This is the TI-recommended register configuration order
         # Setup chip in requested query rate
-        rcount0 = self._ldc_freq_ref / (16.0 * (self._data_rate - 4))
+        rcount0 = self._ldc_freq_ref / (16.0 * (self.data_rate - 4))
 
         self._set_rcount_reg(int(rcount0 + 0.5))
         self.set_reg(REG_OFFSET0, self._ldc_offset_reg)
         self.set_reg(
             REG_SETTLECOUNT0,
-            int(self._ldc_settle_time * self._ldc_freq_ref / 16.0 + 0.5),
+            int(self.settle_time * self._ldc_freq_ref / 16.0 + 0.5),
         )
         self.set_reg(
             REG_CLOCK_DIVIDERS0,
