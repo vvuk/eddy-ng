@@ -95,7 +95,7 @@ class ProbeEddyFrequencyMap:
         self._eddy._log_info(f"Loaded calibration for drive current {drive_current}")
         return True
 
-    def save_calibration(self):
+    def save_calibration(self, section: str):
         if self._ftoh is None:
             return
 
@@ -109,7 +109,7 @@ class ProbeEddyFrequencyMap:
             "f_range": [float(v) for v in self.freq_range],
             "rms": None if self._ftoh_rms is None else float(self._ftoh_rms),
         }
-        configfile.set(self._eddy._full_name, f"calibration_{self.drive_current}", json.dumps(data, separators=(",", ":")))
+        configfile.set(section, f"calibration_{self.drive_current}", json.dumps(data, separators=(",", ":")))
 
     def calibrate_from_values(
         self,

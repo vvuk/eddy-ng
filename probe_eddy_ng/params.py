@@ -7,8 +7,9 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
-from typing import List
+from typing import Any, Dict, List
 
 from .compat import ConfigWrapper
 
@@ -141,6 +142,32 @@ class ProbeEddyParams:
     tap_trigger_safe_start_height: float = 1.0
 
     _warning_msgs: List[str] = field(default_factory=list)
+
+    # The params a tap profile can override, with the ConfigWrapper getter
+    # and limits to read each with
+    TAP_PROFILE_PARAMS = {
+        "tap_threshold": ("getfloat", dict(above=0.0)),
+        "tap_speed": ("getfloat", dict(above=0.0)),
+        "tap_samples": ("getint", dict(minval=1)),
+        "tap_max_samples": ("getint", dict(minval=1)),
+        "tap_samples_stddev": ("getfloat", dict(above=0.0)),
+        "tap_use_median": ("getboolean", dict()),
+        "tap_time_position": ("getfloat", dict(minval=0.0, maxval=1.0)),
+        "tap_start_z": ("getfloat", dict(above=0.0)),
+        "tap_target_z": ("getfloat", dict()),
+        "tap_butter_lowcut": ("getfloat", dict(above=0.0)),
+        "tap_butter_highcut": ("getfloat", dict(above=0.0)),
+        "tap_butter_order": ("getint", dict(minval=1, maxval=4)),
+    }
+
+    # A copy of these params with a tap profile's overrides applied
+    def with_tap_overrides(self, overrides: Dict[str, Any], error) -> ProbeEddyParams:
+        params = dataclasses.replace(self, **overrides)
+        if params.tap_butter_highcut <= params.tap_butter_lowcut:
+            raise error("tap_butter_highcut must be above tap_butter_lowcut")
+        if params.tap_max_samples < params.tap_samples:
+            raise error("tap_max_samples must be at least tap_samples")
+        return params
 
     def is_default_butter_config(self):
         return self.tap_butter_lowcut == 5.0 and self.tap_butter_highcut == 25.0 and self.tap_butter_order == 2

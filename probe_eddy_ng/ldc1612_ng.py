@@ -726,6 +726,11 @@ class LDC1612_ng:
     def get_drive_current(self) -> int:
         return self._drive_current
 
+    # Change the drive current before the chip has been set up (it's written
+    # to the chip when streaming starts)
+    def set_initial_drive_current(self, cval: int):
+        self._drive_current = cval
+
     def set_drive_current(self, cval: int):
         if cval < 0 or cval > 31:
             raise self.printer.command_error("Drive current must be between 0 and 31")

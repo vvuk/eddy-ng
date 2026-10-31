@@ -28,6 +28,18 @@ from .compat import (
 from .sampler import ProbeEddyProbeResult
 from .fmap import ProbeEddyFrequencyMap
 from .tap import TapResult, TapConfig, compute_tap_z, tap_filter_sos, is_tap_request, ProbeEddyTapSession
+from .profiles import (
+    DEFAULT_PROFILE,
+    TAP_SECTION_PREFIX,
+    PlateProfile,
+    TapProfile,
+    is_hand_written,
+    material_code,
+    plate_section_prefix,
+    profile_name,
+    read_material_adjust_z,
+    read_tap_profile,
+)
 from .endstop import ProbeEddyEndstopWrapper, ProbeEddyHomingSession
 from .scan import ProbeEddyScanningProbe
 from . import plots
@@ -106,8 +118,6 @@ class ProbeEddy(EddyNgSensor):
         logging.info("Hello from ProbeEddyNG")
         super().__init__(config)
 
-        self._dc_to_fmap: Dict[int, ProbeEddyFrequencyMap] = {}
-
         # The last tap Z value, in absolute axis terms. Used for status.
         self._last_tap_z = 0.0
         # The last gcode offset applied after tap, either the tap
@@ -123,8 +133,9 @@ class ProbeEddy(EddyNgSensor):
         # drive current saved by older versions
         old_saved_tap_drive_current = config.getint("saved_tap_drive_current", 0, minval=0, maxval=31)
 
-        self._reg_drive_current = self._sensor.get_drive_current()
-        self._tap_drive_current = self.params.tap_drive_current or old_saved_tap_drive_current or self._reg_drive_current
+        # The params from this section; self.params also has the active tap
+        # profile's overrides applied
+        self._base_params = self.params
 
         # at what minimum physical height to start homing. It must be above the safe start position,
         # because we need to move from the start through the safe start position
@@ -136,26 +147,65 @@ class ProbeEddy(EddyNgSensor):
             "y": self.params.y_offset,
         }
 
-        version = config.getint("calibration_version", default=-1)
-        calibration_bad = False
-        if version == -1:
-            if config.get("calibrated_drive_currents", None) is not None:
-                calibration_bad = True
-        elif version not in ProbeEddyFrequencyMap.loadable_calibration_versions:
-            calibration_bad = True
+        # Plate profiles: the calibration in this section is the "default"
+        # plate, and others are in [probe_eddy_ng_plate <sensor> <plate>]
+        reg_drive_current = self._sensor.get_drive_current()
+        default_plate = PlateProfile(
+            DEFAULT_PROFILE,
+            self._full_name,
+            reg_drive_current=reg_drive_current,
+            tap_drive_current=self.params.tap_drive_current or old_saved_tap_drive_current or reg_drive_current,
+        )
+        self._load_plate_calibration(config, default_plate)
+        self._plates: Dict[str, PlateProfile] = {DEFAULT_PROFILE: default_plate}
 
-        calibrated_drive_currents = config.getintlist("calibrated_drive_currents", [])
+        plate_prefix = plate_section_prefix(self._name)
+        for section in config.get_prefix_sections(plate_prefix):
+            name = profile_name(section.get_name()[len(plate_prefix) :], config.error)
+            if name in self._plates:
+                raise config.error(f"Duplicate or reserved plate name '{name}'")
+            plate = PlateProfile(
+                name,
+                section.get_name(),
+                reg_drive_current=section.getint("reg_drive_current", 0, minval=0, maxval=31),
+                tap_drive_current=section.getint("tap_drive_current", 0, minval=0, maxval=31),
+                hand_written=is_hand_written(section, asfc),
+            )
+            self._load_plate_calibration(section, plate)
+            self._plates[name] = plate
 
-        if not calibration_bad:
-            for dc in calibrated_drive_currents:
-                fmap = ProbeEddyFrequencyMap(self)
-                if fmap.load_from_config(config, dc, version):
-                    self._dc_to_fmap[dc] = fmap
-        else:
-            for dc in calibrated_drive_currents:
-                # read so that there are no warnings about unknown fields
-                _ = config.get(f"calibration_{dc}")
-            self.params._warning_msgs.append("EDDYng calibration: calibration data invalid, please recalibrate")
+        # Which plate is active at startup; otherwise the plate is only
+        # ever chosen explicitly
+        self._default_plate = profile_name(config.get("default_plate", DEFAULT_PROFILE), config.error)
+        if self._default_plate not in self._plates:
+            raise config.error(f"default_plate: unknown plate '{self._default_plate}'")
+        self._plate = self._plates[self._default_plate]
+        if self._plate.reg_drive_current:
+            self._sensor.set_initial_drive_current(self._plate.reg_drive_current)
+
+        # Tap profiles: the tap settings in this section are the "default"
+        # tap profile, and others are in [probe_eddy_ng_tap <profile>]
+        self._tap_profiles: Dict[str, TapProfile] = {
+            DEFAULT_PROFILE: TapProfile(
+                DEFAULT_PROFILE,
+                self._full_name,
+                tap_adjust_z=self.params.tap_adjust_z,
+                material_adjust_z=read_material_adjust_z(config),
+            )
+        }
+        for section in config.get_prefix_sections(TAP_SECTION_PREFIX):
+            name = profile_name(section.get_name()[len(TAP_SECTION_PREFIX) :], config.error)
+            if name in self._tap_profiles:
+                raise config.error(f"Duplicate or reserved tap profile name '{name}'")
+            tap_profile = read_tap_profile(section, name)
+            tap_profile.hand_written = is_hand_written(section, asfc)
+            # make sure its settings work together with the ones from this section
+            tap_filter_sos(self._base_params.with_tap_overrides(tap_profile.params, section.error), self._sensor.data_rate, section.error)
+            self._tap_profiles[name] = tap_profile
+
+        self._tap_profile = self._tap_profiles[DEFAULT_PROFILE]
+        # The material the tap profile was loaded with, if any
+        self._material: Optional[str] = None
 
         # Our virtual endstop wrapper -- used for homing.
         self._endstop_wrapper = ProbeEddyEndstopWrapper(self)
@@ -179,9 +229,6 @@ class ProbeEddy(EddyNgSensor):
         self._tap_offset = 0.0
         self._last_probe_result = 0.0
 
-        # runtime configurable
-        self._tap_adjust_z = self.params.tap_adjust_z
-
         self._tap_sos = tap_filter_sos(self.params, self._sensor.data_rate, self._printer.config_error)
 
         self._register_commands(
@@ -198,8 +245,12 @@ class ProbeEddy(EddyNgSensor):
                 ["PROBE", "PEP"],
                 ["TAP", "PETAP"],
                 "BED_MESH_EXPERIMENTAL",
+                "PLATE_PROFILE",
+                "TAP_PROFILE",
             ]
         )
+
+        self._printer.register_event_handler("klippy:ready", self._handle_ready)
 
         # Replace Klipper's Z_OFFSET_APPLY_PROBE, which would apply the offset
         # to a z_offset we don't use
@@ -213,6 +264,48 @@ class ProbeEddy(EddyNgSensor):
                 self.cmd_Z_OFFSET_APPLY_PROBE,
                 "Apply the current G-Code Z offset to tap_adjust_z",
             )
+
+    def _load_plate_calibration(self, config: ConfigWrapper, plate: PlateProfile):
+        version = config.getint("calibration_version", default=-1)
+        calibration_bad = False
+        if version == -1:
+            if config.get("calibrated_drive_currents", None) is not None:
+                calibration_bad = True
+        elif version not in ProbeEddyFrequencyMap.loadable_calibration_versions:
+            calibration_bad = True
+
+        calibrated_drive_currents = config.getintlist("calibrated_drive_currents", [])
+
+        if not calibration_bad:
+            for dc in calibrated_drive_currents:
+                fmap = ProbeEddyFrequencyMap(self)
+                if fmap.load_from_config(config, dc, version):
+                    plate.fmaps[dc] = fmap
+        else:
+            for dc in calibrated_drive_currents:
+                # read so that there are no warnings about unknown fields
+                _ = config.get(f"calibration_{dc}")
+            plate_str = "" if plate.name == DEFAULT_PROFILE else f" for plate '{plate.name}'"
+            self.params._warning_msgs.append(f"EDDYng calibration{plate_str}: calibration data invalid, please recalibrate")
+
+    # The calibration and drive currents come from the active plate, with
+    # drive currents overridable by the active tap profile; tap_adjust_z
+    # comes from the active tap profile, for the active material
+    @property
+    def _dc_to_fmap(self) -> Dict[int, ProbeEddyFrequencyMap]:
+        return self._plate.fmaps
+
+    @property
+    def _reg_drive_current(self) -> int:
+        return self._tap_profile.reg_drive_current or self._plate.reg_drive_current
+
+    @property
+    def _tap_drive_current(self) -> int:
+        return self._tap_profile.tap_drive_current or self._plate.tap_drive_current or self._reg_drive_current
+
+    @property
+    def _tap_adjust_z(self) -> float:
+        return self._tap_profile.adjust_z_for(self._material)
 
     def reset_drive_current(self):
         if self._reg_drive_current == 0:
@@ -266,31 +359,54 @@ class ProbeEddy(EddyNgSensor):
     def _z_not_homed(self):
         clear_z_homed(self._toolhead, self._printer.command_error)
 
+    @staticmethod
+    def _is_calibration_option(option: str) -> bool:
+        return option in ("calibrated_drive_currents", "reg_drive_current", "tap_drive_current") or option.startswith("calibration_")
+
+    # Save the active plate's calibration
     def save_config(self):
+        plate = self._plate
+        section = plate.section
         configfile = self._printer.lookup_object("configfile")
-        configfile.remove_section(self._full_name)
+
+        # Rewrite the calibration (so that cleared drive currents go away), but
+        # keep anything else already saved in the section, like tap_adjust_z
+        asfc = configfile.autosave.fileconfig
+        keep = {}
+        if asfc.has_section(section):
+            keep = {o: asfc.get(section, o) for o in asfc.options(section) if not self._is_calibration_option(o)}
+        configfile.remove_section(section)
+        for option, value in keep.items():
+            configfile.set(section, option, value)
 
         configfile.set(
-            self._full_name,
+            section,
             "calibrated_drive_currents",
-            str.join(", ", [str(dc) for dc in self._dc_to_fmap.keys()]),
+            str.join(", ", [str(dc) for dc in plate.fmaps.keys()]),
         )
         configfile.set(
-            self._full_name,
+            section,
             "calibration_version",
             str(ProbeEddyFrequencyMap.calibration_version),
         )
 
-        if self.params.reg_drive_current != self._reg_drive_current or self.params.reg_drive_current == self._saved_reg_drive_current:
-            configfile.set(self._full_name, "reg_drive_current", str(self._reg_drive_current))
+        if plate.name == DEFAULT_PROFILE:
+            base = self._base_params
+            if base.reg_drive_current != plate.reg_drive_current or base.reg_drive_current == self._saved_reg_drive_current:
+                configfile.set(section, "reg_drive_current", str(plate.reg_drive_current))
+            if base.tap_drive_current != plate.tap_drive_current or base.tap_drive_current == self._saved_tap_drive_current:
+                configfile.set(section, "tap_drive_current", str(plate.tap_drive_current))
+        else:
+            if plate.reg_drive_current:
+                configfile.set(section, "reg_drive_current", str(plate.reg_drive_current))
+            if plate.tap_drive_current:
+                configfile.set(section, "tap_drive_current", str(plate.tap_drive_current))
 
-        if self.params.tap_drive_current != self._tap_drive_current or self.params.tap_drive_current == self._saved_tap_drive_current:
-            configfile.set(self._full_name, "tap_drive_current", str(self._tap_drive_current))
+        for _, fmap in plate.fmaps.items():
+            fmap.save_calibration(section)
 
-        for _, fmap in self._dc_to_fmap.items():
-            fmap.save_calibration()
-
-        self._log_msg("Calibration saved. Issue a SAVE_CONFIG to write the values to your config file and restart Klipper.")
+        plate_str = "" if plate.name == DEFAULT_PROFILE else f" for plate '{plate.name}'"
+        self._log_msg(f"Calibration saved{plate_str}. Issue a SAVE_CONFIG to write the values to your config file and restart Klipper.")
 
     def cmd_BED_MESH_EXPERIMENTAL(self, gcmd: GCodeCommand):
         raise self._printer.command_error("EDDYNG_BED_MESH_EXPERIMENTAL has been removed; use BED_MESH_CALIBRATE METHOD=rapid_scan instead")
@@ -379,7 +495,7 @@ class ProbeEddy(EddyNgSensor):
     def cmd_CLEAR_CALIBRATION(self, gcmd: GCodeCommand):
         drive_current: int = gcmd.get_int("DRIVE_CURRENT", -1)
         if drive_current == -1:
-            self._dc_to_fmap = {}
+            self._dc_to_fmap.clear()
             gcmd.respond_info("Cleared calibration for all drive currents")
         else:
             if drive_current not in self._dc_to_fmap:
@@ -391,6 +507,7 @@ class ProbeEddy(EddyNgSensor):
     cmd_CALIBRATION_STATUS_help = "Display information about EDDYng calibration"
 
     def cmd_CALIBRATION_STATUS(self, gcmd: GCodeCommand):
+        self._log_msg(f"Plate '{self._plate.name}': homing drive current {self._reg_drive_current}, tap drive current {self._tap_drive_current}")
         for dc in self._dc_to_fmap:
             m = self._dc_to_fmap[dc]
             hmin, hmax = m.height_range
@@ -414,27 +531,255 @@ class ProbeEddy(EddyNgSensor):
 
     cmd_SET_TAP_ADJUST_Z_help = "Set the tap adjustment value"
 
+    # Stage tap_adjust_z for the active tap profile and material for SAVE_CONFIG
+    def _save_tap_adjust_z(self, value: float):
+        configfile = self._printer.lookup_object("configfile")
+        configfile.set(self._tap_profile.section, TapProfile.adjust_z_option(self._material), f"{value:.3f}")
+
+    # " for PETG in tap profile 'textured'", or "" for the default
+    def _tap_adjust_z_target_str(self) -> str:
+        s = f" for {self._material}" if self._material else ""
+        if self._tap_profile.name != DEFAULT_PROFILE:
+            s += f" in tap profile '{self._tap_profile.name}'"
+        return s
+
     def cmd_SET_TAP_ADJUST_Z(self, gcmd: GCodeCommand):
-        tap_adjust_z = self._tap_adjust_z = self._value_or_adjust(gcmd, self._tap_adjust_z)
+        tap_adjust_z = self._value_or_adjust(gcmd, self._tap_adjust_z)
+        self._tap_profile.set_adjust_z(self._material, tap_adjust_z)
+        self._save_tap_adjust_z(tap_adjust_z)
 
-        if self.params.tap_adjust_z != self._tap_adjust_z:
-            configfile = self._printer.lookup_object("configfile")
-            configfile.set(self._full_name, "tap_adjust_z", str(float(self._tap_adjust_z)))
-
-        gcmd.respond_info(f"Set tap_adjust_z: {tap_adjust_z:.3f} (SAVE_CONFIG to make it permanent)")
+        gcmd.respond_info(f"Set tap_adjust_z{self._tap_adjust_z_target_str()}: {tap_adjust_z:.3f} (SAVE_CONFIG to make it permanent)")
 
     def cmd_Z_OFFSET_APPLY_PROBE(self, gcmd: GCodeCommand):
         gcode_move = self._printer.lookup_object("gcode_move")
         offset = gcode_move.get_status()["homing_origin"].z
         offset += self._tap_adjust_z
         offset -= self._last_tap_gcode_adjustment
-        configfile = self._printer.lookup_object("configfile")
-        configfile.set(self._full_name, "tap_adjust_z", f"{offset:.3f}")
+        self._save_tap_adjust_z(offset)
         self._log_msg(
-            f"new tap_adjust_z: {offset:.3f}\n"
+            f"new tap_adjust_z{self._tap_adjust_z_target_str()}: {offset:.3f}\n"
             "The SAVE_CONFIG command will update the printer config file\n"
             "with the above and restart the printer."
         )
+
+    #
+    # Plate and tap profiles
+    #
+
+    def _handle_ready(self):
+        if len(self._plates) > 1 or len(self._tap_profiles) > 1:
+            default_str = " (default_plate)" if self._default_plate != DEFAULT_PROFILE else ""
+            self._log_msg(f"EDDYng: plate '{self._plate.name}'{default_str}, tap profile '{self._tap_profile.name}'")
+
+    # The drive currents a tap profile needs that a plate isn't calibrated for
+    @staticmethod
+    def _uncalibrated_drive_currents(tap_profile: TapProfile, plate: PlateProfile) -> List[int]:
+        return [dc for dc in tap_profile.drive_currents() if dc not in plate.fmaps]
+
+    def _warn_tap_profile_uncalibrated(self):
+        missing = self._uncalibrated_drive_currents(self._tap_profile, self._plate)
+        if missing:
+            self._log_warning(
+                f"Tap profile '{self._tap_profile.name}' uses drive current {', '.join(map(str, missing))}, "
+                f"which plate '{self._plate.name}' isn't calibrated for. Calibrate it with PROBE_EDDY_NG_CALIBRATE DRIVE_CURRENT=..."
+            )
+
+    # Undo the gcode Z offset that the last tap applied
+    def _clear_tap_gcode_adjustment(self):
+        adjustment = self._last_tap_gcode_adjustment
+        if adjustment == 0.0:
+            return
+        gcode_move = self._printer.lookup_object("gcode_move")
+        gcode_move.base_position[2] -= adjustment
+        gcode_move.homing_position[2] -= adjustment
+        self._last_tap_gcode_adjustment = 0.0
+
+    def _activate_plate(self, plate: PlateProfile, created: bool = False):
+        if plate is self._plate:
+            self._log_msg(f"EDDYng: plate '{plate.name}' is already active.")
+            return
+
+        missing = self._uncalibrated_drive_currents(self._tap_profile, plate)
+        if plate.fmaps and missing:
+            raise self._printer.command_error(
+                f"Tap profile '{self._tap_profile.name}' uses drive current {', '.join(map(str, missing))}, "
+                f"which plate '{plate.name}' isn't calibrated for. Load a different tap profile first."
+            )
+
+        old = self._plate
+        self._plate = plate
+        if self._reg_drive_current:
+            self._sensor.set_drive_current(self._reg_drive_current)
+        # both of these came from a tap on the old plate
+        self._tap_offset = 0.0
+        self._clear_tap_gcode_adjustment()
+        self._z_not_homed()
+
+        if created:
+            self._log_msg(
+                f"EDDYng: plate is now '{plate.name}' (new, not calibrated; was '{old.name}'). Z is no longer homed. "
+                "Run PROBE_EDDY_NG_SETUP, then SAVE_CONFIG."
+            )
+        else:
+            self._log_msg(f"EDDYng: plate is now '{plate.name}' (was '{old.name}'). Z is no longer homed.")
+
+    def _activate_tap_profile(self, tap_profile: TapProfile, material: Optional[str]):
+        if tap_profile is self._tap_profile and material == self._material:
+            material_str = f" with material {material}" if material else ""
+            self._log_msg(f"EDDYng: tap profile '{tap_profile.name}'{material_str} is already active.")
+            return
+
+        missing = self._uncalibrated_drive_currents(tap_profile, self._plate)
+        if self._plate.fmaps and missing:
+            raise self._printer.command_error(
+                f"Tap profile '{tap_profile.name}' uses drive current {', '.join(map(str, missing))}, "
+                f"which plate '{self._plate.name}' isn't calibrated for."
+            )
+
+        params = self._base_params.with_tap_overrides(tap_profile.params, self._printer.command_error)
+        tap_sos = tap_filter_sos(params, self._sensor.data_rate, self._printer.command_error)
+
+        old, old_reg_drive_current = self._tap_profile, self._reg_drive_current
+        self._tap_profile, self._material = tap_profile, material
+        self.params, self._tap_sos = params, tap_sos
+
+        msg = f"EDDYng: tap profile is now '{tap_profile.name}'"
+        if old is not tap_profile:
+            msg += f" (was '{old.name}')"
+        if material:
+            msg += f", material {material}"
+        msg += f", tap_adjust_z {self._tap_adjust_z:.3f}"
+        used_default = material is not None and material not in tap_profile.material_adjust_z
+        if used_default:
+            msg += f" (default: no value for {material} yet; adjustments will be saved for {material})"
+        msg += "."
+
+        if self._reg_drive_current != old_reg_drive_current:
+            if self._reg_drive_current:
+                self._sensor.set_drive_current(self._reg_drive_current)
+            self._z_not_homed()
+            msg += f" Homing drive current changed {old_reg_drive_current} -> {self._reg_drive_current}; Z is no longer homed."
+
+        if used_default:
+            self._log_warning(msg[len("EDDYng: ") :])
+        else:
+            self._log_msg(msg)
+
+    # The single LOAD=, CREATE= or REMOVE= argument, or (None, None) to list
+    def _profile_action(self, gcmd: GCodeCommand):
+        actions = [(a, gcmd.get(a, None)) for a in ("LOAD", "CREATE", "REMOVE")]
+        actions = [(a, v) for a, v in actions if v is not None]
+        if len(actions) > 1:
+            raise gcmd.error("Use only one of LOAD=, CREATE= or REMOVE=")
+        if not actions:
+            return None, None
+        action, value = actions[0]
+        return action, profile_name(value, gcmd.error)
+
+    cmd_PLATE_PROFILE_help = "Load (LOAD=), create (CREATE=) or remove (REMOVE=) a plate profile, or list them"
+
+    def cmd_PLATE_PROFILE(self, gcmd: GCodeCommand):
+        action, name = self._profile_action(gcmd)
+        configfile = self._printer.lookup_object("configfile")
+
+        if action is None:
+            lines = ["Plates:"]
+            for plate in self._plates.values():
+                active = " (active)" if plate is self._plate else ""
+                dcs = ", ".join(map(str, plate.fmaps.keys())) or "not calibrated"
+                lines.append(f"  {plate.name}{active}: drive currents {dcs}")
+            gcmd.respond_info("\n".join(lines))
+            return
+
+        if action == "CREATE":
+            if name in self._plates:
+                raise gcmd.error(f"Plate '{name}' already exists")
+            plate = PlateProfile(name, plate_section_prefix(self._name) + name)
+            configfile.set(plate.section, "calibration_version", str(ProbeEddyFrequencyMap.calibration_version))
+            self._plates[name] = plate
+            self._activate_plate(plate, created=True)
+            return
+
+        if name not in self._plates:
+            raise gcmd.error(f"Unknown plate '{name}'")
+        plate = self._plates[name]
+
+        if action == "LOAD":
+            self._activate_plate(plate)
+            return
+
+        # REMOVE
+        if name == DEFAULT_PROFILE:
+            raise gcmd.error(f"The default plate is the calibration in [{self._full_name}] and can't be removed")
+        if plate is self._plate:
+            raise gcmd.error(f"Plate '{name}' is active; load another plate first")
+        if name == self._default_plate:
+            raise gcmd.error(f"Plate '{name}' is the default_plate; change default_plate first")
+        if plate.hand_written:
+            raise gcmd.error(f"Plate '{name}' is in your config files; remove the [{plate.section}] section there instead")
+        del self._plates[name]
+        configfile.remove_section(plate.section)
+        self._log_msg(f"EDDYng: removed plate '{name}'. SAVE_CONFIG to make it permanent.")
+
+    cmd_TAP_PROFILE_help = "Load (LOAD= and optionally MATERIAL=), create (CREATE=) or remove (REMOVE=) a tap profile, or list them"
+
+    def cmd_TAP_PROFILE(self, gcmd: GCodeCommand):
+        action, name = self._profile_action(gcmd)
+        material = gcmd.get("MATERIAL", None)
+        if material is not None and action != "LOAD":
+            raise gcmd.error("MATERIAL= can only be used with LOAD=")
+        configfile = self._printer.lookup_object("configfile")
+
+        if action is None:
+            lines = ["Tap profiles:"]
+            for tap_profile in self._tap_profiles.values():
+                active = ""
+                if tap_profile is self._tap_profile:
+                    active = f" (active, material {self._material})" if self._material else " (active)"
+                materials = ", ".join(f"{m} {v:.3f}" for m, v in tap_profile.material_adjust_z.items())
+                materials = f"; {materials}" if materials else ""
+                lines.append(f"  {tap_profile.name}{active}: tap_adjust_z {tap_profile.tap_adjust_z:.3f}{materials}")
+            gcmd.respond_info("\n".join(lines))
+            return
+
+        if action == "CREATE":
+            if name in self._tap_profiles:
+                raise gcmd.error(f"Tap profile '{name}' already exists")
+            source = self._tap_profile
+            tap_profile = TapProfile(
+                name,
+                TAP_SECTION_PREFIX + name,
+                params=dict(source.params),
+                reg_drive_current=source.reg_drive_current,
+                tap_drive_current=source.tap_drive_current,
+                tap_adjust_z=source.tap_adjust_z,
+                material_adjust_z=dict(source.material_adjust_z),
+            )
+            for option, value in tap_profile.options().items():
+                configfile.set(tap_profile.section, option, value)
+            self._tap_profiles[name] = tap_profile
+            self._log_msg(f"EDDYng: created tap profile '{name}' from '{source.name}'. SAVE_CONFIG to make it permanent.")
+            self._activate_tap_profile(tap_profile, self._material)
+            return
+
+        if name not in self._tap_profiles:
+            raise gcmd.error(f"Unknown tap profile '{name}'")
+        tap_profile = self._tap_profiles[name]
+
+        if action == "LOAD":
+            self._activate_tap_profile(tap_profile, material_code(material, gcmd.error) if material else None)
+            return
+
+        # REMOVE
+        if name == DEFAULT_PROFILE:
+            raise gcmd.error(f"The default tap profile is the tap settings in [{self._full_name}] and can't be removed")
+        if tap_profile is self._tap_profile:
+            raise gcmd.error(f"Tap profile '{name}' is active; load another tap profile first")
+        if tap_profile.hand_written:
+            raise gcmd.error(f"Tap profile '{name}' is in your config files; remove the [{tap_profile.section}] section there instead")
+        del self._tap_profiles[name]
+        configfile.remove_section(tap_profile.section)
+        self._log_msg(f"EDDYng: removed tap profile '{name}'. SAVE_CONFIG to make it permanent.")
 
     def probe_static_height(self, duration: float = 0.100) -> ProbeEddyProbeResult:
         with self.start_sampler() as sampler:
@@ -647,12 +992,12 @@ class ProbeEddy(EddyNgSensor):
             return
 
         self._dc_to_fmap[best_homing.drive_current] = best_homing
-        self._reg_drive_current = best_homing.drive_current
+        self._plate.reg_drive_current = best_homing.drive_current
         self._log_msg(f"Using for homing: {best_homing}")
 
         if best_tap is not None:
             self._dc_to_fmap[best_tap.drive_current] = best_tap
-            self._tap_drive_current = best_tap.drive_current
+            self._plate.tap_drive_current = best_tap.drive_current
             self._log_msg(f"Using for tap: {best_tap}")
         else:
             self._log_warning(
@@ -663,6 +1008,7 @@ class ProbeEddy(EddyNgSensor):
 
         self.reset_drive_current()
         self.save_config()
+        self._warn_tap_profile_uncalibrated()
         self._z_not_homed()
 
     cmd_CALIBRATE_help = (
@@ -746,6 +1092,7 @@ class ProbeEddy(EddyNgSensor):
 
         self._dc_to_fmap[drive_current] = mapping
         self.save_config()
+        self._warn_tap_profile_uncalibrated()
 
         # reset the Z homing state after alibration
         self._z_not_homed()
@@ -903,6 +1250,11 @@ class ProbeEddy(EddyNgSensor):
                 "tap_adjust_z": float(self._tap_adjust_z),
                 "last_probe_result": float(self._last_probe_result),
                 "last_tap_z": float(self._last_tap_z),
+                "active_plate": self._plate.name,
+                "active_tap_profile": self._tap_profile.name,
+                "active_material": self._material or "",
+                "plates": list(self._plates.keys()),
+                "tap_profiles": {n: list(p.material_adjust_z.keys()) for n, p in self._tap_profiles.items()},
             }
         )
         return status
