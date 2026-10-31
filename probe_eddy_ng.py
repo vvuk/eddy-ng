@@ -1007,12 +1007,12 @@ class ProbeEddy:
     def cmd_Z_OFFSET_APPLY_PROBE(self, gcmd: GCodeCommand):
         gcode_move = self._printer.lookup_object("gcode_move")
         offset = gcode_move.get_status()["homing_origin"].z
-        offset += self.params.tap_adjust_z
+        offset += self._tap_adjust_z
         offset -= self._last_tap_gcode_adjustment
         configfile = self._printer.lookup_object("configfile")
         configfile.set(self._full_name, "tap_adjust_z", f"{offset:.3f}")
         self._log_msg(
-            f"{self._name}: new tap_adjust_z: {offset:.3f}\n"
+            f"new tap_adjust_z: {offset:.3f}\n"
             "The SAVE_CONFIG command will update the printer config file\n"
             "with the above and restart the printer."
         )
