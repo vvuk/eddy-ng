@@ -61,7 +61,17 @@ enum {
     // Use the intb pin to detect when a sample is ready
     // vs. just polling
     LDC_HAVE_INTB = 1<<1,
+    // Include the tap filter value with each streamed sample (only useful
+    // for debugging/plotting)
+    LDC_SEND_FILTER_VALUE = 1<<2,
 };
+
+// ldc1612_ng_start_stop flags
+#define START_FLAG_SEND_FILTER_VALUE (1<<0)
+
+// ldc1612_ng_data fmt values
+#define DATA_FMT_TIME_VALUE 0
+#define DATA_FMT_TIME_VALUE_FILTER 1
 
 // should match ldc1612_ng.py
 #define HOME_MODE_NONE 0
@@ -114,12 +124,6 @@ enum {
 struct sosfilter_sos {
     uint8_t num_sections;
     float sos[MAX_SOS_SECTIONS*6];
-};
-
-struct data_sample {
-  uint32_t time;
-  uint32_t data;
-  float accum_val;
 };
 
 struct ldc1612_ng_homing_sos_tap {
@@ -196,10 +200,10 @@ struct ldc1612_ng {
     struct gpio_out led_gpio;
 #endif
 
-    // max number of 4-byte items, minus 8 bytes
-    // MESSAGE_PAYLOAD_MAX is annoyingly initially 64-5 = 59, which
-    // means there isn't much room in here
-    #define BUF_COUNT32_MAX ((MESSAGE_PAYLOAD_MAX - 8) / 4)
+    // max number of 4-byte items. MESSAGE_PAYLOAD_MAX is only 64-5 = 59,
+    // and the rest of ldc1612_ng_data takes up to 9 bytes (msgid 2, oid 1,
+    // seq 2, ov 2, fmt 1, data length 1)
+    #define BUF_COUNT32_MAX ((MESSAGE_PAYLOAD_MAX - 9) / 4)
     uint8_t buf_next;
     uint8_t seq_next;
     uint8_t overflows;
@@ -342,8 +346,9 @@ flush_buffer(struct ldc1612_ng *ld, uint8_t oid)
         return;
 
     // Send the buffer
-    sendf("ldc1612_ng_data oid=%c seq=%c ov=%c data=%*s"
-          , oid, ld->seq_next, ld->overflows, ld->buf_next * 4, ld->buffer);
+    uint8_t fmt = (ld->flags & LDC_SEND_FILTER_VALUE) ? DATA_FMT_TIME_VALUE_FILTER : DATA_FMT_TIME_VALUE;
+    sendf("ldc1612_ng_data oid=%c seq=%c ov=%c fmt=%c data=%*s"
+          , oid, ld->seq_next, ld->overflows, fmt, ld->buf_next * 4, ld->buffer);
     ld->seq_next++;
     ld->buf_next = 0;
     ld->overflows = 0;
@@ -484,13 +489,17 @@ command_ldc1612_ng_start_stop(uint32_t *args)
     ld->buf_next = 0;
     ld->seq_next = 0;
     ld->overflows = 0;
+    if (args[2] & START_FLAG_SEND_FILTER_VALUE)
+        ld->flags |= LDC_SEND_FILTER_VALUE;
+    else
+        ld->flags &= ~LDC_SEND_FILTER_VALUE;
 
     irq_disable();
     ld->timer.waketime = timer_read_time() + ld->rest_ticks;
     sched_add_timer(&ld->timer);
     irq_enable();
 }
-DECL_COMMAND(command_ldc1612_ng_start_stop, "ldc1612_ng_start_stop oid=%c rest_ticks=%u");
+DECL_COMMAND(command_ldc1612_ng_start_stop, "ldc1612_ng_start_stop oid=%c rest_ticks=%u flags=%c");
 
 #if defined(LDC_DEBUG) && LDC_DEBUG > 1
 void dprint(const char *fmt, ...)
@@ -639,11 +648,7 @@ ldc1612_ng_update(struct ldc1612_ng *ld, uint8_t oid)
     uint32_t data = read_reg_data0(ld);
     ld->last_read_value = data;
 
-    struct data_sample sample = {
-      .time = time,
-      .data = data,
-      .accum_val = 0.0f,
-    };
+    float filter_value = 0.0f;
 
     switch (ld->homing.mode) {
     case HOME_MODE_HOME:
@@ -651,17 +656,23 @@ ldc1612_ng_update(struct ldc1612_ng *ld, uint8_t oid)
         break;
     case HOME_MODE_SOS:
         check_sos_tap(ld, data, time);
-        // Send the computed drop value as a float (reinterpreted as uint32)
-        float drop = ld->homing.sos_tap.tap_start_value - ld->homing.sos_tap.last_value;
-        sample.accum_val = drop;
+        filter_value = ld->homing.sos_tap.tap_start_value - ld->homing.sos_tap.last_value;
         break;
     }
 
-    memcpy(ld->buffer + ld->buf_next, &sample, sizeof(sample));
-    ld->buf_next += sizeof(sample)/4;
+    uint8_t sample_words = 2;
+    uint32_t *sample = ld->buffer + ld->buf_next;
+    sample[0] = time;
+    sample[1] = data;
+    if (ld->flags & LDC_SEND_FILTER_VALUE) {
+        // the filter value as a float, reinterpreted as uint32
+        memcpy(&sample[2], &filter_value, sizeof(filter_value));
+        sample_words = 3;
+    }
+    ld->buf_next += sample_words;
 
     // flush once there's no room for another sample
-    if (ld->buf_next + sizeof(sample)/4 > BUF_COUNT32_MAX)
+    if (ld->buf_next + sample_words > BUF_COUNT32_MAX)
       flush_buffer(ld, oid);
 }
 

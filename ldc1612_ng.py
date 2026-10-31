@@ -62,6 +62,15 @@ HOME_MODE_HOME = 1
 HOME_MODE_WMA = 2
 HOME_MODE_SOS = 3
 
+# should match sensor_ldc1612_ng.c
+START_FLAG_SEND_FILTER_VALUE = 1 << 0
+
+# ldc1612_ng_data sample layouts by fmt: mcu clock, raw value[, filter value]
+DATA_FORMATS = {
+    0: "<II",
+    1: "<IIf",
+}
+
 
 @dataclass
 class LDC1612_ng_value:
@@ -321,7 +330,7 @@ class LDC1612_ng:
 
         # Make sure the sensor is stopped on restart
         mcu.add_config_cmd(
-            "ldc1612_ng_start_stop oid=%d rest_ticks=0" % (oid,),
+            "ldc1612_ng_start_stop oid=%d rest_ticks=0 flags=0" % (oid,),
             on_restart=True,
         )
         mcu.register_config_callback(self._build_config)
@@ -403,13 +412,18 @@ class LDC1612_ng:
         cmdqueue = self._i2c.get_command_queue()
 
         # Older firmware silently accepts the new config command (extra params are
-        # ignored) but never sends ldc1612_ng_data, so check for it explicitly.
-        if self._mcu.try_lookup_command("config_ldc1612_ng oid=%c i2c_oid=%c product=%i in_div=%hu ref_div=%hu") is None:
-            raise self.printer.config_error(
-                f"LDC1612ng {self._name}: sensor firmware is out of date for this version of eddy-ng. Please rebuild and flash the sensor firmware."
-            )
+        # ignored) but never sends ldc1612_ng_data, so check for it explicitly,
+        # along with the most recent protocol change.
+        for cmd in (
+            "config_ldc1612_ng oid=%c i2c_oid=%c product=%i in_div=%hu ref_div=%hu",
+            "ldc1612_ng_start_stop oid=%c rest_ticks=%u flags=%c",
+        ):
+            if self._mcu.try_lookup_command(cmd) is None:
+                raise self.printer.config_error(
+                    f"LDC1612ng {self._name}: sensor firmware is out of date for this version of eddy-ng. Please rebuild and flash the sensor firmware."
+                )
 
-        self._ldc1612_ng_start_stop_cmd = self._mcu.lookup_command("ldc1612_ng_start_stop oid=%c rest_ticks=%u", cq=cmdqueue)
+        self._ldc1612_ng_start_stop_cmd = self._mcu.lookup_command("ldc1612_ng_start_stop oid=%c rest_ticks=%u flags=%c", cq=cmdqueue)
 
         self._ldc1612_ng_latched_status_cmd = self._mcu.lookup_query_command(
             "query_ldc1612_ng_latched_status_v2 oid=%c",
@@ -774,7 +788,7 @@ class LDC1612_ng:
         self.set_reg(REG_DRIVE_CURRENT0, cval << 11)
 
     # Start, stop, and process message batches
-    def start_streaming(self, callback, callback_interval=0.5):
+    def start_streaming(self, callback, callback_interval=0.5, send_filter_values=False):
         if self._data_callback is not None:
             raise self.printer.command_error("start_streaming: already streaming")
 
@@ -796,10 +810,11 @@ class LDC1612_ng:
         # sweeps across the conversions and ConversionTimeFit sees reads that
         # happen right after a conversion completes.
         rest_ticks = self._mcu.seconds_to_clock(rcount_now_sec / 2.3)
-        self._ldc1612_ng_start_stop_cmd.send([self._oid, rest_ticks])
+        flags = START_FLAG_SEND_FILTER_VALUE if send_filter_values else 0
+        self._ldc1612_ng_start_stop_cmd.send([self._oid, rest_ticks, flags])
 
     def stop_streaming(self):
-        self._ldc1612_ng_start_stop_cmd.send_wait_ack([self._oid, 0])
+        self._ldc1612_ng_start_stop_cmd.send_wait_ack([self._oid, 0, 0])
         reactor = self.printer.get_reactor()
         reactor.unregister_timer(self._data_timer)
         self._data_timer = None
@@ -813,10 +828,11 @@ class LDC1612_ng:
     def _handle_data(self, params):
         seq = params["seq"]
         overflows = params["ov"]
+        fmt = params["fmt"]
         data_raw = params["data"]
 
         with self._data_lock:
-            self._pending_data.append([seq, overflows, data_raw])
+            self._pending_data.append([seq, overflows, fmt, data_raw])
 
     def process_data(self):
         self._process_data(self.printer.get_reactor().monotonic())
@@ -833,7 +849,7 @@ class LDC1612_ng:
         values: list[int] = []
         accum_values: list[float] = []
 
-        for seq, overflows, data_raw in pending_data:
+        for seq, overflows, fmt, data_raw in pending_data:
             if overflows > 0:
                 logging.error(f"LDC1612ng at least {overflows} dropped conversions")
             if seq != self._next_seq:
@@ -841,17 +857,20 @@ class LDC1612_ng:
 
             self._next_seq = (seq + 1) & 0xFF
 
-            if len(data_raw) % (4 * 3) != 0:
+            sample_fmt = DATA_FORMATS.get(fmt)
+            if sample_fmt is None:
+                logging.error(f"LDC1612ng unknown data format {fmt}, ignoring")
+                continue
+            sample_size = struct.calcsize(sample_fmt)
+            if len(data_raw) % sample_size != 0:
                 logging.error(f"LDC1612ng invalid data length: {len(data_raw)}, ignoring")
                 continue
 
-            for i in range(len(data_raw) // (4*3)):
-                raw_t, raw_data, raw_accum = struct.unpack_from("<IIf", data_raw, i * 4 * 3)
-
-                t = self._clock32_to_print_time(raw_t)
-                times.append(t)
-                values.append(raw_data)
-                accum_values.append(raw_accum)
+            for sample in struct.iter_unpack(sample_fmt, data_raw):
+                times.append(self._clock32_to_print_time(sample[0]))
+                values.append(sample[1])
+                # the filter value is only sent when requested (for plotting)
+                accum_values.append(sample[2] if len(sample) > 2 else math.nan)
 
         if self._time_fit is not None:
             times = self._time_fit.add_reads(times)

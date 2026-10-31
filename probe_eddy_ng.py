@@ -472,6 +472,8 @@ class ProbeEddy:
         self._sampler: ProbeEddySampler = None
         self._last_sampler: ProbeEddySampler = None
         self.save_samples_path = None
+        # Set during TAP when a tap plot will be written
+        self._tap_plot_requested = False
 
         # The last tap Z value, in absolute axis terms. Used for status.
         self._last_tap_z = 0.0
@@ -799,6 +801,11 @@ class ProbeEddy:
         self._sampler = ProbeEddySampler(self, *args, **kwargs)
         self._sampler.start()
         return self._sampler
+
+    def wants_filter_values(self) -> bool:
+        # The tap filter value streamed from the sensor is only used for sample
+        # dumps and tap plots, so don't spend bandwidth on it otherwise
+        return self.save_samples_path is not None or self._tap_plot_requested
 
     def sampler_is_active(self):
         return self._sampler is not None and self._sampler.active()
@@ -1912,6 +1919,7 @@ class ProbeEddy:
         tap = None
 
         try:
+            self._tap_plot_requested = write_tap_plot
             self._sensor.set_drive_current(tap_drive_current)
 
             sample_last_err = None
@@ -1962,6 +1970,7 @@ class ProbeEddy:
                     if tap_z is not None:
                         break
         finally:
+            self._tap_plot_requested = False
             self.reset_drive_current()
             if write_tap_plot and not write_every_tap_plot and tap:
                 try:
@@ -2700,7 +2709,7 @@ class ProbeEddySampler:
         if self._stopped:
             raise self._printer.command_error("ProbeEddySampler.start() called after finish()")
         if not self._started:
-            self._sensor.start_streaming(self._add_hw_data)
+            self._sensor.start_streaming(self._add_hw_data, send_filter_values=self.eddy.wants_filter_values())
             self._started = True
 
     def finish(self):
