@@ -153,7 +153,6 @@ class ProbeEddyEndstopWrapper:
 
     def home_wait(self, home_end_time):
         self.eddy._log_debug(f"home_wait until {home_end_time:.3f}")
-        # logging.info(f"EDDYng home_wait {home_end_time} cur {curtime} ept {est_print_time} ehe {est_he_time}")
         self._dispatch.wait_end(home_end_time)
 
         # make sure homing is stopped, and grab the trigger_time from the mcu

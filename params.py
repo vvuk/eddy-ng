@@ -136,7 +136,9 @@ class ProbeEddyParams:
     primary: bool = True
     bigfoot_scan_position: list[float] | None = None
 
-    tap_trigger_safe_start_height: float = 1.5
+    # The height the toolhead must pass after home_trigger_height before a
+    # tap can be detected. Defaults to half of home_trigger_height.
+    tap_trigger_safe_start_height: float = 1.0
 
     _warning_msgs: List[str] = field(default_factory=list)
 
@@ -147,7 +149,7 @@ class ProbeEddyParams:
         self.probe_speed = config.getfloat("probe_speed", self.probe_speed, above=0.0)
         self.lift_speed = config.getfloat("lift_speed", self.lift_speed, above=0.0)
         self.move_speed = config.getfloat("move_speed", self.move_speed, above=0.0)
-        self.reg_drive_current = config.getint("reg_drive_current", 0, minval=0, maxval=31)
+        self.reg_drive_current = config.getint("reg_drive_current", self.reg_drive_current, minval=0, maxval=31)
 
         self.allow_unsafe = config.getboolean("allow_unsafe", self.allow_unsafe)
         self.debug = config.getboolean("debug", self.debug)
@@ -169,7 +171,7 @@ class ProbeEddyParams:
         )
         self.calibration_z_max = config.getfloat("calibration_z_max", self.calibration_z_max, above=0.0)
 
-        self.tap_drive_current = config.getint("tap_drive_current", 0, minval=0, maxval=31)
+        self.tap_drive_current = config.getint("tap_drive_current", self.tap_drive_current, minval=0, maxval=31)
         self.tap_start_z = config.getfloat("tap_start_z", self.tap_start_z, above=0.0)
         self.tap_target_z = config.getfloat("tap_target_z", self.tap_target_z)
         self.tap_speed = config.getfloat("tap_speed", self.tap_speed, above=0.0)
@@ -178,7 +180,7 @@ class ProbeEddyParams:
         # butter is the only tap mode; still accept it being named explicitly
         if config.get("tap_mode", "butter").lower() != "butter":
             raise config.error("ProbeEddy: only tap_mode 'butter' is supported; remove tap_mode (and tap_threshold) to use it")
-        self.tap_threshold = config.getfloat("tap_threshold", 250.0)
+        self.tap_threshold = config.getfloat("tap_threshold", self.tap_threshold)
 
         self.scan_sample_time = config.getfloat("scan_sample_time", self.scan_sample_time, above=0.0)
         self.scan_sample_time_delay = config.getfloat("scan_sample_time_delay", self.scan_sample_time_delay, minval=0.0)
@@ -199,13 +201,10 @@ class ProbeEddyParams:
         self.tap_use_median = config.getboolean("tap_use_median", self.tap_use_median)
         self.tap_trigger_safe_start_height = config.getfloat(
             "tap_trigger_safe_start_height",
-            -1.0,
+            self.home_trigger_height / 2.0,
             above=0.0,
         )
         self.tap_time_position = config.getfloat("tap_time_position", self.tap_time_position, minval=0.0, maxval=1.0)
-
-        if self.tap_trigger_safe_start_height == -1.0:  # sentinel
-            self.tap_trigger_safe_start_height = self.home_trigger_height / 2.0
 
         self.write_tap_plot = config.getboolean("write_tap_plot", self.write_tap_plot)
         self.write_every_tap_plot = config.getboolean("write_every_tap_plot", self.write_every_tap_plot)

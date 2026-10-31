@@ -20,11 +20,15 @@ BATCH_UPDATES = 0.100
 
 LDC1612_ADDR = 0x2A
 
+# MUX_CONFIG deglitch filter bandwidths, by name
 # TODO: configure these as part of calibration
-DEGLITCH_1_0MHZ = 0x01
-DEGLITCH_3_3MHZ = 0x04
-DEGLITCH_10MHZ = 0x05
-DEGLITCH_33MHZ = 0x07
+DEGLITCH_VALUES = {
+    "1mhz": 0x01,
+    "3.3mhz": 0x04,
+    "10mhz": 0x05,
+    "33mhz": 0x07,
+}
+DEGLITCH_NAMES = {v: k for k, v in DEGLITCH_VALUES.items()}
 
 LDC1612_MANUF_ID = 0x5449
 LDC1612_DEV_ID = 0x3055
@@ -285,7 +289,12 @@ class LDC1612_ng:
 
         self._drive_current = drive_current or self.default_drive_current
 
-        self._deglitch: str = config.get("ldc_deglitch", "default").lower()
+        deglitch = config.get("ldc_deglitch", "10mhz").lower()
+        if deglitch == "default":
+            deglitch = "10mhz"
+        if deglitch not in DEGLITCH_VALUES:
+            raise config.error(f"Invalid ldc_deglitch value: {deglitch} (must be one of {', '.join(DEGLITCH_VALUES)})")
+        self._deglitch = DEGLITCH_VALUES[deglitch]
         self.data_rate: int = config.getint("samples_per_second", 250, minval=50)
         self.settle_time = min(self.settle_time, 1.0 / self.data_rate)
         self.settle_time = config.getfloat("ldc_settle_time", self.settle_time)
@@ -635,15 +644,8 @@ class LDC1612_ng:
         reg_rcount = self.read_reg(REG_RCOUNT0)
         reg_offset = self.read_reg(REG_OFFSET0)
 
-        deglitch_now = self.get_deglitch()
-        if deglitch_now == DEGLITCH_1_0MHZ:
-            deglitch_now = "1mhz"
-        if deglitch_now == DEGLITCH_3_3MHZ:
-            deglitch_now = "3.3mhz"
-        if deglitch_now == DEGLITCH_10MHZ:
-            deglitch_now = "10mhz"
-        if deglitch_now == DEGLITCH_33MHZ:
-            deglitch_now = "33mhz"
+        deglitch_val = self.get_deglitch()
+        deglitch_now = DEGLITCH_NAMES.get(deglitch_val, hex(deglitch_val))
 
         offset_now = round(reg_offset / (1 << 16) * self._freq_conv)
         settle_now = reg_settlecount * 16.0 / self._ldc_freq_ref * 1000.0
@@ -659,17 +661,9 @@ class LDC1612_ng:
         settle = gcmd.get_float("SETTLE", None, above=0.0)
 
         if deglitch is not None:
-            if deglitch == "1mhz":
-                deglitch = DEGLITCH_1_0MHZ
-            elif deglitch == "3.3mhz":
-                deglitch = DEGLITCH_3_3MHZ
-            elif deglitch == "10mhz":
-                deglitch = DEGLITCH_10MHZ
-            elif deglitch == "33mhz":
-                deglitch = DEGLITCH_33MHZ
-            else:
-                raise self.printer.command_error(f"Invalid deglitch value: {deglitch}")
-            self.set_reg(REG_MUX_CONFIG, 0x0208 | deglitch)
+            if deglitch.lower() not in DEGLITCH_VALUES:
+                raise self.printer.command_error(f"Invalid deglitch value: {deglitch} (must be one of {', '.join(DEGLITCH_VALUES)})")
+            self.set_reg(REG_MUX_CONFIG, 0x0208 | DEGLITCH_VALUES[deglitch.lower()])
 
         if offset is not None:
             self._ldc_offset_reg = self._offset_hz_to_reg(offset, self.printer.command_error)
@@ -698,17 +692,6 @@ class LDC1612_ng:
 
         self._verify_chip()
 
-        # TODO: have a max_frequency and pick the best deglitch for it
-        if self._deglitch == "1mhz":
-            deglitch = DEGLITCH_1_0MHZ
-        elif self._deglitch == "3.3mhz":
-            deglitch = DEGLITCH_3_3MHZ
-        elif self._deglitch == "10mhz" or self._deglitch == "default":
-            deglitch = DEGLITCH_10MHZ
-        elif self._deglitch == "33mhz":
-            deglitch = DEGLITCH_33MHZ
-        else:
-            raise self.printer.error(f"Invalid {self._name} deglitch value: {self._deglitch}")
 
         # This is the TI-recommended register configuration order
         # Setup chip in requested query rate
@@ -725,7 +708,7 @@ class LDC1612_ng:
             (self._ldc_fin_divider << 12) | (self._ldc_fref_divider),
         )
         self.set_reg(REG_ERROR_CONFIG, 0b1111_1100_1111_1001)  # report everything to STATUS and INTB except ZC
-        self.set_reg(REG_MUX_CONFIG, 0x0208 | deglitch)
+        self.set_reg(REG_MUX_CONFIG, 0x0208 | self._deglitch)
         if (self._device_product == PRODUCT_LDC1612_INTERNAL_CLK):
             # use internal oscillator
             # RP_OVERRIDE_EN | AUTO_AMP_DIS | reserved
