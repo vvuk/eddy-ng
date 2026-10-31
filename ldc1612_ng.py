@@ -268,6 +268,13 @@ class LDC1612_ng:
     def _build_config(self):
         cmdqueue = self._i2c.get_command_queue()
 
+        # Older firmware silently accepts the new config command (extra params are
+        # ignored) but never sends ldc1612_ng_data, so check for it explicitly.
+        if self._mcu.try_lookup_command("config_ldc1612_ng oid=%c i2c_oid=%c product=%i in_div=%hu ref_div=%hu") is None:
+            raise self.printer.config_error(
+                f"LDC1612ng {self._name}: sensor firmware is out of date for this version of eddy-ng. Please rebuild and flash the sensor firmware."
+            )
+
         self._ldc1612_ng_start_stop_cmd = self._mcu.lookup_command("ldc1612_ng_start_stop oid=%c rest_ticks=%u", cq=cmdqueue)
 
         self._ldc1612_ng_latched_status_cmd = self._mcu.lookup_query_command(
