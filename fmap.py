@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 import math
 import pickle
 from typing import List, Optional, Tuple, final, TYPE_CHECKING
@@ -18,14 +17,11 @@ import numpy as np
 import numpy.polynomial as npp
 
 from .compat import ConfigWrapper, configerror
+from . import plots
 
 if TYPE_CHECKING:
     from .probe_eddy_ng import ProbeEddy
 
-try:
-    import plotly  # noqa
-except ImportError:
-    plotly = None
 
 
 @final
@@ -220,7 +216,8 @@ class ProbeEddyFrequencyMap:
         self._eddy._log_msg(f"{self}")
 
         if write_debug_files:
-            self._write_calibration_plot(
+            plots.write_calibration_plot(
+                self,
                 times,
                 freqs,
                 heights,
@@ -229,99 +226,6 @@ class ProbeEddyFrequencyMap:
             )
 
         return True
-
-    def _write_calibration_plot(
-        self,
-        times,
-        freqs,
-        heights,
-        rmse_fth,
-        vels=None,
-    ):
-        if not plotly:
-            return
-
-        if self._ftoh is None:
-            logging.warning("write_calibration_plot: null calibration?")
-            return
-
-        import plotly.graph_objects as go
-
-        low_samples = heights <= ProbeEddyFrequencyMap.low_z_threshold
-        high_samples = heights >= ProbeEddyFrequencyMap.low_z_threshold - 0.5
-
-        f_to_z_low_err = heights[low_samples] - self._ftoh(1.0 / freqs[low_samples])
-
-        if self._ftoh_high is not None:
-            f_to_z_high_err = heights[high_samples] - self._ftoh_high(1.0 / freqs[high_samples])
-        else:
-            f_to_z_high_err = None
-
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=times, y=heights, mode="lines", name="Z"))
-
-        fig.add_trace(
-            go.Scatter(
-                x=times[low_samples],
-                y=self._ftoh(1.0 / freqs[low_samples]),
-                mode="lines",
-                name=f"Z {rmse_fth:.4f}",
-            )
-        )
-
-        if self._ftoh_high is not None:
-            fig.add_trace(
-                go.Scatter(
-                    x=times[high_samples],
-                    y=self._ftoh_high(1.0 / freqs[high_samples]),
-                    mode="lines",
-                    name="Z (high)",
-                )
-            )
-
-        fig.add_trace(go.Scatter(x=times, y=freqs, mode="lines", name="F", yaxis="y2"))
-
-        fig.add_trace(
-            go.Scatter(
-                x=times[low_samples],
-                y=1.0 / self._heights_to_invfreqs(heights[low_samples]),
-                mode="lines",
-                name="F (fit)",
-                yaxis="y2",
-            )
-        )
-
-        fig.add_trace(
-            go.Scatter(
-                x=times[low_samples],
-                y=f_to_z_low_err,
-                mode="lines",
-                name="Err",
-                yaxis="y3",
-            )
-        )
-        if f_to_z_high_err is not None:
-            fig.add_trace(
-                go.Scatter(
-                    x=times[high_samples],
-                    y=f_to_z_high_err,
-                    mode="lines",
-                    name="Err (high)",
-                    yaxis="y3",
-                )
-            )
-
-        if vels is not None:
-            fig.add_trace(go.Scatter(x=times, y=vels, mode="lines", name="V", yaxis="y4"))
-
-        fig.update_layout(
-            hovermode="x unified",
-            title=f"Calibration for drive current {self.drive_current}",
-            yaxis2=dict(title="Freq", overlaying="y", tickformat="d", side="right"),
-            yaxis3=dict(overlaying="y", side="right", position=0.1),
-            yaxis4=dict(overlaying="y", side="right", position=0.2),
-        )
-        fig.write_html("/tmp/eddy-calibration.html")
 
     def freq_to_height(self, freq: float) -> float:
         return float(self.freqs_to_heights_np(np.asarray([freq]))[0])
