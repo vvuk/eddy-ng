@@ -50,7 +50,6 @@ from .compat import (
     manual_probe,
     bed_mesh,
     HomingMove,
-    IS_KALICO,
     HAS_PROBE_RESULT_TYPE,
     set_position_z_homed,
     clear_z_homed,
@@ -520,10 +519,6 @@ class ProbeEddy:
 
         # define our own commands
         self.define_commands(self._gcode)
-
-        # patch bed_mesh because Klipper
-        if not IS_KALICO:
-            bed_mesh.ProbeManager.start_probe = bed_mesh_ProbeManager_start_probe_override
 
     def _log_error(self, msg):
         logging.error(f"{self._name}: {msg}")
@@ -3131,15 +3126,3 @@ def np_rmse(p, x, y):
     y_hat = p(x)
     return np.sqrt(np.mean((y - y_hat) ** 2))
 
-
-def bed_mesh_ProbeManager_start_probe_override(self, gcmd):
-    method = gcmd.get("METHOD", "automatic").lower()
-    can_scan = False
-    pprobe = self.printer.lookup_object("probe", None)
-    if pprobe is not None:
-        probe_name = pprobe.get_status(None).get("name", "")
-        can_scan = "eddy" in probe_name
-    if method == "rapid_scan" and can_scan:
-        self.rapid_scan_helper.perform_rapid_scan(gcmd)
-    else:
-        self.probe_helper.start_probe(gcmd)

@@ -45,7 +45,7 @@ def uninstall_klipper(target_dir: str):
     makefile_path = os.path.join(target_dir, "src/Makefile")
     os.system(f"sed {SED_IN_PLACE_ARG} 's, sensor_ldc1612_ng.c,,' '{makefile_path}'")
 
-    print("Unpatching klippy/extras/bed-mesh.py...")
+    print("Unpatching klippy/extras/bed_mesh.py...")
     bed_mesh_path = os.path.join(target_dir, "klippy/extras/bed_mesh.py")
     os.system(
         f"sed {SED_IN_PLACE_ARG} 's,\"eddy\" in probe_name #eddy-ng,probe_name.startswith(\"probe_eddy_current\"),' '{bed_mesh_path}'"
@@ -125,11 +125,15 @@ def install_klipper(target_dir: str, uninstall: bool, copy: bool):
     makefile_path = os.path.join(target_dir, "src/Makefile")
     os.system(f"sed {SED_IN_PLACE_ARG} 's,sensor_ldc1612.c$,sensor_ldc1612.c sensor_ldc1612_ng.c,' '{makefile_path}'")
 
-    print("Patching klippy/extras/bed-mesh.py...")
+    # Klipper only allows BED_MESH_CALIBRATE METHOD=rapid_scan with probe_eddy_current
+    print("Patching klippy/extras/bed_mesh.py...")
     bed_mesh_path = os.path.join(target_dir, "klippy/extras/bed_mesh.py")
     os.system(
         f"sed {SED_IN_PLACE_ARG} 's,probe_name.startswith(\"probe_eddy_current\"),\"eddy\" in probe_name #eddy-ng,' '{bed_mesh_path}'"
     )
+    with open(bed_mesh_path) as f:
+        if "#eddy-ng" not in f.read():
+            print("Warning: couldn't patch bed_mesh.py; BED_MESH_CALIBRATE METHOD=rapid_scan won't be available with eddy-ng")
 
 
 def main():
