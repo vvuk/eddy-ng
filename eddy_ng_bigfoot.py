@@ -15,39 +15,38 @@ from typing import cast, TYPE_CHECKING
 
 from scipy.optimize import curve_fit
 
+from .base import EddyNgSensor
+from .compat import ConfigWrapper
+
 if TYPE_CHECKING:
-    from .probe_eddy_ng import ProbeEddy
     from .compat import ToolHead
 
 
-class BigfootProbe:
-    def __init__(self, eddy: ProbeEddy):
-        self.eddy = eddy
-        self.params = self.eddy.params
+# A probe_eddy_ng section with bigfoot: true
+class BigfootProbe(EddyNgSensor):
+    def __init__(self, config: ConfigWrapper):
+        super().__init__(config)
         self.last_result = None
         self.last_offset = None
-        self._printer = eddy._printer
-        self._sensor = eddy._sensor
         self._reference = [0.0, 0.0, 0.0]
 
-        gcode = self._printer.lookup_object("gcode")
-
-        names = [self.eddy._name]
-        if self.params.primary:
-            names.append(None)
-
-        for name in names:
-            gcode.register_mux_command("EDDYNG_NOZZLE_POSITION_SCAN", "SENSOR", name, self.cmd_EDDYNG_NOZZLE_POSITION_SCAN)
-            gcode.register_mux_command(
+        # Nothing else has these commands, so they're also available without
+        # SENSOR= even though a bigfoot sensor isn't primary by default (as
+        # long as there's only one bigfoot sensor).
+        for name in (self._name, None):
+            self._gcode.register_mux_command("EDDYNG_NOZZLE_POSITION_SCAN", "SENSOR", name, self.cmd_EDDYNG_NOZZLE_POSITION_SCAN)
+            self._gcode.register_mux_command(
                 "EDDYNG_NOZZLE_POSITION_SET_REFERENCE", "SENSOR", name, self.cmd_EDDYNG_NOZZLE_POSITION_SET_REFERENCE
             )
-            gcode.register_mux_command("EDDYNG_SET_TOOL_OFFSET", "SENSOR", name, self.cmd_EDDYNG_SET_TOOL_OFFSET)
+            self._gcode.register_mux_command("EDDYNG_SET_TOOL_OFFSET", "SENSOR", name, self.cmd_EDDYNG_SET_TOOL_OFFSET)
 
-    def update_status(self, status):
+    def get_status(self, eventtime):
+        status = {}
         if self.last_result:
-            status.update({"bigfoot_scan_result": self.last_result})
+            status["bigfoot_scan_result"] = self.last_result
         if self.last_offset:
-            status.update({"bigfoot_scan_offset": self.last_offset})
+            status["bigfoot_scan_offset"] = self.last_offset
+        return status
 
     def _last_probe_z_result(self):
         probe = self._printer.lookup_object("probe")
@@ -108,7 +107,7 @@ class BigfootProbe:
             self.cmd_EDDYNG_NOZZLE_POSITION_SCAN_actual(gcmd)
         except Exception as e:
             logging.exception("EDDYNG_NOZZLE_POSITION_SCAN error")
-            self.eddy._log_error(f"EDDYNG_NOZZLE_POSITION_SCAN error: {e}")
+            self._log_error(f"EDDYNG_NOZZLE_POSITION_SCAN error: {e}")
 
     def cmd_EDDYNG_NOZZLE_POSITION_SCAN_actual(self, gcmd):
         use_last = gcmd.get_int("USE_LAST", 0) == 1
@@ -116,9 +115,9 @@ class BigfootProbe:
             if not self.last_result:
                 raise self._printer.command_error("No last scan result to use for USE_LAST")
             x, y = self.last_result
-            z = self.eddy.params.bigfoot_scan_position[2] if self.eddy.params.bigfoot_scan_position else None
-        elif self.eddy.params.bigfoot_scan_position:
-            x, y, z = self.eddy.params.bigfoot_scan_position
+            z = self.params.bigfoot_scan_position[2] if self.params.bigfoot_scan_position else None
+        elif self.params.bigfoot_scan_position:
+            x, y, z = self.params.bigfoot_scan_position
         else:
             x, y, z = None, None, None
         x = gcmd.get_float("X", x)
@@ -133,7 +132,7 @@ class BigfootProbe:
         passes = gcmd.get_int("PASSES", 3)
 
         move_speed = gcmd.get_float("MOVE_SPEED", 100.0)
-        speed = gcmd.get_float("SPEED", self.eddy.params.probe_speed)
+        speed = gcmd.get_float("SPEED", self.params.probe_speed)
 
         zval = 0.0
         if scan_z_use_probe:
@@ -145,10 +144,10 @@ class BigfootProbe:
 
         th_z = th.get_position()[2]
         if th_z < z:
-            th.manual_move([None, None, z], self.eddy.params.lift_speed)
+            th.manual_move([None, None, z], self.params.lift_speed)
 
         th.manual_move([x, y, None], move_speed)
-        th.manual_move([None, None, z], self.eddy.params.lift_speed)
+        th.manual_move([None, None, z], self.params.lift_speed)
         th.wait_moves()
 
         def scan_between(start, end, passes):
@@ -178,7 +177,7 @@ class BigfootProbe:
                     t = sampler.times[i]
                     f = sampler.freqs[i]
                     rf = sampler.raw_freqs[i]
-                    pos, v = self.eddy._get_trapq_position(t)
+                    pos, v = self._get_trapq_position(t)
                     x, y, z = pos if pos is not None else ("", "", "")
                     datafile.write(f"{axis},{t},{x},{y},{z},{f},{rf}\n")
 
@@ -191,7 +190,7 @@ class BigfootProbe:
             tstart_pos[axindex] -= radius
             tend_pos[axindex] += radius
 
-            with self.eddy.start_sampler(calculate_heights=False) as sampler:
+            with self.start_sampler(calculate_heights=False) as sampler:
                 tstart, tend = scan_between(tstart_pos, tend_pos, passes)
                 sampler.wait_for_sample_at_time(tend, max_wait_time=1.0)
                 sampler.finish()
@@ -201,7 +200,7 @@ class BigfootProbe:
                 np_rf = np.asarray(sampler.freqs)
                 valid = ~np.isnan(np_rf)
                 np_times, np_rf = np_times[valid], np_rf[valid]
-                np_pos = np.asarray([self.eddy._get_trapq_position(t)[0][axindex] for t in np_times])
+                np_pos = np.asarray([self._get_trapq_position(t)[0][axindex] for t in np_times])
 
                 write_debug(axis)
 
@@ -221,13 +220,13 @@ class BigfootProbe:
                 a, x0, sigma, offset = popt
                 val = gaussian(x0, *popt)
 
-                self.eddy._log_msg(
+                self._log_msg(
                     f"{axis} {x0:.3f} (fv {val:.6f} sigma {sigma:.6f} over {tend - tstart:.3f}s, {len(sampler.times)} samples)"
                 )
                 result[axindex] = float(x0)
 
         # we're moving at speed mm/sec. we're sampling at rcount_sec.
-        rcount_sec = self.eddy._sensor.get_rcount_sec()
+        rcount_sec = self._sensor.get_rcount_sec()
         # samples_per_sec = 1.0 / rcount_sec
         # TODO: not correct, need to also look at the quantization of the data.
         # would be handy to be able to log this.
@@ -240,7 +239,7 @@ class BigfootProbe:
         if self._reference[0] != 0.0 and self._reference[1] != 0.0 and self._reference[2] != 0.0:
             msg += f"\nOffset: {offset[0]:.3f} {offset[1]:.3f} {offset[2]:.3f} (samp_ms: {rcount_sec * 1000.0:.3f} speed: {speed:.3f})"
 
-        self.eddy._log_msg(msg)
+        self._log_msg(msg)
 
         self.last_result = result
         self.last_offset = offset

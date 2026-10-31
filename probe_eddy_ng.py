@@ -10,19 +10,9 @@ from __future__ import annotations
 
 import logging
 import math
+from typing import Any, Dict, List, Optional, final
+
 import numpy as np
-
-
-
-
-from typing import (
-    Any,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-    final,
-)
 
 if __package__ in (None, "", "extras"):
     # Loaded as a single file from klippy/extras: an install from before
@@ -30,8 +20,6 @@ if __package__ in (None, "", "extras"):
     raise ImportError("eddy-ng's install layout has changed; please re-run eddy-ng's install.sh")
 
 from .compat import (
-    chelper,
-    Printer,
     ConfigWrapper,
     GCodeCommand,
     ToolHead,
@@ -41,14 +29,13 @@ from .compat import (
     set_position_z_homed,
     clear_z_homed,
 )
-from . import ldc1612_ng
-from .params import ProbeEddyParams
-from .sampler import ProbeEddySampler, ProbeEddyProbeResult
+from .sampler import ProbeEddyProbeResult
 from .fmap import ProbeEddyFrequencyMap
 from .tap import TapResult, TapConfig, compute_tap_z, tap_filter_sos
 from .endstop import ProbeEddyEndstopWrapper
 from .scan import ProbeEddyScanningProbe, BedMeshScanHelper
 from . import plots
+from .base import EddyNgSensor
 
 
 # In this file, a couple of conventions are used (for sanity).
@@ -118,43 +105,12 @@ from . import plots
 
 
 @final
-class ProbeEddy:
+class ProbeEddy(EddyNgSensor):
     def __init__(self, config: ConfigWrapper):
         logging.info("Hello from ProbeEddyNG")
-
-        self._printer: Printer = config.get_printer()
-        self._reactor = self._printer.get_reactor()
-        self._gcode = self._printer.lookup_object("gcode")
-        self._full_name = config.get_name()
-        self._name = self._full_name.split()[-1]
-
-        self.params = ProbeEddyParams()
-        self.params.load_from_config(config)
-
-        # drive currents saved by older versions
-        old_saved_reg_drive_current = config.getint("saved_reg_drive_current", 0, minval=0, maxval=31)
-        old_saved_tap_drive_current = config.getint("saved_tap_drive_current", 0, minval=0, maxval=31)
-
-        self._sensor = ldc1612_ng.LDC1612_ng(
-            config,
-            name=self._name,
-            primary=self.params.primary,
-            drive_current=self.params.reg_drive_current or old_saved_reg_drive_current,
-            debug=self.params.debug,
-        )
-        self._mcu = self._sensor.get_mcu()
-        self._toolhead: ToolHead = None  # filled in _handle_connect
-        self._trapq = None
-
+        super().__init__(config)
 
         self._dc_to_fmap: Dict[int, ProbeEddyFrequencyMap] = {}
-
-        # There can only be one active sampler at a time
-        self._sampler: ProbeEddySampler = None
-        self._last_sampler: ProbeEddySampler = None
-        self.save_samples_path = None
-        # Set during TAP when a tap plot will be written
-        self._tap_plot_requested = False
 
         # The last tap Z value, in absolute axis terms. Used for status.
         self._last_tap_z = 0.0
@@ -162,28 +118,14 @@ class ProbeEddy:
         # value, or 0.0 if HOME_Z=1
         self._last_tap_gcode_adjustment = 0.0
 
-        self._ffi_pull_move_1 = chelper.get_ffi()[0].new("struct pull_move[1]")
-
-        self._printer.register_event_handler("gcode:command_error", self._handle_command_error)
-        self._printer.register_event_handler("klippy:connect", self._handle_connect)
-
-        if self.params.bigfoot:
-            try:
-                from . import eddy_ng_bigfoot
-            except ImportError as e:
-                raise self._printer.config_error(f"ProbeEddy: unable to load bigfoot support, which requires scipy: {e}")
-
-            self.define_commands(self._gcode, bigfoot=True)
-            self._bigfoot = eddy_ng_bigfoot.BigfootProbe(self)
-            return
-
-        self._bigfoot = None
-
         # figure out if either of these comes from the autosave section
         # so we can sort out what we want to write out later on
         asfc = self._printer.lookup_object("configfile").autosave.fileconfig
         self._saved_reg_drive_current = asfc.getint(self._full_name, "reg_drive_current", fallback=None)
         self._saved_tap_drive_current = asfc.getint(self._full_name, "tap_drive_current", fallback=None)
+
+        # drive current saved by older versions
+        old_saved_tap_drive_current = config.getint("saved_tap_drive_current", 0, minval=0, maxval=31)
 
         self._reg_drive_current = self._sensor.get_drive_current()
         self._tap_drive_current = self.params.tap_drive_current or old_saved_tap_drive_current or self._reg_drive_current
@@ -243,128 +185,35 @@ class ProbeEddy:
 
         self._tap_sos = tap_filter_sos(self.params, self._sensor.data_rate, self._printer.config_error)
 
-        # define our own commands
-        self.define_commands(self._gcode)
+        self._register_commands(
+            [
+                ["PROBE_STATIC", "PEPS"],
+                "SETUP",
+                "CALIBRATE",
+                "CALIBRATION_STATUS",
+                "CLEAR_CALIBRATION",
+                "PROBE_ACCURACY",
+                "SET_TAP_OFFSET",
+                "SET_TAP_ADJUST_Z",
+                "TEST_DRIVE_CURRENT",
+                ["PROBE", "PEP"],
+                ["TAP", "PETAP"],
+                "BED_MESH_EXPERIMENTAL",
+            ]
+        )
 
-    def _log_error(self, msg):
-        logging.error(f"{self._name}: {msg}")
-        self._gcode.respond_raw(f"!! EDDYng: {msg}\n")
-
-    def _log_warning(self, msg):
-        logging.warning(f"{self._name}: {msg}")
-        self._gcode.respond_raw(f"!! EDDYng: {msg}\n")
-
-    def _log_msg(self, msg):
-        logging.info(f"{self._name}: {msg}")
-        self._gcode.respond_info(f"{msg}", log=False)
-
-    def _log_info(self, msg):
-        logging.info(f"{self._name}: {msg}")
-
-    def _log_debug(self, msg):
-        if self.params.debug:
-            logging.info(f"{self._name}: {msg}")
-
-    def define_commands(self, gcode, bigfoot: bool = False):
-        names = [self._name]
+        # Replace Klipper's Z_OFFSET_APPLY_PROBE, which would apply the offset
+        # to a z_offset we don't use
         if self.params.primary:
-            names.append(None)
-
-        if self.params.primary:
-            gcode.register_command("Z_OFFSET_APPLY_PROBE", None)
-
-        base_commands = [
-            ["STATUS", "PES"],
-            ["PROBE_STATIC", "PEPS"],
-
-            "STREAM_START",
-            "STREAM_STOP",
-        ]
-
-        tap_commands = [
-            "SETUP",
-            "CALIBRATE",
-            "CALIBRATION_STATUS",
-            "CLEAR_CALIBRATION",
-            "PROBE_ACCURACY",
-            "SET_TAP_OFFSET",
-            "SET_TAP_ADJUST_Z",
-            "TEST_DRIVE_CURRENT",
-            ["PROBE", "PEP"],
-            ["TAP", "PETAP"],
-
-            "BED_MESH_EXPERIMENTAL",
-        ]
-
-        commands = base_commands.copy()
-        if not bigfoot:
-            commands.extend(tap_commands)
-
-        prefixes = ["PROBE_EDDY_NG", "EDDYNG"]
-
-        for name in names:
-            for v in commands:
-                if type(v) is list:
-                    cmd_name = v[0]
-                    aliases = v[1:]
-                else:
-                    cmd_name = v
-                    aliases = []
-
-                func_name = f"cmd_{cmd_name.replace('_EXPERIMENTAL', '')}"
-
-                cmd_fn = getattr(self, func_name)
-                cmd_help = getattr(self, f"{func_name}_help", None)
-                for p in prefixes:
-                    gcode.register_mux_command(f"{p}_{cmd_name}", "SENSOR", name, cmd_fn, cmd_help)
-                for alias in aliases:
-                    gcode.register_mux_command(alias, "SENSOR", name, cmd_fn, (cmd_help or "") + f" (alias for {cmd_name})")
-
-            gcode.register_mux_command(
+            self._gcode.register_command("Z_OFFSET_APPLY_PROBE", None)
+        for name in [self._name] + ([None] if self.params.primary else []):
+            self._gcode.register_mux_command(
                 "Z_OFFSET_APPLY_PROBE",
-                "SENSOR", name,
+                "SENSOR",
+                name,
                 self.cmd_Z_OFFSET_APPLY_PROBE,
                 "Apply the current G-Code Z offset to tap_adjust_z",
             )
-
-    def _handle_command_error(self, gcmd=None):
-        try:
-            if self._sampler is not None:
-                logging.info("COMMAND ERROR")
-                self._sampler.finish()
-        except:
-            logging.exception("EDDYng handle_command_error: sampler.finish() failed")
-
-    def _handle_connect(self):
-        self._toolhead = self._printer.lookup_object("toolhead")
-        self._trapq = self._toolhead.get_trapq()
-        for msg in self.params._warning_msgs:
-            self._log_warning(msg)
-
-    def _get_trapq_position(self, print_time: float) -> Tuple[Tuple[float, float, float] | None, float | None]:
-        ffi_main, ffi_lib = chelper.get_ffi()
-        count = ffi_lib.trapq_extract_old(self._trapq, self._ffi_pull_move_1, 1, 0.0, print_time)
-        if not count:
-            return None, None
-        move = self._ffi_pull_move_1[0]
-        move_time = max(0.0, min(move.move_t, print_time - move.print_time))
-        dist = (move.start_v + 0.5 * move.accel * move_time) * move_time
-        pos = (
-            move.start_x + move.x_r * dist,
-            move.start_y + move.y_r * dist,
-            move.start_z + move.z_r * dist,
-        )
-        velocity = move.start_v + move.accel * move_time
-        return pos, velocity
-
-    def _get_trapq_height(self, print_time: float) -> float:
-        th_pos, _ = self._get_trapq_position(print_time)
-        if th_pos is None:
-            return None
-        return th_pos[2]
-
-    def current_drive_current(self) -> int:
-        return self._sensor.get_drive_current()
 
     def reset_drive_current(self):
         if self._reg_drive_current == 0:
@@ -393,9 +242,6 @@ class ProbeEddy:
         if drive_current is None:
             drive_current = self.current_drive_current()
         return drive_current in self._dc_to_fmap and self._dc_to_fmap[drive_current].calibrated()
-
-    def _print_time_now(self):
-        return self._mcu.estimated_print_time(self._reactor.monotonic())
 
     def _z_homed(self):
         curtime = self._reactor.monotonic()
@@ -447,80 +293,11 @@ class ProbeEddy:
 
         self._log_msg("Calibration saved. Issue a SAVE_CONFIG to write the values to your config file and restart Klipper.")
 
-    def start_sampler(self, *args, **kwargs) -> ProbeEddySampler:
-        if self._sampler:
-            raise self._printer.command_error("EDDYng: Already sampling! (This shouldn't happen; FIRMWARE_RESTART to fix)")
-        self._sampler = ProbeEddySampler(self, *args, **kwargs)
-        self._sampler.start()
-        return self._sampler
-
-    def wants_filter_values(self) -> bool:
-        # The tap filter value streamed from the sensor is only used for sample
-        # dumps and tap plots, so don't spend bandwidth on it otherwise
-        return self.save_samples_path is not None or self._tap_plot_requested
-
-    def sampler_is_active(self):
-        return self._sampler is not None and self._sampler.active()
-
-    # Called by samplers when they're finished
-    def _sampler_finished(self, sampler: ProbeEddySampler):
-        if self._sampler is not sampler:
-            raise self._printer.command_error("EDDYng finishing sampler that's not active")
-
-        self._last_sampler = sampler
-        self._sampler = None
-
-        if self.save_samples_path is not None:
-            with open(self.save_samples_path, "w") as data_file:
-                times = sampler.times
-                raw_freqs = sampler.raw_freqs
-                accum_vals = sampler.accum_vals
-                freqs = sampler.freqs
-                heights = sampler.heights
-
-                data_file.write("time,frequency,z,kin_z,kin_v,raw_f,sos_val,trigger_time,tap_start_time\n")
-                trigger_time = sampler.memos.get("trigger_time", "")
-                tap_start_time = sampler.memos.get("tap_start_time", "")
-                for i in range(len(times)):
-                    past_pos, past_v = self._get_trapq_position(times[i])
-                    past_k_z = past_pos[2] if past_pos is not None else ""
-                    past_v = past_v if past_v is not None else ""
-                    data_file.write(
-                        f"{times[i]},{freqs[i]},{heights[i] if heights else ''},{past_k_z},{past_v},{raw_freqs[i]},{accum_vals[i]},{trigger_time},{tap_start_time}\n"
-                    )
-            logging.info(f"Wrote {len(times)} samples to {self.save_samples_path}")
-            self.save_samples_path = None
-
     def cmd_BED_MESH(self, gcmd: GCodeCommand):
         if self._bed_mesh_helper is None:
             raise self._printer.command_error("No [bed_mesh] section configured")
         self._bed_mesh_helper.scan()
 
-    cmd_STATUS_help = "Query the last raw coil value and status"
-
-    def cmd_STATUS(self, gcmd: GCodeCommand):
-        result = self._sensor.read_one_value()
-
-        status = result.status
-        freqval = result.freqval
-        freq = result.freq
-        height = -math.inf
-
-        err = ""
-        if freqval > 0x0FFFFFFF:
-            height = -math.inf
-            freq = 0.0
-            err = f"ERROR: {bin(freqval >> 28)} "
-        elif freq <= 0.0:
-            err += "(Zero frequency) "
-        elif self.calibrated():
-            height = self.freq_to_height(freq)
-        else:
-            err += "(Not calibrated) "
-
-        gcmd.respond_info(
-            f"Last coil value: {freq:.2f} ({height:.3f}mm) raw: {hex(freqval)} {err}status: {hex(status)} {self._sensor.status_to_str(status)}"
-        )
 
     cmd_PROBE_ACCURACY_help = "Probe accuracy"
 
@@ -1115,9 +892,6 @@ class ProbeEddy:
         return session
 
     def get_status(self, eventtime):
-        if self.params.bigfoot:
-            return dict()
-
         if self._cmd_helper is not None:
             status = self._cmd_helper.get_status(eventtime)
         else:
@@ -1132,8 +906,6 @@ class ProbeEddy:
                 "last_tap_z": float(self._last_tap_z),
             }
         )
-        if self._bigfoot:
-            self._bigfoot.update_status(status)
         return status
 
     # Old Probe interface, for Kalico
@@ -1597,18 +1369,3 @@ class ProbeEddy:
             th.flush_step_generation()
 
         self._log_debug("EDDYng Tap end\n")
-
-    def cmd_STREAM_START(self, gcmd):
-        self.save_samples_path = "/tmp/stream.csv"
-        msg = f"Starting stream to {self.save_samples_path}"
-        if not self.calibrated():
-            msg += " (not calibrated)"
-        gcmd.respond_info(msg)
-        self.start_sampler(calculate_heights=self.calibrated())
-
-    def cmd_STREAM_STOP(self, gcmd):
-        self._log_info("Eddy sampling finished")
-        sampler = self._sampler
-        self._sampler.finish()
-        gcmd.respond_info(f"Stopped stream ({len(sampler.times)} samples, of which {sampler.error_count} errors)")
-
