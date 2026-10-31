@@ -44,8 +44,6 @@ The tap makes contact with the bed. By default it never goes below Z=-0.250 (rel
 
 ## Help and support
 
-Ask questions in the `eddy-ng` forum on the Sovol 3D Printers Discord (`https://discord.gg/Zg45rA52G7`, or search for "Sovol 3D Printers" in Discord's Discover tab). Nothing about eddy-ng is Sovol-specific; it's just where this work started.
-
 File bugs in the [eddy-ng GitHub repository](https://github.com/vvuk/eddy-ng/issues).
 
 If you find eddy-ng useful, please consider [supporting its development](https://ko-fi.com/vvuk).
