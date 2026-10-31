@@ -37,6 +37,18 @@ cd ~/eddy-ng
 
 3. Follow the rest of the full `eddy-ng` setup instructions that are [available in the wiki](https://github.com/vvuk/eddy-ng/wiki).
 
+## Bed mesh
+
+On both Klipper and Kalico, use the standard bed mesh command with the rapid scan method:
+
+```
+BED_MESH_CALIBRATE METHOD=rapid_scan
+```
+
+Everything `[bed_mesh]` supports works as usual, including `ADAPTIVE=1`, faulty regions, `zero_reference_position` and axis twist compensation. The scan runs at `horizontal_move_z`, so set it close to `home_trigger_height` (e.g. `horizontal_move_z: 2`) for the best accuracy. Use `SCAN_SPEED=` to override the speed. On Kalico, this needs a version that supports `METHOD=rapid_scan` (October 2026 or newer).
+
+The old `EDDYNG_BED_MESH_EXPERIMENTAL` command has been removed.
+
 ## Updating
 
 Run a `git pull` and then run `./install.sh` again:

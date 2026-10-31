@@ -2,19 +2,17 @@
 #
 # Copyright (C) 2025  Vladimir Vukicevic <vladimir@pobox.com>
 #
-# Probing without moving Z: the probe session used by bed mesh, QGL etc.,
-# and the experimental direct bed mesh scan
+# Probing without moving Z: the probe session used by bed mesh, QGL etc.
+# on Klipper, and the distance collector used by Kalico's rapid scan
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 from __future__ import annotations
 
 import logging
 import math
-from typing import Any, final, TYPE_CHECKING
+from typing import Any, List, NamedTuple, final, TYPE_CHECKING
 
-import numpy as np
-
-from .compat import GCodeCommand, bed_mesh, manual_probe, HAS_PROBE_RESULT_TYPE
+from .compat import GCodeCommand, manual_probe, HAS_PROBE_RESULT_TYPE
 
 if TYPE_CHECKING:
     from .probe_eddy_ng import ProbeEddy
@@ -147,120 +145,48 @@ class ProbeEddyScanningProbe:
         return results
 
 
+# Matches Kalico's probe.ProbeDistanceResult
+class ProbeEddyDistanceResult(NamedTuple):
+    time: float
+    distance: float
+
+
+# Kalico's ProbeDistanceCollector, returned from begin_collect_distance().
+# Kalico's BED_MESH_CALIBRATE METHOD=rapid_scan moves the toolhead itself
+# at horizontal_move_z and uses this to get the distance to the bed over
+# time; it does the path generation (including adaptive meshes and
+# faulty regions), windowing and averaging.
 @final
-class BedMeshScanHelper:
-    def __init__(self, eddy, config):
-        self._eddy = eddy
+class ProbeEddyDistanceCollector:
+    def __init__(self, eddy: ProbeEddy):
+        self.eddy = eddy
         self._printer = eddy._printer
 
-        bmc = config.getsection("bed_mesh")
-        self._bed_mesh = eddy._printer.load_object(bmc, "bed_mesh")
-        self._x_points, self._y_points = bmc.getintlist("probe_count", count=2, note_valid=False)
-        self._x_min, self._y_min = bmc.getfloatlist("mesh_min", count=2, note_valid=False)
-        self._x_max, self._y_max = bmc.getfloatlist("mesh_max", count=2, note_valid=False)
-        self._speed = bmc.getfloat("speed", 100.0, above=0.0, note_valid=False)
-        self._scan_z = bmc.getfloat("horizontal_move_z", self._eddy.params.home_trigger_height, above=0.0, note_valid=False)
+        if not eddy._z_homed():
+            raise self._printer.command_error("Z axis must be homed before probing")
+        if not eddy.calibrated():
+            raise self._printer.command_error("EDDYng not calibrated!")
 
-        self._x_offset = self._eddy.params.x_offset
-        self._y_offset = self._eddy.params.y_offset
+        # the scan may be at a different height than the tap was, but
+        # this is the best adjustment we have (same as the probe session)
+        self._tap_offset = eddy._tap_offset
+        self._sampler: ProbeEddySampler = eddy.start_sampler()
 
-        self._mesh_path = self._generate_path()
+    def sample_rate(self) -> float:
+        return float(self.eddy._sensor.data_rate)
 
-    # A serpentine path: rows from min_y to max_y, alternating direction
-    def _generate_path(self):
-        x_vals = np.linspace(self._x_min, self._x_max, self._x_points)
-        y_vals = np.linspace(self._y_min, self._y_max, self._y_points)
-        path = []
-        for j, y in enumerate(y_vals):
-            path.extend((x, y) for x in (x_vals[::-1] if j % 2 else x_vals))
-        return path
+    def finish(self, before_time: float) -> List[ProbeEddyDistanceResult]:
+        # only the first call needs to return anything
+        sampler = self._sampler
+        if sampler is None:
+            return []
+        self._sampler = None
 
-    def _scan_path(self):
-        th = self._eddy._toolhead
-        times = []
-
-        for pt in self._mesh_path:
-            # TODO bounds
-            th.manual_move([pt[0] - self._x_offset, pt[1] - self._y_offset, None], self._speed)
-            th.register_lookahead_callback(lambda t: times.append(t))
-
-        th.wait_moves()
-
-        return times
-
-    def _set_bed_mesh(self, heights):
-        # heights is in _mesh_path order; undo the serpentine so rows go
-        # min_y..max_y and each row min_x..max_x
-        matrix = self._scan_z - np.asarray(heights, dtype=float).reshape(self._y_points, self._x_points)
-        matrix[1::2] = matrix[1::2, ::-1]
-        matrix = matrix.tolist()
-
-        # heights may have NaNs in them if there were no samples during a point's
-        # scan time; fill these in with the average of the valid adjacent points
-        for j in range(self._y_points):
-            for i in range(self._x_points):
-                if not math.isnan(matrix[j][i]):
-                    continue
-                adjacent = [
-                    matrix[nj][ni]
-                    for nj, ni in ((j - 1, i), (j + 1, i), (j, i - 1), (j, i + 1))
-                    if 0 <= nj < self._y_points and 0 <= ni < self._x_points and not math.isnan(matrix[nj][ni])
-                ]
-                if not adjacent:
-                    raise self._printer.command_error(f"No sample for mesh point [{i},{j}] and all adjacent samples are missing")
-                matrix[j][i] = sum(adjacent) / len(adjacent)
-
-        params = self._bed_mesh.bmc.mesh_config.copy()
-        params.update(
-            {
-                "min_x": self._x_min,
-                "max_x": self._x_max,
-                "min_y": self._y_min,
-                "max_y": self._y_max,
-                "x_count": self._x_points,
-                "y_count": self._y_points,
-            }
-        )
-        mesh = bed_mesh.ZMesh(params, None)
         try:
-            mesh.build_mesh(matrix)
-        except bed_mesh.BedMeshError as e:
-            raise self._printer.command_error(str(e))
-        self._bed_mesh.set_mesh(mesh)
-        self._eddy._log_msg("Mesh scan complete")
+            sampler.wait_for_sample_at_time(before_time)
+        finally:
+            sampler.finish()
 
-    def scan(self):
-        th = self._eddy._toolhead
-
-        # move to the start point
-        v = self._mesh_path[0]
-        th.manual_move([None, None, 10.0], self._eddy.params.lift_speed)
-        th.manual_move([v[0] - self._x_offset, v[1] - self._y_offset, None], self._speed)
-        th.manual_move([None, None, self._scan_z], self._eddy.params.probe_speed)
-        th.wait_moves()
-
-        heights = []
-
-        sample_time = self._eddy.params.scan_sample_time
-
-        with self._eddy.start_sampler() as sampler:
-            path_times = self._scan_path()
-            sampler.wait_for_sample_at_time(path_times[-1] + sample_time * 2.0)
-
-        heights = sampler.find_heights_at_times([(t - sample_time / 2.0, t + sample_time / 2.0) for t in path_times])
-
-        # Note plus tap_offset here, vs -tap_offset when probing. These are actual
-        # heights, the other is "offset from real"
-        heights = [h + self._eddy._tap_offset for h in heights]
-
-        with open("/tmp/mesh.csv", "w") as mfile:
-            mfile.write("time,x,y,z\n")
-            for i in range(len(self._mesh_path)):
-                t = path_times[i]
-                x = self._mesh_path[i][0]
-                y = self._mesh_path[i][1]
-                z = heights[i]
-                mfile.write(f"{t},{x},{y},{z}\n")
-
-        self._set_bed_mesh(heights)
-
+        # error samples are dropped; a point with none left fails the scan
+        times, heights = sampler.heights_between(0.0, before_time)
+        return [ProbeEddyDistanceResult(float(t), float(h + self._tap_offset)) for t, h in zip(times, heights)]

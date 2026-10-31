@@ -29,7 +29,7 @@ from .sampler import ProbeEddyProbeResult
 from .fmap import ProbeEddyFrequencyMap
 from .tap import TapResult, TapConfig, compute_tap_z, tap_filter_sos
 from .endstop import ProbeEddyEndstopWrapper
-from .scan import ProbeEddyScanningProbe, BedMeshScanHelper
+from .scan import ProbeEddyScanningProbe
 from . import plots
 from .base import EddyNgSensor
 
@@ -164,7 +164,10 @@ class ProbeEddy(EddyNgSensor):
         # functionality like start_session
         self._printer.add_object("probe", self)
 
-        self._bed_mesh_helper = BedMeshScanHelper(self, config) if config.has_section("bed_mesh") else None
+        # Kalico's PrinterProbe attributes that its probing code (ProbePointsHelper,
+        # including METHOD=rapid_scan) reads directly
+        self.name = self._full_name
+        self.mcu_probe = self._endstop_wrapper
 
         if hasattr(probe, "ProbeCommandHelper"):
             self._cmd_helper = probe.ProbeCommandHelper(config, self, self._endstop_wrapper.query_endstop)
@@ -289,11 +292,8 @@ class ProbeEddy(EddyNgSensor):
 
         self._log_msg("Calibration saved. Issue a SAVE_CONFIG to write the values to your config file and restart Klipper.")
 
-    def cmd_BED_MESH(self, gcmd: GCodeCommand):
-        if self._bed_mesh_helper is None:
-            raise self._printer.command_error("No [bed_mesh] section configured")
-        self._bed_mesh_helper.scan()
-
+    def cmd_BED_MESH_EXPERIMENTAL(self, gcmd: GCodeCommand):
+        raise self._printer.command_error("EDDYNG_BED_MESH_EXPERIMENTAL has been removed; use BED_MESH_CALIBRATE METHOD=rapid_scan instead")
 
     cmd_PROBE_ACCURACY_help = "Probe accuracy"
 
@@ -896,6 +896,10 @@ class ProbeEddy(EddyNgSensor):
         return status
 
     # Old Probe interface, for Kalico
+
+    @property
+    def speed(self):
+        return self.params.probe_speed
 
     def get_lift_speed(self, gcmd=None):
         if gcmd is not None:

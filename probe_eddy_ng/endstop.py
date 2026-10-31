@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Optional, final, TYPE_CHECKING
 
 from .compat import mcu, pins
+from .scan import ProbeEddyDistanceCollector
 
 if TYPE_CHECKING:
     from .probe_eddy_ng import ProbeEddy
@@ -215,3 +216,6 @@ class ProbeEddyEndstopWrapper:
     def query_endstop(self, print_time):
         return False
 
+    # Kalico's METHOD=rapid_scan looks for this on probe.mcu_probe
+    def begin_collect_distance(self):
+        return ProbeEddyDistanceCollector(self.eddy)

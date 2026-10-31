@@ -67,7 +67,7 @@ class EddyNgSensor:
     # Register PROBE_EDDY_NG_<cmd> and EDDYNG_<cmd> (plus any aliases) for
     # this sensor, and for no SENSOR= at all if this is the primary one. Each
     # entry is a command name or a [name, aliases...] list; the handler is
-    # cmd_<name> (without any _EXPERIMENTAL suffix).
+    # cmd_<name>.
     def _register_commands(self, commands: List[Union[str, List[str]]]):
         names = [self._name]
         if self.params.primary:
@@ -84,7 +84,7 @@ class EddyNgSensor:
                     cmd_name = v
                     aliases = []
 
-                func_name = f"cmd_{cmd_name.replace('_EXPERIMENTAL', '')}"
+                func_name = f"cmd_{cmd_name}"
 
                 cmd_fn = getattr(self, func_name)
                 cmd_help = getattr(self, f"{func_name}_help", None)
