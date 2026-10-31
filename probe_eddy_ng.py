@@ -17,7 +17,7 @@ import base64
 import time
 import numpy as np
 import numpy.polynomial as npp
-from itertools import combinations
+
 from functools import cmp_to_key
 
 
@@ -1984,36 +1984,28 @@ class ProbeEddy:
 
         self._log_debug("EDDYng Tap end\n")
 
-    # Compute the average tap_z from a set of tap results, taking a cluster of samples
-    # from the result that has the lowest standard deviation
-    def _compute_tap_z(self, taps: List[ProbeEddy.TapResult], samples: int, req_stddev: float, use_median: bool) -> Tuple[float, float, float]:
+    # Compute the average tap_z from a set of tap results, taking the cluster of
+    # `samples` taps with the lowest standard deviation
+    @staticmethod
+    def _compute_tap_z(taps: List[ProbeEddy.TapResult], samples: int, req_stddev: float, use_median: bool) -> Tuple[float, float, float]:
         if len(taps) < samples:
             return None, None, None
 
-        tap_z = math.inf
-        std_min = math.inf
-        overshoot = math.inf
-        for cluster in combinations(taps, samples):
-            tap_zs = np.array([t.probe_z for t in cluster])
-            overshoots = np.array([t.overshoot for t in cluster])
-            std = np.std(tap_zs)
-            if std < std_min:
-                std_min = std
-                if use_median:
-                    # we need the corresponding overshoot as well, so
-                    # can't just use np.median().
-                    sorted_indices = np.argsort(tap_zs)
-                    idx = len(tap_zs) // 2
-                    tap_z = tap_zs[sorted_indices[idx]]
-                    overshoot = overshoots[sorted_indices[idx]]
-                else:
-                    tap_z = np.mean(tap_zs)
-                    overshoot = np.mean(overshoots)
+        # The lowest-stddev subset of a given size is always a run of
+        # consecutive values once they're sorted, so only those need checking.
+        taps = sorted(taps, key=lambda t: t.probe_z)
+        tap_zs = np.array([t.probe_z for t in taps])
+        start = min(range(len(taps) - samples + 1), key=lambda i: np.std(tap_zs[i : i + samples]))
+        cluster = taps[start : start + samples]
+        std_min = float(np.std(tap_zs[start : start + samples]))
 
-        if std_min <= req_stddev:
-            return float(tap_z), float(std_min), float(overshoot)
-        else:
-            return None, float(std_min), None
+        if std_min > req_stddev:
+            return None, std_min, None
+        if use_median:
+            # the cluster is sorted; use the overshoot of the same tap
+            mid = cluster[samples // 2]
+            return float(mid.probe_z), std_min, float(mid.overshoot)
+        return float(np.mean([t.probe_z for t in cluster])), std_min, float(np.mean([t.overshoot for t in cluster]))
 
     # Write a tap plot. This also has logic to compute the averages
     # and the filter mostly-exactly how it's done on the probe MCU itself
