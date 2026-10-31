@@ -82,6 +82,140 @@ class LDC1612_ng_sample_data:
     raw_freqs: list[int]
     accum_vals: list[float]
 
+
+# The mcu timestamps each sample when it reads it, which is some time after
+# the ldc1612 finished the conversion: we poll the status register, so the
+# delay varies between ~0 and the poll interval, plus task latency. The
+# conversions themselves happen at exact intervals of the sensor's reference
+# clock, so the real conversion times are t0 + n * period. Neither t0 nor
+# period is known precisely in mcu time (sensor and mcu clocks differ by some
+# ppm, and much more with the internal oscillator), so fit them from the read
+# times. The slope comes from a least-squares fit; since a read can never
+# happen before its conversion completes, t0 comes from the lower envelope of
+# the read times rather than from the (always late) mean.
+class ConversionTimeFit:
+    MIN_SAMPLES = 16
+    # Keep the window short enough that clock drift within it is linear
+    MAX_SAMPLES = 2000
+    # The ldc1612 has no FIFO, so a read always returns the latest completed
+    # conversion: the read delay is in [0, period). Assign a read to the latest
+    # conversion that completed before it, with a small margin for fit error.
+    INDEX_BIAS = 0.02
+    # The lower envelope is taken as this quantile of the read offsets rather
+    # than the minimum, so that a rare read delayed by almost a full period
+    # (and so assigned to the following conversion) can't drag it earlier.
+    # Normal reads cover [0, poll interval] about evenly, so this adds only
+    # ~1% of the poll interval of bias.
+    ENVELOPE_QUANTILE = 0.01
+    # Normal read delays are under one poll interval (< 0.5 periods); reads
+    # delayed more than this (task latency spikes) are left out of the slope fit
+    MAX_INLIER_DELAY = 0.6
+    # If more reads than this are outside MAX_INLIER_DELAY, the fit is wrong
+    # (most likely the conversion indices slipped); don't use it
+    MAX_OUTLIER_FRACTION = 0.1
+    # If the low end of a batch's read delays (this quantile, less sensitive to
+    # latency spikes than the envelope one) moves by more than MAX_PHASE_DIFF
+    # periods relative to the running fit, the conversion phase changed (e.g.
+    # the chip was reconfigured); start over from that batch. Smaller shifts
+    # are absorbed by the running fit as new reads replace old ones.
+    PHASE_QUANTILE = 0.05
+    MAX_PHASE_DIFF = 0.1
+
+    def __init__(self, center_offset: float):
+        # time from the middle of the conversion's integration window to its completion
+        self._center_offset = center_offset
+        self._reads: list[float] = []
+        self._t0: Optional[float] = None
+        self._period: Optional[float] = None
+
+    def add_reads(self, read_times: list[float]) -> list[float]:
+        if len(read_times) >= self.MIN_SAMPLES and abs(self._phase_shift(read_times)) > self.MAX_PHASE_DIFF:
+            self._reads = []
+            self._t0 = self._period = None
+
+        self._reads.extend(read_times)
+        del self._reads[: -self.MAX_SAMPLES]
+        if len(self._reads) >= self.MIN_SAMPLES:
+            r = np.asarray(self._reads)
+            if self._period is None:
+                fit = self._initial_fit(r)
+                if fit is None:
+                    # don't let a bad stretch of reads block every later attempt
+                    self._reads = list(read_times)
+            else:
+                fit = self._refine(r, self._t0, self._period)
+            if fit is not None:
+                self._t0, self._period = fit[:2]
+        return [self.to_sample_time(t) for t in read_times]
+
+    def to_sample_time(self, read_time: float) -> float:
+        """Map a mcu read time to the middle of that sample's conversion window"""
+        if self._period is None:
+            return read_time
+        n = math.floor((read_time - self._t0) / self._period + self.INDEX_BIAS)
+        return self._t0 + n * self._period - self._center_offset
+
+    def _phase_shift(self, read_times: list[float]) -> float:
+        if self._period is None:
+            return 0.0
+        # read delays relative to the running fit, in periods, unwrapped to
+        # [-0.3, 0.7); normally they start at ~0
+        delay = ((np.asarray(read_times) - self._t0) / self._period + 0.3) % 1.0 - 0.3
+        return float(np.quantile(delay, self.PHASE_QUANTILE))
+
+    def _initial_fit(self, r: np.ndarray):
+        # Number of conversions over the span of the reads. Reads only happen on
+        # poll ticks and dropped conversions show up as ~2x gaps, so count each
+        # gap; a read delayed by latency can still make this off by one or two,
+        # so try nearby counts and keep the one that fits best.
+        span = r[-1] - r[0]
+        if span <= 0.0:
+            return None
+        gaps = np.diff(r)
+        period = span / (len(r) - 1)
+        for _ in range(2):
+            count = np.round(gaps / period).sum()
+            if count <= 0:
+                return None
+            period = span / count
+
+        best = None
+        for c in range(int(count) - 2, int(count) + 3):
+            if c <= 0:
+                continue
+            period = span / c
+            # index relative to the first read, so a delayed read only
+            # misplaces itself rather than every read after it
+            n = np.round((r - r[0]) / period)
+            offsets = r - period * n
+            t0 = float(np.quantile(offsets[offsets > np.median(offsets) - 0.5 * period], self.ENVELOPE_QUANTILE))
+            fit = self._refine(r, t0, period)
+            if fit is not None and (best is None or fit[2] < best[2]):
+                best = fit
+        return best
+
+    def _refine(self, r: np.ndarray, t0: float, period: float):
+        for _ in range(3):
+            n = np.floor((r - t0) / period + self.INDEX_BIAS)
+            delay = (r - t0 - period * n) / period
+            inliers = delay < self.MAX_INLIER_DELAY
+            if np.count_nonzero(inliers) < self.MIN_SAMPLES:
+                return None
+            period = float(np.polyfit(n[inliers], r[inliers], 1)[0])
+            if period <= 0.0:
+                return None
+            # reads never happen before the conversion completes, so the
+            # conversion times are the lower envelope of the read times
+            t0 = float(np.quantile((r - period * n)[inliers], self.ENVELOPE_QUANTILE))
+
+        n = np.floor((r - t0) / period + self.INDEX_BIAS)
+        delay = (r - t0 - period * n) / period
+        outliers = np.count_nonzero(delay >= self.MAX_INLIER_DELAY)
+        if outliers > self.MAX_OUTLIER_FRACTION * len(r):
+            return None
+        return t0, period, outliers
+
+
 # Interface class to LDC1612 mcu support
 class LDC1612_ng:
     def __init__(self, config, name: str | None = None, primary: bool = True):
@@ -160,6 +294,7 @@ class LDC1612_ng:
         self._oid = oid = mcu.create_oid()
         self._data_lock = threading.Lock()
         self._pending_data = []
+        self._time_fit: Optional[ConversionTimeFit] = None
 
         logging.info(f"LDC1612ng {self._name} oid: {oid} i2c_oid {self._i2c.get_oid()}")
 
@@ -460,7 +595,12 @@ class LDC1612_ng:
     def _convert_clock(self, c):
         if c == 0:
             return 0
-        return self._clock32_to_print_time(c)
+        t = self._clock32_to_print_time(c)
+        # these are read times of the samples that triggered; put them on the
+        # same timebase as the streamed sample data
+        if self._time_fit is not None:
+            t = self._time_fit.to_sample_time(t)
+        return t
 
     def finish_home(self):
         # "ldc1612_finish_home2_reply oid=%c homing=%c trigger_clock=%u tap_start_clock=%u",
@@ -648,9 +788,14 @@ class LDC1612_ng:
         reactor = self.printer.get_reactor()
         self._data_timer = reactor.register_timer(self._process_data, reactor.monotonic() + callback_interval)
 
-        # Read at twice the RCOUNT rate to make sure we don't miss samples
         rcount_now_sec = self.get_rcount_sec()
-        rest_ticks = self._mcu.seconds_to_clock(rcount_now_sec / 2.0)
+        self._time_fit = ConversionTimeFit(rcount_now_sec / 2.0)
+
+        # Poll more than twice per conversion so we don't miss samples. Deliberately
+        # not an integer fraction of the conversion period, so that the poll phase
+        # sweeps across the conversions and ConversionTimeFit sees reads that
+        # happen right after a conversion completes.
+        rest_ticks = self._mcu.seconds_to_clock(rcount_now_sec / 2.3)
         self._ldc1612_ng_start_stop_cmd.send([self._oid, rest_ticks])
 
     def stop_streaming(self):
@@ -707,6 +852,9 @@ class LDC1612_ng:
                 times.append(t)
                 values.append(raw_data)
                 accum_values.append(raw_accum)
+
+        if self._time_fit is not None:
+            times = self._time_fit.add_reads(times)
 
         data = LDC1612_ng_sample_data(times=times, raw_freqs=values, accum_vals=accum_values)
         self._data_callback(data)
