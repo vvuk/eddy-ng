@@ -294,8 +294,9 @@ class LDC1612_ng:
         self._data_rate: int = config.getint("samples_per_second", 250, minval=50)
         self._ldc_settle_time = min(self._ldc_settle_time, 1.0 / self._data_rate)
         self._ldc_settle_time = config.getfloat("ldc_settle_time", self._ldc_settle_time)
-        self._ldc_offset: int = config.getint("ldc_offset", 0)
-        self._ldc_offset_ref: int = 0
+        # Frequency offset (in Hz) the chip subtracts before conversion; stored
+        # as the OFFSET0 register value, which the conversions below account for
+        self._ldc_offset_reg: int = self._offset_hz_to_reg(config.getint("ldc_offset", 0), config.error)
 
         # Setup mcu sensor_ldc1612 bulk query code
         self._i2c = bus.MCU_I2C_from_config(config, default_addr=LDC1612_ADDR, default_speed=400000)
@@ -543,15 +544,20 @@ class LDC1612_ng:
             freq=freq,
         )
 
-    def to_ldc_freqval(self, freq, offset=None):
-        if offset is None:
-            offset = self._ldc_offset
-        return int((1<<28) * ((freq / self._freq_conv) - offset / (1<<12)) + 0.5)
+    # fsensor = freq_conv * (DATA / 2^28 + OFFSET / 2^16)
+    def _offset_hz_to_reg(self, offset_hz, error):
+        reg = int(offset_hz * (1 << 16) / self._freq_conv + 0.5)
+        if not 0 <= reg <= 0xFFFF:
+            raise error(f"ldc_offset {offset_hz} out of range (max {self._freq_conv * 0xFFFF / (1 << 16):.0f})")
+        return reg
+
+    def to_ldc_freqval(self, freq):
+        return int(freq * (1 << 28) / self._freq_conv - (self._ldc_offset_reg << 12) + 0.5)
 
     def from_ldc_freqval(self, val, ignore_err=False):
         if (val & 0xF0000000) != 0 and not ignore_err:
             raise self.printer.command_error(f"LDC1612 frequency value has error bits: {hex(val)}")
-        return round((self._freq_conv / (1<<28)) * val + self._freq_conv * (self._ldc_offset / (1<<12)), 3)
+        return round((val + (self._ldc_offset_reg << 12)) * self._freq_conv / (1 << 28), 3)
 
     def ldc_freqval_error(self, val):
         return val >> 28
@@ -635,7 +641,7 @@ class LDC1612_ng:
     # The value that should be added to freqvals and multiplied by
     # to get an actual frequency
     def freqval_conversion_values(self):
-        return self._freq_conv * (self._ldc_offset / (1<<12)), self._freq_conv / (1<<28)
+        return self._ldc_offset_reg << 12, self._freq_conv / (1 << 28)
 
     def _verify_chip(self):
         # In case of miswiring, testing LDC1612 device ID prevents treating
@@ -667,7 +673,7 @@ class LDC1612_ng:
         if deglitch_now == DEGLITCH_33MHZ:
             deglitch_now = "33mhz"
 
-        offset_now = round(reg_offset / (2**16) * self._ldc_freq_ref)
+        offset_now = round(reg_offset / (1 << 16) * self._freq_conv)
         settle_now = reg_settlecount * 16.0 / self._ldc_freq_ref * 1000.0
         rcount_now = self.get_rcount_sec() * 1000.0
 
@@ -694,10 +700,8 @@ class LDC1612_ng:
             self.set_reg(REG_MUX_CONFIG, 0x0208 | deglitch)
 
         if offset is not None:
-            self._ldc_offset = offset
-            offset = int(offset / self._ldc_freq_ref * (2**16) + 0.5)
-            self._ldc_offset_ref = offset
-            self.set_reg(REG_OFFSET0, offset)
+            self._ldc_offset_reg = self._offset_hz_to_reg(offset, self.printer.command_error)
+            self.set_reg(REG_OFFSET0, self._ldc_offset_reg)
 
         if settle is not None:
             self.set_reg(REG_SETTLECOUNT0, int((settle / 1000.0) * self._ldc_freq_ref / 16.0 + 0.5))
@@ -731,11 +735,9 @@ class LDC1612_ng:
         # This is the TI-recommended register configuration order
         # Setup chip in requested query rate
         rcount0 = self._ldc_freq_ref / (16.0 * (self._data_rate - 4))
-        offset = int(self._ldc_offset * (2**16) / self._ldc_freq_ref + 0.5)
-        self._ldc_offset_ref = offset
 
         self.set_reg(REG_RCOUNT0, int(rcount0 + 0.5))
-        self.set_reg(REG_OFFSET0, offset)
+        self.set_reg(REG_OFFSET0, self._ldc_offset_reg)
         self.set_reg(
             REG_SETTLECOUNT0,
             int(self._ldc_settle_time * self._ldc_freq_ref / 16.0 + 0.5),
