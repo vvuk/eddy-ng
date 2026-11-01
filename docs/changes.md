@@ -12,7 +12,8 @@
 **New:**
 
 * [Profiles](profiles.md): plate profiles hold a calibration per build plate, and tap profiles hold tap settings with a `tap_adjust_z` per material. Commands: `PROBE_EDDY_NG_PLATE_PROFILE` and `PROBE_EDDY_NG_TAP_PROFILE`; config: `default_plate`, `tap_adjust_z_<material>`.
-* `PROBE_EDDY_NG_AUTO_SETUP`: setup without a paper test. It finds Z=0 by touching the bed with the nozzle and tapping (see [Calibration](calibration.md#automatic-setup-without-a-paper-test)).
+* `PROBE_EDDY_NG_AUTO_SETUP`: setup without a paper test. It finds Z=0 by touching the bed with the nozzle and tapping, and measures the tap threshold (see [Calibration](calibration.md#automatic-setup-without-a-paper-test)).
+* When a tap doesn't trigger, the error says how high the tap signal got, compared to the threshold.
 * `PROBE_EDDY_NG_CALIBRATE` takes `USE_FOR=homing`, `tap` or `homing,tap` to make the active plate use the calibrated drive current.
 * On Klipper, probe commands accept `METHOD=tap` to probe with a tap (see [Probing with tap](tap.md#probing-with-tap)).
 * Z homing works with Klipper v0.13.0-665 and newer, which home Z through the probe.

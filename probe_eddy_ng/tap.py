@@ -33,6 +33,11 @@ class TapResult:
     tap_time: float = 0.0
     tap_start_time: float = 0.0
     tap_end_time: float = 0.0
+    # The move ended without a tap being detected
+    missed: bool = False
+    # The largest tap signal (drop from a peak, in Hz, the value compared to
+    # the threshold) while the toolhead moved at the tap speed, if known
+    signal_peak: Optional[float] = None
 
 
 @dataclass
@@ -95,6 +100,53 @@ def tap_filter_sos(params: ProbeEddyParams, data_rate: int, config_error) -> Lis
         fs=data_rate,
         output="sos",
     ).tolist()
+
+
+# The sensor firmware's tap detection (check_sos_tap), replayed on samples:
+# returns, for each sample, the tap signal the firmware compares to the
+# threshold (how far the filtered value has dropped from its last peak), or
+# None while the tap isn't armed yet or for error (nan) samples, which the
+# firmware skips. The filter starts at the first sample at or above
+# safe_freq, relative to that sample, and the signal is tracked from the
+# first sample at or above trigger_freq.
+#
+# The firmware filters raw sample values in float32; this filters the same
+# differences in Hz, which only scales them (the threshold is scaled the same
+# way), so the results match up to rounding.
+def replay_tap_signal(sos: List[List[float]], freqs: List[float], safe_freq: float, trigger_freq: float) -> List[Optional[float]]:
+    signal: List[Optional[float]] = [None] * len(freqs)
+    state = [[0.0, 0.0] for _ in sos]
+    offset = None
+    armed = False
+    start_value = last_value = 0.0
+
+    for i, freq in enumerate(freqs):
+        if freq != freq:  # nan
+            continue
+        if offset is None:
+            if freq >= safe_freq:
+                offset = freq
+            continue
+
+        # direct form II transposed, section by section
+        val = freq - offset
+        for (b0, b1, b2, _, a1, a2), z in zip(sos, state):
+            out = b0 * val + z[0]
+            z[0] = b1 * val - a1 * out + z[1]
+            z[1] = b2 * val - a2 * out
+            val = out
+
+        if not armed:
+            if freq < trigger_freq:
+                continue
+            armed = True
+
+        if val > last_value:
+            start_value = val
+        signal[i] = start_value - val
+        last_value = val
+
+    return signal
 
 
 # Klipper's probe commands (PROBE, QUAD_GANTRY_LEVEL etc.) select a tap

@@ -683,6 +683,14 @@ class LDC1612_ng:
         self._rcount_reg = val
         self.set_reg(REG_RCOUNT0, val)
 
+    # The smallest frequency change a sample can show, in Hz. Samples are
+    # quantized to 2^28 / (256 * RCOUNT) raw units, e.g. ~31Hz for a
+    # Cartographer at 500 samples per second, so readings with little noise
+    # move in steps of this size.
+    def freq_resolution(self) -> float:
+        self._init_chip()
+        return self._freq_conv / (256.0 * self._rcount_reg)
+
     # the conversion time, from the last RCOUNT0 value written
     def get_rcount_sec(self):
         self._init_chip()

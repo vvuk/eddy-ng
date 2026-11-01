@@ -27,13 +27,14 @@ from .compat import (
 )
 from .sampler import ProbeEddyProbeResult
 from .fmap import ProbeEddyFrequencyMap
-from .tap import TapResult, TapConfig, compute_tap_z, tap_filter_sos, is_tap_request, ProbeEddyTapSession
+from .tap import TapResult, TapConfig, compute_tap_z, tap_filter_sos, is_tap_request, replay_tap_signal, ProbeEddyTapSession
 from .profiles import (
     DEFAULT_PROFILE,
     TAP_SECTION_PREFIX,
     PlateProfile,
     TapProfile,
     is_hand_written,
+    is_hand_written_option,
     material_code,
     plate_section_prefix,
     profile_name,
@@ -192,6 +193,7 @@ class ProbeEddy(EddyNgSensor):
                 self._full_name,
                 tap_adjust_z=self.params.tap_adjust_z,
                 material_adjust_z=read_material_adjust_z(config),
+                hand_written_threshold=is_hand_written_option(config, asfc, "tap_threshold"),
             )
         }
         for section in config.get_prefix_sections(TAP_SECTION_PREFIX):
@@ -200,6 +202,7 @@ class ProbeEddy(EddyNgSensor):
                 raise config.error(f"Duplicate or reserved tap profile name '{name}'")
             tap_profile = read_tap_profile(section, name)
             tap_profile.hand_written = is_hand_written(section, asfc)
+            tap_profile.hand_written_threshold = is_hand_written_option(section, asfc, "tap_threshold")
             # make sure its settings work together with the ones from this section
             tap_filter_sos(self._base_params.with_tap_overrides(tap_profile.params, section.error), self._sensor.data_rate, section.error)
             self._tap_profiles[name] = tap_profile
@@ -539,6 +542,26 @@ class ProbeEddy(EddyNgSensor):
     def _save_tap_adjust_z(self, value: float):
         configfile = self._printer.lookup_object("configfile")
         configfile.set(self._tap_profile.section, TapProfile.adjust_z_option(self._material), f"{value:.3f}")
+
+    # Set the active tap profile's tap_threshold, staged for SAVE_CONFIG
+    def _set_tap_threshold(self, value: float):
+        tap_profile = self._tap_profile
+        if tap_profile.name == DEFAULT_PROFILE:
+            # the default profile's tap settings are this section's
+            self._base_params.tap_threshold = value
+        else:
+            tap_profile.params["tap_threshold"] = value
+        self.params = self._base_params.with_tap_overrides(tap_profile.params, self._printer.command_error)
+        if tap_profile.hand_written_threshold:
+            # SAVE_CONFIG would refuse to save a different value, and then
+            # nothing else either
+            self._log_warning(
+                f"tap_threshold is set in [{tap_profile.section}] in your config files, so it can't be saved. "
+                f"Using {value:.0f} until Klipper restarts; change it in your config files to keep it."
+            )
+            return
+        configfile = self._printer.lookup_object("configfile")
+        configfile.set(tap_profile.section, "tap_threshold", f"{value:.0f}")
 
     # " for PETG in tap profile 'textured'", or "" for the default
     def _tap_adjust_z_target_str(self) -> str:
@@ -1553,6 +1576,37 @@ class ProbeEddy(EddyNgSensor):
         finally:
             self._sensor.set_drive_current(drive_current)
 
+    # The last tap's signal (see replay_tap_signal), from its samples: the
+    # largest value while the toolhead moved at tap_speed, since the move
+    # slowing down at its end looks like a tap too; and, if above_z is
+    # given, the largest value while the toolhead was also above above_z.
+    # (None, None) if the samples or gate frequencies aren't there.
+    def last_tap_signal(self, tapcfg: TapConfig, tap_speed: float, above_z: Optional[float] = None) -> Tuple[Optional[float], Optional[float]]:
+        sampler = self._last_sampler
+        if sampler is None:
+            return None, None
+        safe_freq = sampler.memos.get("tap_safe_freq")
+        trigger_freq = sampler.memos.get("tap_trigger_freq")
+        if safe_freq is None or trigger_freq is None:
+            return None, None
+
+        signal = replay_tap_signal(tapcfg.sos, sampler.freqs, safe_freq, trigger_freq)
+        peak = above = None
+        for t, value in zip(sampler.times, signal):
+            if value is None:
+                continue
+            pos, velocity = self._get_trapq_position(t)
+            if pos is None or velocity is None or velocity < 0.98 * tap_speed:
+                continue
+            peak = value if peak is None else max(peak, value)
+            if above_z is not None and pos[2] > above_z:
+                above = value if above is None else max(above, value)
+        return peak, above
+
+    # bed_z: roughly where the bed is in Z, for lifting the toolhead off it
+    # right away (AUTO_SETUP taps with the bed at a Z other than 0).
+    # expect_miss: the tap isn't meant to trigger (AUTO_SETUP measuring the
+    # tap signal), so a miss isn't reported as an error.
     def do_one_tap(
         self,
         start_z: float,
@@ -1560,6 +1614,8 @@ class ProbeEddy(EddyNgSensor):
         tap_speed: float,
         lift_speed: float,
         tapcfg: TapConfig,
+        bed_z: float = 0.0,
+        expect_miss: bool = False,
     ) -> TapResult:
         self.probe_to_start_position(start_z)
 
@@ -1583,7 +1639,7 @@ class ProbeEddy(EddyNgSensor):
                     # raise the toolhead as soon as the tap ends (or fails), so
                     # it isn't left pushing into the bed
                     finish_z = th.get_position()[2]
-                    if finish_z < 1.0 and not self._printer.is_shutdown():
+                    if finish_z < bed_z + 1.0 and not self._printer.is_shutdown():
                         th.manual_move([None, None, start_z], lift_speed)
 
                 if hmove.check_no_movement() is not None:
@@ -1603,10 +1659,17 @@ class ProbeEddy(EddyNgSensor):
                 if self._printer.is_shutdown():
                     raise self._printer.command_error("Probing failed due to printer shutdown")
 
+                # If the move ended without a tap, say how close the signal
+                # got to the threshold
+                missed = "Probe completed movement" in str(err)
+                peak = self._tap_signal_peak(tapcfg, tap_speed) if missed else None
+                peak_str = f" (tap signal peaked at {peak:.0f}, threshold {tapcfg.threshold:.0f})" if peak is not None else ""
+
                 # If just sensor errors, let the caller handle it
-                self._log_error(f"Tap failed with Z at {finish_z:.3f}: {err}")
-                if any(m in str(err) for m in ("Sensor error", "Probe completed movement", "Probe triggered prior")):
-                    return TapResult(error=err, toolhead_z=finish_z)
+                if not (missed and expect_miss):
+                    self._log_error(f"Tap failed with Z at {finish_z:.3f}: {err}{peak_str}")
+                if missed or any(m in str(err) for m in ("Sensor error", "Probe triggered prior")):
+                    return TapResult(error=err, toolhead_z=finish_z, missed=missed, signal_peak=peak)
                 else:
                     raise
         finally:
@@ -1638,6 +1701,14 @@ class ProbeEddy(EddyNgSensor):
             tap_end_time=tap_end_time,
         )
 
+    # The last tap's signal peak, or None; never fails the tap
+    def _tap_signal_peak(self, tapcfg: TapConfig, tap_speed: float) -> Optional[float]:
+        try:
+            return self.last_tap_signal(tapcfg, tap_speed)[0]
+        except Exception:
+            logging.exception("EDDYng: replaying the tap signal failed")
+            return None
+
     # Where the tap is placed between the start of tap detection and the
     # time the threshold was crossed
     def tap_time(self, tap_start_time: float, trigger_time: float) -> float:
@@ -1652,7 +1723,9 @@ class ProbeEddy(EddyNgSensor):
     # START_Z and TARGET_Z (and is part of the returned tap Z); gate_freqs
     # are the frequencies the tap must pass through before a tap is looked
     # for, instead of the frequencies at home_trigger_height and
-    # tap_trigger_safe_start_height from the calibration.
+    # tap_trigger_safe_start_height from the calibration. stop_on_miss stops
+    # at the first tap that doesn't trigger, for when the bed is known to be
+    # within reach, so a miss means the threshold is too high.
     def run_taps(
         self,
         gcmd: GCodeCommand,
@@ -1661,6 +1734,7 @@ class ProbeEddy(EddyNgSensor):
         target_z: Optional[float] = None,
         z_base: float = 0.0,
         gate_freqs: Optional[Tuple[float, float]] = None,
+        stop_on_miss: bool = False,
     ) -> Tuple[float, float, float]:
         tap_drive_current: int = gcmd.get_int(
             name="DRIVE_CURRENT",
@@ -1703,6 +1777,8 @@ class ProbeEddy(EddyNgSensor):
         tap_overshoot = None
         sample_err_count = 0
         tap = None
+        # the signal peaks of taps that didn't trigger
+        missed_peaks: List[float] = []
 
         try:
             self._tap_plot_requested = write_tap_plot
@@ -1720,6 +1796,7 @@ class ProbeEddy(EddyNgSensor):
                     tap_speed=tap_speed,
                     lift_speed=lift_speed,
                     tapcfg=tapcfg,
+                    bed_z=z_base,
                 )
 
                 if write_every_tap_plot:
@@ -1731,10 +1808,17 @@ class ProbeEddy(EddyNgSensor):
                 if tap.error:
                     if "too close to target z" in str(tap.error):
                         self._log_msg(f"Tap {sample_i+1}: failed: try lowering TARGET_Z by 0.100 (to {target_z - 0.100:.3f})")
+                    elif tap.missed and tap.signal_peak is not None:
+                        missed_peaks.append(tap.signal_peak)
+                        self._log_msg(
+                            f"Tap {sample_i+1}: failed: no tap detected (signal peaked at {tap.signal_peak:.0f}, threshold {tap_threshold:.0f})"
+                        )
                     else:
                         self._log_msg(f"Tap {sample_i+1}: failed ({tap.error})")
                     sample_err_count += 1
                     sample_last_err = tap
+                    if tap.missed and stop_on_miss:
+                        break
                     continue
 
                 results.append(tap)
@@ -1769,6 +1853,14 @@ class ProbeEddy(EddyNgSensor):
                 err_msg += " Consider adjusting tap_samples, tap_max_samples, or tap_samples_stddev."
             if sample_err_count > 0:
                 err_msg += f" {sample_err_count} errors, last: {sample_last_err.error} at toolhead z={sample_last_err.toolhead_z:.3f}"
+            if missed_peaks:
+                # A tap's signal grows while the nozzle pushes into the bed,
+                # and half its peak leaves margin for weaker taps
+                err_msg += (
+                    f" The tap signal peaked at {min(missed_peaks):.0f} to {max(missed_peaks):.0f}, below the threshold of {tap_threshold:.0f}."
+                    f" If the nozzle touched the bed, the threshold is too high; try THRESHOLD={min(missed_peaks) / 2.0:.0f}"
+                    " (PROBE_EDDY_NG_AUTO_SETUP can also measure it)."
+                )
             self._log_error(err_msg)
             raise self._printer.command_error("Tap failed")
 

@@ -40,10 +40,11 @@ Auto setup:
 
 1. Raises the toolhead 5mm (`LIFT=`), then moves it down in steps, reading the sensor while the toolhead is still. The steps start small and grow to 2mm while the sensor doesn't see the bed yet, and are 0.2mm once it does.
 2. Stops when a step raises the sensor's frequency by much less than the steps before it. Until the nozzle touches the bed, each step down raises the frequency more than the last one. Once it touches, the toolhead can't get any closer. The nozzle presses into the bed by at most about one step.
-3. Taps a few times from just above that point, like `PROBE_EDDY_NG_TAP`, to find Z=0 accurately. Z=0 includes `tap_adjust_z`.
-4. Calibrates drive currents like `SETUP`.
+3. Measures the tap threshold. It taps 3 times without one, so these taps don't stop at contact; each pushes into the bed by a few tenths of a millimeter (more at a higher `tap_speed`). It sets `tap_threshold` to half the weakest tap's signal, for the active tap profile. To use a threshold you already have instead, pass `THRESHOLD=`. If `tap_threshold` is set in your config files, `SAVE_CONFIG` can't save a new value for it, so auto setup only uses the measured one until Klipper restarts and tells you to change your config files.
+4. Taps from just above the contact, like `PROBE_EDDY_NG_TAP`, to find Z=0 accurately. Z=0 includes `tap_adjust_z`. If a tap doesn't trigger, auto setup stops instead of trying again: the bed is known to be there, so the threshold is too high.
+5. Calibrates drive currents like `SETUP`.
 
-Z stays homed afterwards. Then test the calibration as described below, and `SAVE_CONFIG`.
+Z stays homed afterwards. Then test the calibration as described below, and `SAVE_CONFIG`, which also saves the measured `tap_threshold`.
 
 If auto setup reports that it found no contact, check that both the nozzle and the sensor are over the bed. If its tap doesn't agree with where it found contact, clean the nozzle and try again. On printers where the sensor keeps getting closer to the bed while the nozzle presses into it (a very flexible toolhead mount), contact can't be detected this way; use `SETUP`.
 

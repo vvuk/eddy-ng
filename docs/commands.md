@@ -18,7 +18,9 @@ Every `PROBE_EDDY_NG_<name>` command is also available as `EDDYNG_<name>`. All o
 - `MAX_FINE_TRAVEL=`: how far down to go, at most, once the sensor sees the bed. Default 15.
 - `CONTACT_RATIO=`: a step that raises the frequency by less than this fraction of the largest rise so far counts as contact. Default 0.5.
 - `ADJUST_Z=`: added to the tapped Z=0, like `PROBE_EDDY_NG_TAP`'s. Default `tap_adjust_z`.
-- `PROBE_SPEED=`, `LIFT_SPEED=`: move speeds; and `PROBE_EDDY_NG_TAP`'s tap parameters (`SAMPLES=`, `THRESHOLD=`, `TARGET_Z=`, ...) for the taps.
+- `THRESHOLD=`: tap threshold to use. Default: measure it, and set it for the active tap profile (`SAVE_CONFIG` to keep it).
+- `THRESHOLD_SAMPLES=`: how many taps to measure the threshold with. Default 3.
+- `PROBE_SPEED=`, `LIFT_SPEED=`: move speeds; and `PROBE_EDDY_NG_TAP`'s tap parameters (`SAMPLES=`, `SPEED=`, `TARGET_Z=`, ...) for the taps.
 
 **`PROBE_EDDY_NG_CALIBRATE`**: calibrate one drive current, starting with a paper test. Calibrates the active plate.
 - `DRIVE_CURRENT=`: default is the current homing drive current.

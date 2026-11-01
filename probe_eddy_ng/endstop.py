@@ -136,6 +136,9 @@ class ProbeEddyEndstopWrapper:
             for i, section in enumerate(self.tap_config.sos):
                 self._sensor.set_sos_section(i, section)
             tap_threshold = self.tap_config.threshold
+            # for the tap plot and replaying the tap signal on the host
+            self._sampler.memo("tap_safe_freq", safe_freq)
+            self._sampler.memo("tap_trigger_freq", trigger_freq)
         else:
             tap_threshold = None
 

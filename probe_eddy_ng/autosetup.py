@@ -15,6 +15,7 @@ from typing import List, Optional, final, TYPE_CHECKING
 import numpy as np
 
 from .compat import GCodeCommand
+from .tap import TapConfig
 
 if TYPE_CHECKING:
     from .probe_eddy_ng import ProbeEddy
@@ -83,6 +84,15 @@ class ProbeEddyZeroFinder:
         self.speed: float = gcmd.get_float("PROBE_SPEED", params.probe_speed, above=0.0)
         self.lift_speed: float = gcmd.get_float("LIFT_SPEED", params.lift_speed, above=0.0)
         self.adjust_z: float = gcmd.get_float("ADJUST_Z", eddy._tap_adjust_z)
+        # A tap threshold given to the command is used as is; otherwise it's
+        # measured, with this many taps
+        self.threshold_given = any(gcmd.get_float(name, None) is not None for name in ("THRESHOLD", "TT", "TAP_THRESHOLD"))
+        self.threshold_samples: int = gcmd.get_int("THRESHOLD_SAMPLES", 3, minval=1)
+        # the same tap settings run_taps uses
+        self.tap_speed: float = gcmd.get_float("SPEED", params.tap_speed, above=0.0)
+        self.tap_lift_speed: float = gcmd.get_float("RETRACT_SPEED", params.lift_speed, above=0.0)
+        self.tap_start_z: float = gcmd.get_float("START_Z", params.tap_start_z, above=2.0)
+        self.freq_resolution: float = eddy._sensor.freq_resolution()
 
     def _log_debug(self, msg):
         self.eddy._log_debug(f"auto setup: {msg}")
@@ -113,7 +123,10 @@ class ProbeEddyZeroFinder:
         if len(freqs) == 0:
             raise self._printer.command_error("Auto setup: no samples from the sensor")
         if len(valid) >= max(3, len(freqs) // 2):
-            return FreqReading(float(np.median(valid)), float(np.std(valid) / math.sqrt(len(valid))))
+            # the mean rather than the median: samples are quantized (see
+            # _rise_noise), and when they straddle two levels the mean
+            # still says where in between the frequency is
+            return FreqReading(float(np.mean(valid)), float(np.std(valid) / math.sqrt(len(valid))))
 
         err_bits = 0
         for r in raw[(raw >> 28) != 0]:
@@ -125,10 +138,13 @@ class ProbeEddyZeroFinder:
             f"in {len(freqs) - len(valid)} of {len(freqs)} samples. Try a different DRIVE_CURRENT."
         )
 
-    # The smallest rise between two readings that isn't noise
-    @staticmethod
-    def _rise_noise(a: FreqReading, b: FreqReading) -> float:
-        return max(3.0 * math.hypot(a.stderr, b.stderr), 2e-6 * b.freq)
+    # The smallest rise between two readings that isn't noise. Samples are
+    # quantized to the sensor's frequency resolution, and when they're less
+    # noisy than that, a reading can be off by up to half a step without any
+    # sign of it in the samples' spread. Two readings' difference can then
+    # be off by a whole step.
+    def _rise_noise(self, a: FreqReading, b: FreqReading) -> float:
+        return max(3.0 * math.hypot(a.stderr, b.stderr), 1.5 * self.freq_resolution, 2e-6 * b.freq)
 
     # Leaves Z homed, with Z=0 where the nozzle touches the bed plus
     # ADJUST_Z (tap_adjust_z). On errors, Z is left homed relative to
@@ -152,6 +168,7 @@ class ProbeEddyZeroFinder:
         eddy = self.eddy
         th = self._th
         th.wait_moves()
+        self._log_debug(f"drive current {self.drive_current}, frequency resolution {self.freq_resolution:.1f}Hz")
 
         # We don't know where Z is; give it the top of the axis, so that
         # there's room to go down
@@ -299,6 +316,67 @@ class ProbeEddyZeroFinder:
                 return True
         return False
 
+    # How long after contact to keep moving at the tap speed when measuring
+    # the tap signal: it peaks within ~50ms of contact (the response time of
+    # the tap filter)
+    SIGNAL_TIME = 0.080
+
+    # Measure the tap threshold: tap without a threshold (so the taps never
+    # trigger, and go a little way into the bed) and replay each tap's
+    # signal on the host. The threshold is half the weakest tap's peak, which
+    # has to be well above the signal before contact.
+    def _measure_threshold(self, safe_freq: float, trigger_freq: float) -> float:
+        eddy = self.eddy
+        th = self._th
+        base = self.Z_BASE
+        speed = self.tap_speed
+
+        # Deep enough for the contact (up to a fine step below the rough
+        # one), then SIGNAL_TIME at the tap speed, then slowing down
+        kin = th.get_kinematics()
+        z_accel = getattr(kin, "max_z_accel", None) or getattr(th, "max_accel", 100.0)
+        depth = self.fine_step + speed * self.SIGNAL_TIME + speed * speed / (2.0 * z_accel)
+
+        tapcfg = TapConfig(threshold=1e9, sos=eddy._tap_sos, safe_freq=safe_freq, trigger_freq=trigger_freq)
+        peaks: List[float] = []
+        noise = 0.0
+        eddy._log_msg(
+            f"Auto setup: measuring the tap signal ({self.threshold_samples} taps, up to {depth:.2f}mm past the rough contact)..."
+        )
+        for i in range(self.threshold_samples):
+            if eddy.params.debug:
+                eddy.save_samples_path = f"/tmp/tap-measure-{i + 1}.csv"
+            tap = eddy.do_one_tap(
+                start_z=base + self.tap_start_z,
+                target_z=base - depth,
+                tap_speed=speed,
+                lift_speed=self.tap_lift_speed,
+                tapcfg=tapcfg,
+                bed_z=base,
+                expect_miss=True,
+            )
+            if not tap.missed:
+                raise self._printer.command_error(f"Auto setup: measuring the tap signal failed: {tap.error}")
+            # before contact: the toolhead above the rough contact (contact
+            # is at or below it)
+            peak, before = eddy.last_tap_signal(tapcfg, speed, above_z=base + 0.050)
+            if peak is None:
+                raise self._printer.command_error("Auto setup: no tap signal recorded")
+            peaks.append(peak)
+            noise = max(noise, before or 0.0)
+            eddy._log_msg(f"Test tap {i + 1}: signal peaked at {peak:.0f}")
+            self._log_debug(f"test tap {i + 1}: signal peak {peak:.1f}, before contact {before or 0.0:.1f}")
+
+        threshold = float(round(min(peaks) / 2.0))
+        peaks_str = ", ".join(f"{p:.0f}" for p in peaks)
+        if threshold < 3.0 * noise:
+            raise self._printer.command_error(
+                f"Auto setup: the tap signal ({peaks_str}) isn't clearly above the signal before contact ({noise:.0f}), "
+                "so no tap threshold would be reliable. Make sure the nozzle is clean, or try a higher tap_speed."
+            )
+        eddy._log_msg(f"Auto setup: tap signal peaks at {peaks_str} (before contact: up to {noise:.0f}); tap_threshold {threshold:.0f}")
+        return threshold
+
     def _tap(self, rough_zero: float) -> float:
         eddy = self.eddy
         params = eddy.params
@@ -323,7 +401,12 @@ class ProbeEddyZeroFinder:
             f"gate freqs: {safe.freq:.1f} at {params.home_trigger_height:.3f}, {trigger.freq:.1f} at {params.tap_trigger_safe_start_height:.3f}"
         )
 
-        # The real contact can be up to a fine step below the rough one
+        if not self.threshold_given:
+            eddy._set_tap_threshold(self._measure_threshold(safe.freq, trigger.freq))
+
+        # The real contact can be up to a fine step below the rough one. The
+        # bed is known to be there, so a tap that doesn't trigger means the
+        # threshold is too high; don't keep pushing into the bed.
         tap_z, tap_stddev, _ = eddy.run_taps(
             self.gcmd,
             self.drive_current,
@@ -331,6 +414,7 @@ class ProbeEddyZeroFinder:
             target_z=params.tap_target_z - self.fine_step,
             z_base=base,
             gate_freqs=(safe.freq, trigger.freq),
+            stop_on_miss=True,
         )
         tap_z -= base
 

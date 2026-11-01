@@ -62,6 +62,15 @@ def is_hand_written(config: ConfigWrapper, autosave_fileconfig) -> bool:
     return any(o not in saved for o in config.get_prefix_options(""))
 
 
+# Whether an option is set in the config files, rather than only in the
+# SAVE_CONFIG section. SAVE_CONFIG refuses to save a different value for it.
+def is_hand_written_option(config: ConfigWrapper, autosave_fileconfig, option: str) -> bool:
+    section = config.get_name()
+    if option not in config.get_prefix_options(option):
+        return False
+    return not (autosave_fileconfig.has_section(section) and autosave_fileconfig.has_option(section, option))
+
+
 @dataclass
 class PlateProfile:
     name: str
@@ -85,6 +94,8 @@ class TapProfile:
     tap_adjust_z: float = 0.0
     material_adjust_z: Dict[str, float] = field(default_factory=dict)
     hand_written: bool = False
+    # tap_threshold is set in the config files (see is_hand_written_option)
+    hand_written_threshold: bool = False
 
     def drive_currents(self) -> List[int]:
         return [dc for dc in (self.reg_drive_current, self.tap_drive_current) if dc]

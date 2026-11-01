@@ -35,7 +35,10 @@ def compute_butter_tap(eddy: ProbeEddy, sampler: ProbeEddySampler):
     if not scipy:
         return None, None, None
 
-    trigger_freq = eddy.height_to_freq(eddy.params.home_trigger_height)
+    # the frequency the firmware starts filtering at: the tap's first gate
+    trigger_freq = sampler.memos.get("tap_safe_freq")
+    if trigger_freq is None:
+        trigger_freq = eddy.height_to_freq(eddy.params.home_trigger_height)
 
     s_t = np.asarray(sampler.times)
     s_f = np.asarray(sampler.freqs)
@@ -86,7 +89,11 @@ def write_tap_plot(eddy: ProbeEddy, tap: TapResult, tapnum: int = -1):
 
     s_t = np.asarray(eddy._last_sampler.times)
     s_f = np.asarray(eddy._last_sampler.freqs)
-    s_z = np.asarray(eddy._last_sampler.heights)
+    # AUTO_SETUP taps before there's a calibration, so there are no heights
+    if eddy._last_sampler.heights is not None:
+        s_z = np.asarray(eddy._last_sampler.heights)
+    else:
+        s_z = np.full(len(s_t), np.nan)
     s_accval = np.asarray(eddy._last_sampler.accum_vals)
     s_kinz = np.vectorize(lambda t: eddy._get_trapq_height(t) or -10)(s_t)
 
