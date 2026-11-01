@@ -264,3 +264,10 @@ class ProbeEddyParams:
         if self.home_trigger_height <= self.tap_trigger_safe_start_height:
             raise printer.config_error("ProbeEddy: home_trigger_height must be greater than tap_trigger_safe_start_height")
 
+        # Klipper doesn't check the limits against a default, so e.g. a
+        # tap_samples above the default tap_max_samples gets through
+        if self.tap_max_samples < self.tap_samples:
+            raise printer.config_error("ProbeEddy: tap_max_samples must be at least tap_samples")
+        if self.tap_butter_highcut <= self.tap_butter_lowcut:
+            raise printer.config_error("ProbeEddy: tap_butter_highcut must be above tap_butter_lowcut")
+
