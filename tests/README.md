@@ -1,6 +1,6 @@
 # Tests
 
-These test eddy-ng's own logic without Klipper or a printer: lift-off fitting, the tap filter and the replay of the firmware's tap detection, combining taps, calibration fitting and saving, settings and profiles, AUTO_SETUP's search for the bed, and placing sensor samples in time. Most of them run the code on simulated sensor data.
+These test eddy-ng's own logic without Klipper or a printer: lift-off fitting, the tap filter and the replay of the firmware's tap detection, measuring and saving the tap threshold, reporting taps that missed, combining taps, calibration fitting and saving, settings and profiles, AUTO_SETUP's search for the bed, and placing sensor samples in time. Most of them run the code on simulated sensor data.
 
 They don't cover the parts that talk to Klipper (homing, moves, the MCU, G-code commands end to end); test those on a printer.
 
