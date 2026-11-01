@@ -1951,14 +1951,24 @@ class ProbeEddy(EddyNgSensor):
             self._log_error(err_msg)
             raise self._printer.command_error("Tap failed")
 
-        self._log_tap_comparison(results, tap_position)
+        self._log_tap_comparison(results, tap_position, tap_z, samples, samples_stddev, use_median, gcmd)
 
         self._last_tap_z = float(tap_z)
         return tap_z, tap_stddev, tap_overshoot
 
     # Summarize the descent and lift-off tap positions side by side, for
-    # comparing the two
-    def _log_tap_comparison(self, results: List[TapResult], tap_position: str):
+    # comparing the two, and say what tap_adjust_z would give the same Z=0
+    # with the other tap_position
+    def _log_tap_comparison(
+        self,
+        results: List[TapResult],
+        tap_position: str,
+        tap_z: float,
+        samples: int,
+        samples_stddev: float,
+        use_median: bool,
+        gcmd: GCodeCommand,
+    ):
         descent = np.array([t.descent_z for t in results])
         liftoffs = [t for t in results if t.liftoff is not None and not t.liftoff.error]
         msg = f"Tap positions ({tap_position} used): descent mean {descent.mean():.3f} stddev {descent.std():.4f} ({len(descent)} taps)"
@@ -1972,6 +1982,23 @@ class ProbeEddy(EddyNgSensor):
         else:
             msg += "; no lift-off fits"
         self._log_msg(msg)
+
+        # The other position's tap Z, combined the same way as this one's
+        if tap_position == "descent":
+            other, other_taps = "liftoff", [TapResult(probe_z=t.liftoff.z) for t in liftoffs]
+        else:
+            other, other_taps = "descent", [TapResult(probe_z=t.descent_z) for t in results]
+        other_z, _, _ = compute_tap_z(other_taps, samples, samples_stddev, use_median)
+        if other_z is None:
+            self._log_msg(f"Not enough consistent {other} taps to say what tap_adjust_z would be with tap_position: {other}.")
+            return
+        tap_adjust_z = gcmd.get_float("ADJUST_Z", self._tap_adjust_z)
+        # the same Z=0: other_z + other_adjust == tap_z + tap_adjust_z
+        other_adjust = tap_z + tap_adjust_z - other_z
+        self._log_msg(
+            f"With tap_position: {other}, tap_adjust_z{self._tap_adjust_z_target_str()} would be {other_adjust:.3f} "
+            f"(it's {tap_adjust_z:.3f} with {tap_position})."
+        )
 
     def cmd_TAP_next(self, gcmd: GCodeCommand, orig_drive_current: int):
         self._log_debug("\nEDDYng Tap begin")

@@ -14,6 +14,10 @@ from typing import Any, Dict, List
 from .compat import ConfigWrapper
 
 
+# The values of tap_position
+TAP_POSITIONS = {"descent": "descent", "liftoff": "liftoff"}
+
+
 @dataclass
 class ProbeEddyParams:
     # The speed at which to perform normal homing operations
@@ -162,6 +166,7 @@ class ProbeEddyParams:
         "tap_butter_lowcut": ("getfloat", dict(above=0.0)),
         "tap_butter_highcut": ("getfloat", dict(above=0.0)),
         "tap_butter_order": ("getint", dict(minval=1, maxval=4)),
+        "tap_position": ("getchoice", dict(choices=TAP_POSITIONS)),
     }
 
     # A copy of these params with a tap profile's overrides applied
@@ -236,7 +241,7 @@ class ProbeEddyParams:
             above=0.0,
         )
         self.tap_time_position = config.getfloat("tap_time_position", self.tap_time_position, minval=0.0, maxval=1.0)
-        self.tap_position = config.getchoice("tap_position", {"descent": "descent", "liftoff": "liftoff"}, self.tap_position)
+        self.tap_position = config.getchoice("tap_position", TAP_POSITIONS, self.tap_position)
 
         self.write_tap_plot = config.getboolean("write_tap_plot", self.write_tap_plot)
         self.write_every_tap_plot = config.getboolean("write_every_tap_plot", self.write_every_tap_plot)
