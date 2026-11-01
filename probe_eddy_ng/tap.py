@@ -13,6 +13,7 @@ from typing import Any, List, Optional, Tuple, final, TYPE_CHECKING
 import numpy as np
 
 from .compat import GCodeCommand, manual_probe, HAS_PROBE_RESULT_TYPE
+from .liftoff import LiftoffFit
 
 if TYPE_CHECKING:
     from .params import ProbeEddyParams
@@ -38,6 +39,11 @@ class TapResult:
     # The largest tap signal (drop from a peak, in Hz, the value compared to
     # the threshold) while the toolhead moved at the tap speed, if known
     signal_peak: Optional[float] = None
+    # Where the tap was detected on the way down; probe_z, unless the tap
+    # position is the lift-off point
+    descent_z: float = 0.0
+    # Where the nozzle left the bed as the toolhead lifted afterwards
+    liftoff: Optional[LiftoffFit] = None
 
 
 @dataclass

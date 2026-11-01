@@ -178,7 +178,20 @@ def write_tap_plot(eddy: ProbeEddy, tap: TapResult, tapnum: int = -1):
         fig.add_trace(go.Scatter(x=butter_s_t, y=butter_accum, mode="lines", name="accum_py", yaxis="y3", line=dict(color="#626b73")))
         fig.add_trace(go.Scatter(x=s_t[butter_index_start:], y=s_accval[butter_index_start:], mode="lines", name="accum_mcu", yaxis="y3", line=dict(color="#c26ba3")))
 
-    fig.update_xaxes(range=[max(0.0, time_len - 0.60), time_len], autorange=False)
+    # The samples continue through the lift after the tap; show the end of
+    # the tap move and the start of the lift
+    lift_start_time = eddy._last_sampler.memos.get("lift_start_time")
+    view_end = time_len
+    if lift_start_time is not None:
+        lift_start_rel = lift_start_time - time_start
+        view_end = min(time_len, lift_start_rel + 0.30)
+        fig.add_shape(type="line", x0=lift_start_rel, x1=lift_start_rel, y0=0, y1=1,
+                      xref="x", yref="paper", line=dict(color="gray", width=1, dash="dot"),)
+    liftoff = eddy._last_sampler.memos.get("liftoff")
+    if liftoff is not None and not liftoff.error:
+        fig.add_shape(type="line", x0=0, x1=1, y0=liftoff.z, y1=liftoff.z,
+                      xref="paper", yref="y", line=dict(color=c_green, width=1, dash="dash"),)
+    fig.update_xaxes(range=[max(0.0, view_end - 0.90), view_end], autorange=False)
 
     fig.update_layout(
         hovermode="x unified",

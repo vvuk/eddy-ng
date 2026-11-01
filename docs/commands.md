@@ -71,6 +71,7 @@ Every `PROBE_EDDY_NG_<name>` command is also available as `EDDYNG_<name>`. All o
 - `HOME_Z=0`: set the G-code Z offset to the tap height instead of re-homing Z. Default 1.
 - `RETRACT=0`: leave the toolhead at `home_trigger_height` afterwards instead of raising it.
 - `PLOT=1`: write a graph of the last tap; `PLOT=2`: one per tap; `PLOT=0`: none.
+- `POSITION=descent` or `POSITION=liftoff`: `tap_position` (experimental).
 
 **`PROBE_EDDY_NG_SET_TAP_ADJUST_Z`**: set `tap_adjust_z` for the active tap profile and material. `SAVE_CONFIG` to make it permanent.
 - `VALUE=`: the new value.

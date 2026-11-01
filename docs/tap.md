@@ -54,6 +54,20 @@ Different filaments often need different values. [Tap profiles](profiles.md#tap-
 - **`tap_speed`** (default 3.0): faster taps can detect contact more clearly, but the toolhead keeps moving briefly after the trigger, so don't go much higher.
 - **`tap_start_z`** (default 3.0): the height each tap starts from. The tap drive current must be able to read from here down to `tap_target_z`.
 
+## Lift-off position (experimental)
+
+Where the tap is detected on the way down depends on the threshold, the tap speed, and how much the printer flexes, which is what `tap_time_position` and `tap_adjust_z` make up for. eddy-ng also measures each tap a second way. As the toolhead lifts off the bed after a tap, the sensor's reading stays nearly constant while the nozzle is still pressed against the bed, then changes once it leaves. The toolhead Z at that change is where the nozzle stopped touching the bed. Klipper's own eddy probe tap uses the same idea.
+
+Every tap reports both positions, and a summary at the end compares them:
+
+```
+Tap 1: z=0.101 (descent 0.101, lift-off 0.124, lift-off - descent +0.023)
+...
+Tap positions (descent used): descent mean 0.103 stddev 0.0047 (3 taps); lift-off mean 0.124 stddev 0.0012 (3 taps); lift-off - descent +0.021 (stddev 0.0040)
+```
+
+To use the lift-off position, pass `POSITION=liftoff` to `PROBE_EDDY_NG_TAP`, or set `tap_position: liftoff`. A tap whose lift-off can't be found counts as a failed tap. Because the lift-off position is a different measurement, `tap_adjust_z` will need re-tuning. The [tap graph](#tap-graph) shows the start of the lift (dotted gray line) and the lift-off Z (dashed green line).
+
 ## Tap graph
 
 With plotly installed, tap can write an interactive graph to `/tmp/tap.html`: set `write_tap_plot: true` in your config, or pass `PLOT=1` to `PROBE_EDDY_NG_TAP`. `PLOT=2` (or `write_every_tap_plot: true`) writes one graph per tap, `/tmp/tap-1.html`, `/tmp/tap-2.html` and so on. Writing graphs takes a few seconds on slower hosts.

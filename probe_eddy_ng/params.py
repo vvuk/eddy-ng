@@ -108,6 +108,10 @@ class ProbeEddyParams:
     # but you may want to adjust this for your configuration. This is a number
     # in the range of 0.0 to 1.0.
     tap_time_position: float = 0.3
+    # Where a tap is taken to be: "descent", from when the tap was detected
+    # on the way down (see tap_time_position), or "liftoff", where the
+    # nozzle left the bed as the toolhead lifted afterwards (experimental)
+    tap_position: str = "descent"
 
     # When probing multiple points (not rapid scan), how long to sample for at each probe point,
     # after a scan_sample_time_delay delay. The total dwell time at each probe point is
@@ -232,6 +236,7 @@ class ProbeEddyParams:
             above=0.0,
         )
         self.tap_time_position = config.getfloat("tap_time_position", self.tap_time_position, minval=0.0, maxval=1.0)
+        self.tap_position = config.getchoice("tap_position", {"descent": "descent", "liftoff": "liftoff"}, self.tap_position)
 
         self.write_tap_plot = config.getboolean("write_tap_plot", self.write_tap_plot)
         self.write_every_tap_plot = config.getboolean("write_every_tap_plot", self.write_every_tap_plot)

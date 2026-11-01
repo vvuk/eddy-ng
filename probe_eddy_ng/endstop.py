@@ -44,6 +44,9 @@ class ProbeEddyEndstopWrapper:
         self.last_tap_start_time = 0.0
 
         self._sampler: ProbeEddySampler = None
+        # A tap keeps the sampler running after its homing move, so that
+        # do_one_tap can record the lift off the bed; it finishes it
+        self._tap_sampling = False
 
         # Register z_virtual_endstop pin
         self._printer.lookup_object("pins").register_chip("probe", self)
@@ -68,6 +71,7 @@ class ProbeEddyEndstopWrapper:
             return
         # AUTO_SETUP taps before there's a calibration
         self._sampler = self.eddy.start_sampler(calculate_heights=self.eddy.calibrated())
+        self._tap_sampling = self.tap_config is not None
         # if we're doing a tap, we're already in the right position;
         # otherwise move there
         if self.tap_config is None:
@@ -75,6 +79,10 @@ class ProbeEddyEndstopWrapper:
 
     def _handle_homing_move_end(self, hmove):
         if self not in hmove.get_mcu_endstops():
+            return
+        if self._tap_sampling:
+            # do_one_tap finishes it after lifting the toolhead
+            self._tap_sampling = False
             return
         self._sampler.finish()
 

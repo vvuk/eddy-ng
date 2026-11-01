@@ -28,6 +28,7 @@ from .compat import (
 from .sampler import ProbeEddyProbeResult
 from .fmap import ProbeEddyFrequencyMap
 from .tap import TapResult, TapConfig, compute_tap_z, tap_filter_sos, is_tap_request, replay_tap_signal, ProbeEddyTapSession
+from .liftoff import LiftoffFit, fit_liftoff, LIFTOFF_WINDOW_TIME, LIFTOFF_WINDOW_HEIGHT
 from .profiles import (
     DEFAULT_PROFILE,
     TAP_SECTION_PREFIX,
@@ -1591,8 +1592,12 @@ class ProbeEddy(EddyNgSensor):
             return None, None
 
         signal = replay_tap_signal(tapcfg.sos, sampler.freqs, safe_freq, trigger_freq)
+        # the samples continue through the lift afterwards
+        lift_start_time = sampler.memos.get("lift_start_time", math.inf)
         peak = above = None
         for t, value in zip(sampler.times, signal):
+            if t >= lift_start_time:
+                break
             if value is None:
                 continue
             pos, velocity = self._get_trapq_position(t)
@@ -1639,8 +1644,11 @@ class ProbeEddy(EddyNgSensor):
                     # raise the toolhead as soon as the tap ends (or fails), so
                     # it isn't left pushing into the bed
                     finish_z = th.get_position()[2]
+                    lift_start_time = None
                     if finish_z < bed_z + 1.0 and not self._printer.is_shutdown():
+                        lift_start_time = th.get_last_move_time()
                         th.manual_move([None, None, start_z], lift_speed)
+                    self._finish_tap_sampler(lift_start_time)
 
                 if hmove.check_no_movement() is not None:
                     raise self._printer.command_error("Probe triggered prior to movement")
@@ -1699,7 +1707,58 @@ class ProbeEddy(EddyNgSensor):
             tap_time=tap_time,
             tap_start_time=tap_start_time,
             tap_end_time=tap_end_time,
+            descent_z=probe_z,
+            liftoff=self._fit_last_liftoff(),
         )
+
+    # A tap's sampler keeps running through the lift afterwards (see
+    # ProbeEddyEndstopWrapper); finish it once the samples from the start
+    # of the lift are in. lift_start_time is None if there was no lift.
+    def _finish_tap_sampler(self, lift_start_time: Optional[float]):
+        sampler = self._sampler
+        if sampler is None or not sampler.active():
+            return
+        try:
+            if lift_start_time is not None:
+                sampler.memo("lift_start_time", lift_start_time)
+                lift_end_time = self._toolhead.get_last_move_time()
+                sampler.wait_for_sample_at_time(min(lift_start_time + LIFTOFF_WINDOW_TIME, lift_end_time), raise_error=False)
+        finally:
+            sampler.finish()
+
+    # Fit where the nozzle left the bed during the last tap's lift (see
+    # liftoff.py). Never fails the tap; problems are in the fit's error.
+    def _fit_last_liftoff(self) -> Optional[LiftoffFit]:
+        sampler = self._last_sampler
+        if sampler is None:
+            return None
+        lift_start_time = sampler.memos.get("lift_start_time")
+        if lift_start_time is None:
+            return LiftoffFit(error="no lift recorded")
+        try:
+            zs, freqs = [], []
+            for t, f in zip(sampler.times, sampler.freqs):
+                # include a little of the toolhead standing still before the lift
+                if t < lift_start_time - 0.020:
+                    continue
+                if t > lift_start_time + LIFTOFF_WINDOW_TIME:
+                    break
+                pos, _ = self._get_trapq_position(t)
+                if pos is None:
+                    continue
+                zs.append(pos[2])
+                freqs.append(f)
+            if zs:
+                z_lowest = min(zs)
+                keep = [i for i, z in enumerate(zs) if z <= z_lowest + LIFTOFF_WINDOW_HEIGHT]
+                zs = [zs[i] for i in keep]
+                freqs = [freqs[i] for i in keep]
+            fit = fit_liftoff(zs, freqs)
+        except Exception as e:
+            logging.exception("EDDYng: lift-off fit failed")
+            fit = LiftoffFit(error=f"internal error: {e}")
+        sampler.memo("liftoff", fit)
+        return fit
 
     # The last tap's signal peak, or None; never fails the tap
     def _tap_signal_peak(self, tapcfg: TapConfig, tap_speed: float) -> Optional[float]:
@@ -1754,6 +1813,9 @@ class ProbeEddy(EddyNgSensor):
         samples_stddev: float = gcmd.get_float("SAMPLES_STDDEV", self.params.tap_samples_stddev, above=0.0)
         use_median: bool = gcmd.get_int("USE_MEDIAN", 1 if self.params.tap_use_median else 0) == 1
         write_plot_arg: int = gcmd.get_int("PLOT", None)
+        tap_position: str = gcmd.get("POSITION", self.params.tap_position).lower()
+        if tap_position not in ("descent", "liftoff"):
+            raise gcmd.error("POSITION must be descent or liftoff")
 
         if tap_threshold is None:
             tap_threshold = self.params.tap_threshold
@@ -1821,9 +1883,28 @@ class ProbeEddy(EddyNgSensor):
                         break
                     continue
 
+                liftoff = tap.liftoff
+                liftoff_ok = liftoff is not None and not liftoff.error
+                if tap_position == "liftoff":
+                    if not liftoff_ok:
+                        self._log_msg(f"Tap {sample_i+1}: failed: {liftoff}")
+                        sample_err_count += 1
+                        tap.error = Exception(str(liftoff))
+                        sample_last_err = tap
+                        continue
+                    tap.probe_z = liftoff.z
+                    tap.overshoot = liftoff.z - tap.toolhead_z
+
                 results.append(tap)
 
-                self._log_msg(f"Tap {sample_i+1}: z={tap.probe_z:.3f}")
+                if liftoff_ok:
+                    self._log_msg(
+                        f"Tap {sample_i+1}: z={tap.probe_z:.3f} (descent {tap.descent_z:.3f}, lift-off {liftoff.z:.3f}, "
+                        f"lift-off - descent {liftoff.z - tap.descent_z:+.3f})"
+                    )
+                    self._log_debug(f"tap[{sample_i+1}]: {liftoff}")
+                else:
+                    self._log_msg(f"Tap {sample_i+1}: z={tap.probe_z:.3f} ({liftoff if liftoff else 'no lift-off fit'})")
                 self._log_debug(
                     f"tap[{sample_i+1}]: {tap.probe_z:.3f} toolhead at: {tap.toolhead_z:.3f} overshoot: {tap.overshoot:.3f} at {tap.tap_time:.4f}s"
                 )
@@ -1864,8 +1945,27 @@ class ProbeEddy(EddyNgSensor):
             self._log_error(err_msg)
             raise self._printer.command_error("Tap failed")
 
+        self._log_tap_comparison(results, tap_position)
+
         self._last_tap_z = float(tap_z)
         return tap_z, tap_stddev, tap_overshoot
+
+    # Summarize the descent and lift-off tap positions side by side, for
+    # comparing the two
+    def _log_tap_comparison(self, results: List[TapResult], tap_position: str):
+        descent = np.array([t.descent_z for t in results])
+        liftoffs = [t for t in results if t.liftoff is not None and not t.liftoff.error]
+        msg = f"Tap positions ({tap_position} used): descent mean {descent.mean():.3f} stddev {descent.std():.4f} ({len(descent)} taps)"
+        if liftoffs:
+            lz = np.array([t.liftoff.z for t in liftoffs])
+            delta = np.array([t.liftoff.z - t.descent_z for t in liftoffs])
+            msg += (
+                f"; lift-off mean {lz.mean():.3f} stddev {lz.std():.4f} ({len(lz)} taps)"
+                f"; lift-off - descent {delta.mean():+.3f} (stddev {delta.std():.4f})"
+            )
+        else:
+            msg += "; no lift-off fits"
+        self._log_msg(msg)
 
     def cmd_TAP_next(self, gcmd: GCodeCommand, orig_drive_current: int):
         self._log_debug("\nEDDYng Tap begin")
