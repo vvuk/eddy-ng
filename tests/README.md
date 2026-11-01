@@ -6,20 +6,19 @@ They don't cover the parts that talk to Klipper (homing, moves, the MCU, G-code 
 
 ## Running
 
-You need Python 3.8 or newer with numpy and pytest. With scipy installed, a few more filter tests run.
+With [uv](https://docs.astral.sh/uv/), from the top of the repository:
 
 ```
-pip install -r tests/requirements.txt
-python3 -m pytest tests
+uv run pytest
 ```
 
-Or, with [uv](https://docs.astral.sh/uv/):
+This sets up a virtual environment (`.venv`) with numpy, pytest and scipy; the last two are `pyproject.toml`'s `dev` dependencies. The tests need Python 3.8 or newer; to run them on a particular version, add e.g. `--python 3.8`. Without scipy, a few filter tests are skipped; to run them that way, like a printer without scipy:
 
 ```
-uv run --no-project --with-requirements tests/requirements.txt python -m pytest tests
+uv run --exact --no-dev --with pytest pytest
 ```
 
-Run `pytest` on the `tests` directory (or from inside it), not from the repository root: the root `__init__.py` (for Kalico) makes pytest try to import the repository as a package.
+Without uv, install numpy, pytest and (optionally) scipy, and run `python3 -m pytest`.
 
 ## How it works
 

@@ -19,6 +19,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Run tests
         run: |
-          deps="--with numpy --with pytest"
-          if [ "${{ matrix.scipy }}" = with ]; then deps="$deps --with scipy"; fi
-          uv run --no-project --python ${{ matrix.python-version }} $deps python -m pytest tests
+          if [ "${{ matrix.scipy }}" = with ]; then
+            uv run --python ${{ matrix.python-version }} pytest
+          else
+            uv run --python ${{ matrix.python-version }} --exact --no-dev --with pytest pytest
+          fi

@@ -1,0 +1,19 @@
+# For development only: eddy-ng is installed into Klipper or Kalico with
+# install.sh, not as a Python package. `uv run pytest` runs the tests.
+[project]
+name = "eddy-ng"
+version = "0.0.0"
+description = "Eddy current probe support for Klipper and Kalico, with tap"
+requires-python = ">=3.8"
+# Klipper and Kalico already need numpy; scipy and plotly are optional
+dependencies = ["numpy"]
+
+[dependency-groups]
+dev = ["pytest", "scipy"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
