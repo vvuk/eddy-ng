@@ -34,20 +34,22 @@ def run(fit, reads, sps=250):
 
 
 @pytest.mark.parametrize("sps", [250, 500])
-@pytest.mark.parametrize("late", [0.0, 0.01])
+@pytest.mark.parametrize("late", [0.0, 0.01, 0.03, 0.05])
 def test_sample_times(sps, late):
     period = 1.0 / sps
     center = period / 2
-    for seed in range(5):
+    for seed in range(20):
         reads, conv = simulated_reads(sps=sps, late=late, seed=seed)
         times = run(ConversionTimeFit(center), reads, sps)
         err = (times - (conv - center)) / period
         # every sample is placed within a few percent of a period of the
         # middle of its conversion, including the late reads (the read
         # times themselves are up to ~half a period late), after the first
-        # batch, which is a little less accurate
+        # batch. That one is a little less accurate, and with many late
+        # reads it can be off (the next batch fixes it).
         first = sps // 2
-        assert np.abs(err[:first]).max() < 0.1
+        if late <= 0.01:
+            assert np.abs(err[:first]).max() < 0.1
         assert np.abs(err[first:]).max() < 0.03
         assert np.abs(err[first:]).mean() < 0.01
 

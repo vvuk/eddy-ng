@@ -132,6 +132,9 @@ class ConversionTimeFit:
     # are absorbed by the running fit as new reads replace old ones.
     PHASE_QUANTILE = 0.05
     MAX_PHASE_DIFF = 0.1
+    # The most counts to try beyond the usual +-2 in each direction for the
+    # initial fit (see _initial_fit), to bound the time it takes
+    MAX_EXTRA_COUNTS = 20
 
     def __init__(self, center_offset: float):
         # time from the middle of the conversion's integration window to its completion
@@ -181,8 +184,8 @@ class ConversionTimeFit:
     def _initial_fit(self, r: np.ndarray):
         # Number of conversions over the span of the reads. Reads only happen on
         # poll ticks and dropped conversions show up as ~2x gaps, so count each
-        # gap; a read delayed by latency can still make this off by one or two,
-        # so try nearby counts and keep the one that fits best.
+        # gap; this can be off by one or two, so try nearby counts and keep the
+        # one that fits best.
         span = r[-1] - r[0]
         if span <= 0.0:
             return None
@@ -194,8 +197,16 @@ class ConversionTimeFit:
                 return None
             period = span / count
 
+        # A read delayed by latency can make the gap after it round to 0, and
+        # the count one too low, or the gap before it round to 2, and the count
+        # one too high. Every such read leaves a gap like that (a gap of 2 can
+        # also be a dropped conversion), so look further for each of them.
+        steps = np.round(gaps / period)
+        below = 2 + min(int(np.count_nonzero(steps >= 2)), self.MAX_EXTRA_COUNTS)
+        above = 2 + min(int(np.count_nonzero(steps == 0)), self.MAX_EXTRA_COUNTS)
+
         best = None
-        for c in range(int(count) - 2, int(count) + 3):
+        for c in range(int(count) - below, int(count) + above + 1):
             if c <= 0:
                 continue
             period = span / c
