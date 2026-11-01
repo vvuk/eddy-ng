@@ -5,12 +5,13 @@ Every `PROBE_EDDY_NG_<name>` command is also available as `EDDYNG_<name>`. All o
 ## Setup and calibration
 
 **`PROBE_EDDY_NG_SETUP`**: find and calibrate drive currents for homing and tap, starting with a paper test (see [Calibration](calibration.md)). Calibrates the active plate.
-- `START_DRIVE_CURRENT=`, `END_DRIVE_CURRENT=`: the range of drive currents to try, from high to low. Defaults to the sensor type's range.
+- `DRIVE_CURRENT=`: only try this drive current.
+- `START_DRIVE_CURRENT=`, `END_DRIVE_CURRENT=`: the range of drive currents to try, from high to low. Defaults to `DRIVE_CURRENT`, or the sensor type's range.
 - `TRUST_Z=1`: skip the paper test and treat the current Z position as accurate.
 - `DEBUG=1`: report why each drive current failed, and write the calibration debug files.
 
 **`PROBE_EDDY_NG_AUTO_SETUP`**: like `SETUP`, but without the paper test: finds Z=0 by touching the bed with the nozzle and tapping, then calibrates (see [Calibration](calibration.md#automatic-setup-without-a-paper-test)). Z doesn't need to be homed, and stays homed afterwards. Calibrates the active plate. Takes `SETUP`'s parameters, and:
-- `DRIVE_CURRENT=`: drive current to use while finding Z=0. Default: the current homing drive current, or the sensor type's default.
+- `DRIVE_CURRENT=`: drive current to use while finding Z=0, and then the only one calibrated (unless `START_DRIVE_CURRENT`/`END_DRIVE_CURRENT` are given). Default: the current homing drive current, or the sensor type's default, and calibrating the sensor type's range.
 - `LIFT=`: raise the toolhead by this much before starting, so that it doesn't start out touching the bed. Default 5.
 - `FINE_STEP=`: step size once the sensor sees the bed; the nozzle is pushed into the bed by at most about this much while looking for contact. Default 0.2.
 - `COARSE_STEP=`: largest step size while the sensor doesn't see the bed yet. Default 2.

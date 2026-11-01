@@ -971,6 +971,12 @@ class ProbeEddy(EddyNgSensor):
         start_dc = self._sensor.drive_current_range[1]
         end_dc = self._sensor.drive_current_range[0]
 
+        # DRIVE_CURRENT= tries just that drive current (for AUTO_SETUP, it's
+        # also the one it found Z=0 with)
+        drive_current: Optional[int] = gcmd.get_int("DRIVE_CURRENT", None, minval=1, maxval=31)
+        if drive_current is not None:
+            start_dc = end_dc = drive_current
+
         start_dc: int = gcmd.get_int("START_DRIVE_CURRENT", start_dc, minval=0, maxval=31)
         end_dc: int = gcmd.get_int("END_DRIVE_CURRENT", end_dc, minval=0, maxval=31)
 
