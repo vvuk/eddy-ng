@@ -25,16 +25,7 @@ try:
 except ImportError:
     plotly = None
 
-try:
-    import scipy  # noqa
-except ImportError:
-    scipy = None
-
-
 def compute_butter_tap(eddy: ProbeEddy, sampler: ProbeEddySampler):
-    if not scipy:
-        return None, None, None
-
     # the frequency the firmware starts filtering at: the tap's first gate
     trigger_freq = sampler.memos.get("tap_safe_freq")
     if trigger_freq is None:
@@ -48,18 +39,19 @@ def compute_butter_tap(eddy: ProbeEddy, sampler: ProbeEddySampler):
     s_t = s_t[first_one:][valid]
     s_f = s_f[first_one:][valid]
 
-    lowcut = eddy.params.tap_butter_lowcut
-    highcut = eddy.params.tap_butter_highcut
-    order = eddy.params.tap_butter_order
-
-    sos = scipy.signal.butter(
-        order,
-        [lowcut, highcut],
-        btype="bandpass",
-        fs=eddy._sensor.data_rate,
-        output="sos",
-    )
-    filtered = scipy.signal.sosfilt(sos, s_f - s_f[0])
+    # The same filter the firmware uses (precomputed for the defaults), run
+    # in plain Python: importing scipy.signal takes seconds on a Pi, which
+    # would stall the first tap.
+    sos = eddy._tap_sos
+    state = [[0.0, 0.0] for _ in sos]
+    filtered = np.empty(len(s_f))
+    for i, val in enumerate((s_f - s_f[0]).tolist()):
+        for (b0, b1, b2, _, a1, a2), z in zip(sos, state):
+            out = b0 * val + z[0]
+            z[0] = b1 * val - a1 * out + z[1]
+            z[1] = b2 * val - a2 * out
+            val = out
+        filtered[i] = val
 
     return s_t, filtered, first_one
 
@@ -113,8 +105,8 @@ def write_tap_plot(eddy: ProbeEddy, tap: TapResult, tapnum: int = -1):
 
     time_len = s_t.max()
 
-    # compute the butterworth filter, if we have scipy
-    if tap is not None and scipy:
+    # compute the butterworth filter
+    if tap is not None:
         butter_s_t, butter_s_v, butter_index_start = compute_butter_tap(eddy, eddy._last_sampler)
         butter_s_t = butter_s_t - time_start
     else:
