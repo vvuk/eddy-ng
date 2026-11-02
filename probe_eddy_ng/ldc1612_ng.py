@@ -105,6 +105,18 @@ class LDC1612_ng_sample_data:
 # times. The slope comes from a least-squares fit; since a read can never
 # happen before its conversion completes, t0 comes from the lower envelope of
 # the read times rather than from the (always late) mean.
+# The q quantile of a non-empty array, the same as np.quantile's default
+# (interpolating linearly between ranks). This runs in the reactor, so it
+# avoids np.quantile and np.median: they're slower, and np.median's first call
+# imports numpy.ma, which takes ~50ms on a slow host.
+def _rank_quantile(a: np.ndarray, q: float) -> float:
+    pos = q * (len(a) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(a) - 1)
+    part = np.partition(a, (lo, hi))
+    return float(part[lo] + (part[hi] - part[lo]) * (pos - lo))
+
+
 class ConversionTimeFit:
     MIN_SAMPLES = 16
     # Keep the window short enough that clock drift within it is linear
@@ -138,22 +150,40 @@ class ConversionTimeFit:
 
     def __init__(self, center_offset: float):
         # time from the middle of the conversion's integration window to its completion
-        self._center_offset = center_offset
+        self.center_offset = center_offset
         self._reads: list[float] = []
         self._t0: Optional[float] = None
         self._period: Optional[float] = None
+        # The period from before a restart, to start the next fit from
+        self._prior_period: Optional[float] = None
+
+    # Streaming starts again. The chip keeps converting at the same period
+    # between streams, but too much time has passed to extrapolate the phase,
+    # so the next fit starts from the period alone. That's much cheaper than
+    # the initial fit, which matters because this runs in the reactor, often
+    # during a homing move: a stall of more than ~100ms there starves the
+    # steppers ("Timer too close").
+    def restart(self):
+        self._prior_period = self._period or self._prior_period
+        self._reads = []
+        self._t0 = self._period = None
 
     def add_reads(self, read_times: list[float]) -> list[float]:
         if len(read_times) >= self.MIN_SAMPLES and abs(self._phase_shift(read_times)) > self.MAX_PHASE_DIFF:
-            self._reads = []
-            self._t0 = self._period = None
+            self.restart()
 
         self._reads.extend(read_times)
         del self._reads[: -self.MAX_SAMPLES]
         if len(self._reads) >= self.MIN_SAMPLES:
             r = np.asarray(self._reads)
             if self._period is None:
-                fit = self._initial_fit(r)
+                fit = None
+                if self._prior_period is not None:
+                    # falls through to the initial fit if the period changed
+                    # (e.g. the chip was reconfigured)
+                    fit = self._fit_for_period(r, self._prior_period)
+                if fit is None:
+                    fit = self._initial_fit(r)
                 if fit is None:
                     # don't let a bad stretch of reads block every later attempt
                     self._reads = list(read_times)
@@ -168,7 +198,7 @@ class ConversionTimeFit:
         if self._period is None:
             return read_times
         n = np.floor((read_times - self._t0) / self._period + self.INDEX_BIAS)
-        return self._t0 + n * self._period - self._center_offset
+        return self._t0 + n * self._period - self.center_offset
 
     def to_sample_time(self, read_time: float) -> float:
         return float(self.to_sample_times(np.asarray([read_time], dtype=float))[0])
@@ -179,7 +209,7 @@ class ConversionTimeFit:
         # read delays relative to the running fit, in periods, unwrapped to
         # [-0.3, 0.7); normally they start at ~0
         delay = ((np.asarray(read_times) - self._t0) / self._period + 0.3) % 1.0 - 0.3
-        return float(np.quantile(delay, self.PHASE_QUANTILE))
+        return _rank_quantile(delay, self.PHASE_QUANTILE)
 
     def _initial_fit(self, r: np.ndarray):
         # Number of conversions over the span of the reads. Reads only happen on
@@ -209,16 +239,19 @@ class ConversionTimeFit:
         for c in range(int(count) - below, int(count) + above + 1):
             if c <= 0:
                 continue
-            period = span / c
-            # index relative to the first read, so a delayed read only
-            # misplaces itself rather than every read after it
-            n = np.round((r - r[0]) / period)
-            offsets = r - period * n
-            t0 = float(np.quantile(offsets[offsets > np.median(offsets) - 0.5 * period], self.ENVELOPE_QUANTILE))
-            fit = self._refine(r, t0, period)
+            fit = self._fit_for_period(r, span / c)
             if fit is not None and (best is None or fit[2] < best[2]):
                 best = fit
         return best
+
+    # Fit starting from a known period: find t0, then refine both
+    def _fit_for_period(self, r: np.ndarray, period: float):
+        # index relative to the first read, so a delayed read only
+        # misplaces itself rather than every read after it
+        n = np.round((r - r[0]) / period)
+        offsets = r - period * n
+        t0 = _rank_quantile(offsets[offsets > _rank_quantile(offsets, 0.5) - 0.5 * period], self.ENVELOPE_QUANTILE)
+        return self._refine(r, t0, period)
 
     def _refine(self, r: np.ndarray, t0: float, period: float):
         for _ in range(3):
@@ -227,12 +260,21 @@ class ConversionTimeFit:
             inliers = delay < self.MAX_INLIER_DELAY
             if np.count_nonzero(inliers) < self.MIN_SAMPLES:
                 return None
-            period = float(np.polyfit(n[inliers], r[inliers], 1)[0])
+            # least-squares slope of read time against conversion index, in
+            # closed form: np.polyfit goes through a general LAPACK solve,
+            # which is far more work for a straight line
+            x = n[inliers]
+            y = r[inliers]
+            x = x - x.mean()
+            denom = float((x * x).sum())
+            if denom <= 0.0:
+                return None
+            period = float((x * (y - y.mean())).sum() / denom)
             if period <= 0.0:
                 return None
             # reads never happen before the conversion completes, so the
             # conversion times are the lower envelope of the read times
-            t0 = float(np.quantile((r - period * n)[inliers], self.ENVELOPE_QUANTILE))
+            t0 = _rank_quantile((r - period * n)[inliers], self.ENVELOPE_QUANTILE)
 
         n = np.floor((r - t0) / period + self.INDEX_BIAS)
         delay = (r - t0 - period * n) / period
@@ -781,7 +823,13 @@ class LDC1612_ng:
         self._data_timer = reactor.register_timer(self._process_data, reactor.monotonic() + callback_interval)
 
         rcount_now_sec = self.get_rcount_sec()
-        self._time_fit = ConversionTimeFit(rcount_now_sec / 2.0)
+        # Keep the fit from earlier streams (see ConversionTimeFit.restart),
+        # unless the conversion time changed
+        center_offset = rcount_now_sec / 2.0
+        if self._time_fit is None or self._time_fit.center_offset != center_offset:
+            self._time_fit = ConversionTimeFit(center_offset)
+        else:
+            self._time_fit.restart()
 
         # Poll more than twice per conversion so we don't miss samples. Deliberately
         # not an integer fraction of the conversion period, so that the poll phase
