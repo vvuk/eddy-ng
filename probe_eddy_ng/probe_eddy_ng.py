@@ -21,7 +21,7 @@ from .compat import (
     ToolHead,
     probe,
     manual_probe,
-    HomingMove,
+    make_homing_move,
     set_position_z_homed,
     clear_z_homed,
 )
@@ -223,6 +223,8 @@ class ProbeEddy(EddyNgSensor):
         # including METHOD=rapid_scan) reads directly
         self.name = self._full_name
         self.mcu_probe = self._endstop_wrapper
+        # Kalico's probe_list (axis_twist_compensation) identifies probes by this
+        self.probe_name = self._full_name
 
         if hasattr(probe, "ProbeCommandHelper"):
             self._cmd_helper = probe.ProbeCommandHelper(config, self, self._endstop_wrapper.query_endstop)
@@ -1620,6 +1622,7 @@ class ProbeEddy(EddyNgSensor):
     # tap signal), so a miss isn't reported as an error.
     def do_one_tap(
         self,
+        gcmd: GCodeCommand,
         start_z: float,
         target_z: float,
         tap_speed: float,
@@ -1641,7 +1644,7 @@ class ProbeEddy(EddyNgSensor):
             self._endstop_wrapper.tap_config = tapcfg
 
             endstops = [(self._endstop_wrapper, "probe")]
-            hmove = HomingMove(self._printer, endstops)
+            hmove = make_homing_move(self._printer, endstops, th, gcmd)
 
             try:
                 try:
@@ -1859,6 +1862,7 @@ class ProbeEddy(EddyNgSensor):
                     self.save_samples_path = f"/tmp/tap-samples-{sample_i + 1}.csv"
 
                 tap = self.do_one_tap(
+                    gcmd=gcmd,
                     start_z=tap_start_z + z_base,
                     target_z=target_z + z_base,
                     tap_speed=tap_speed,

@@ -161,6 +161,7 @@ def measuring_finder(e, peaks, before=5.0, triggers=False):
     f = object.__new__(ProbeEddyZeroFinder)
     f.eddy = e
     f._printer = e._printer
+    f.gcmd = None
     f._th = FakeToolhead()
     f.fine_step = 0.2
     f.tap_speed = 5.0

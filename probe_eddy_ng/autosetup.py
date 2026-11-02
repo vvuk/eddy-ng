@@ -347,6 +347,7 @@ class ProbeEddyZeroFinder:
             if eddy.params.debug:
                 eddy.save_samples_path = f"/tmp/tap-measure-{i + 1}.csv"
             tap = eddy.do_one_tap(
+                gcmd=self.gcmd,
                 start_z=base + self.tap_start_z,
                 target_z=base - depth,
                 tap_speed=speed,

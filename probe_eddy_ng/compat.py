@@ -9,6 +9,8 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 from __future__ import annotations
 
+import inspect
+
 try:
     from klippy import mcu, pins, chelper
     from klippy.printer import Printer
@@ -36,6 +38,21 @@ except ImportError:
 
 # Newer Klipper passes probe results around as manual_probe.ProbeResult
 HAS_PROBE_RESULT_TYPE = hasattr(manual_probe, "ProbeResult")
+
+# Kalico (PR #1052) gives every command an execution context, and HomingMove
+# takes the command (and a required toolhead): HomingMove(printer, endstops,
+# toolhead, gcmd). Klipper and older Kalico have HomingMove(printer, endstops,
+# toolhead=None).
+try:
+    HOMING_MOVE_TAKES_GCMD = "gcmd" in inspect.signature(HomingMove.__init__).parameters
+except (TypeError, ValueError):
+    HOMING_MOVE_TAKES_GCMD = False
+
+
+def make_homing_move(printer: Printer, endstops, toolhead: ToolHead, gcmd: GCodeCommand) -> HomingMove:
+    if HOMING_MOVE_TAKES_GCMD:
+        return HomingMove(printer, endstops, toolhead, gcmd)
+    return HomingMove(printer, endstops, toolhead)
 
 
 # Set the toolhead position and mark Z as homed
@@ -93,6 +110,8 @@ __all__ = [
     "HomingMove",
     "IS_KALICO",
     "HAS_PROBE_RESULT_TYPE",
+    "HOMING_MOVE_TAKES_GCMD",
+    "make_homing_move",
     "set_position_z_homed",
     "clear_z_homed",
     "register_mcu_response",
