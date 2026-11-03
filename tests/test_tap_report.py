@@ -13,6 +13,7 @@ from probe_eddy_ng.params import ProbeEddyParams
 from probe_eddy_ng.tap import TapResult, compute_tap_z
 
 RATE = 250
+SENSOR_OFFSET = 0.7
 SPEED = 3.0
 LIFT_SPEED = 5.0
 SOS = [
@@ -63,6 +64,8 @@ def simulate_tap(eddy, contact_z, rng, missed=False):
     times = list(np.arange(t0, t_lift + 0.4, 1 / RATE))
     heights = [max(kin(t), contact_z) + rng.normal(0, 0.001) for t in times]
     freqs = [freq_at(h) + rng.normal(0, 1) for h in heights]
+    # the sensor's heights are offset from the toolhead's Z
+    heights = [h + SENSOR_OFFSET for h in heights]
     memos = {"tap_safe_freq": freq_at(1.0), "tap_trigger_freq": freq_at(0.5), "lift_start_time": t_lift}
     if not missed:
         memos.update(trigger_time=t_trigger, tap_start_time=t_contact)
@@ -112,6 +115,30 @@ def test_capture_tap_window_and_signal():
     assert len(cap.times) == len(cap.sensor_z) == len(cap.toolhead_z) == len(cap.signal)
     assert cap.toolhead_z[0] == pytest.approx(0.01 + 0.38 * SPEED, abs=0.02)
     assert cap.signal_peak is not None and cap.signal_peak > 0
+    # the sensor at the tap (at contact): the contact Z plus its offset
+    assert cap.sensor_at_tap == pytest.approx(0.01 + SENSOR_OFFSET, abs=0.003)
+
+
+def test_capture_tap_toolhead_stops_at_the_halt_position():
+    eddy = FakeEddy()
+    tap = simulate_tap(eddy, 0.01, np.random.default_rng(0))
+    planned = eddy._kin
+    t_lift = eddy._last_sampler.memos["lift_start_time"]
+
+    # the move history continues down to target_z after the trigger, until
+    # homing sets the halt position
+    def kin(t):
+        if tap.tap_end_time <= t < t_lift:
+            return max(-1.0, tap.toolhead_z - (t - tap.tap_end_time) * SPEED)
+        return planned(t)
+
+    eddy._kin = kin
+    cap = tap_report.capture_tap(eddy, tap)
+    zs = [z for t, z in zip(cap.times, cap.toolhead_z) if t < cap.lift_start]
+    assert min(zs) == pytest.approx(tap.toolhead_z)
+    # before the halt and after the lift, the move history is used as is
+    assert cap.toolhead_z[0] == pytest.approx(planned(tap.tap_end_time - 0.4), abs=0.02)
+    assert cap.toolhead_z[-1] > tap.toolhead_z + 0.5
 
 
 def test_capture_tap_without_sampler():

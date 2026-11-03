@@ -46,6 +46,18 @@ class TapResult:
     liftoff: Optional[LiftoffFit] = None
 
 
+# Where the toolhead was at print time t during a tap, from the toolhead's
+# move history. When a tap triggers, the steppers stop, but the history
+# still has the whole planned move down to target_z until homing sets the
+# halt position (where the toolhead really stopped, tap.toolhead_z) at the
+# end of the move; so until the lift, the toolhead was never below that.
+def tap_toolhead_z(eddy: ProbeEddy, tap: TapResult, lift_start_time: Optional[float], t: float) -> Optional[float]:
+    z = eddy._get_trapq_height(t)
+    if z is not None and not tap.missed and lift_start_time is not None and t < lift_start_time:
+        z = max(z, tap.toolhead_z)
+    return z
+
+
 @dataclass
 class TapConfig:
     threshold: float

@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import numpy as np
 
-from .tap import TapResult, replay_tap_signal, tap_cluster
+from .tap import TapResult, replay_tap_signal, tap_cluster, tap_toolhead_z
 
 if TYPE_CHECKING:
     from .probe_eddy_ng import ProbeEddy
@@ -51,6 +51,10 @@ class TapCapture:
     tap_start: Optional[float] = None
     # the largest tap signal before the lift
     signal_peak: Optional[float] = None
+    # the sensor's height at the tap position. The sensor's heights are
+    # offset from the toolhead's Z (by temperature, the calibration, the tap
+    # adjust), so the report compares them by how they change from here.
+    sensor_at_tap: Optional[float] = None
 
 
 def _num(v: Any, digits: int) -> Optional[float]:
@@ -100,9 +104,16 @@ def capture_tap(eddy: ProbeEddy, tap: TapResult) -> TapCapture:
             peak = s if peak is None else max(peak, s)
         cap.times.append(round((t - ref) * 1000.0, 2))
         cap.sensor_z.append(_num(heights[i], 5) if heights is not None else None)
-        cap.toolhead_z.append(_num(eddy._get_trapq_height(t), 5))
+        cap.toolhead_z.append(_num(tap_toolhead_z(eddy, tap, lift_start_time, t), 5))
         cap.signal.append(_num(s, 1))
     cap.signal_peak = peak
+    if tap.error is None and tap.tap_time:
+        pts = [(t, z) for t, z in zip(cap.times, cap.sensor_z) if z is not None]
+        if len(pts) >= 2:
+            ts = [p[0] for p in pts]
+            tap_ms = (tap.tap_time - ref) * 1000.0
+            if ts[0] <= tap_ms <= ts[-1]:
+                cap.sensor_at_tap = _num(np.interp(tap_ms, ts, [p[1] for p in pts]), 5)
     if lift_start_time is not None:
         cap.lift_start = round((lift_start_time - ref) * 1000.0, 2)
     tap_start_time = memos.get("tap_start_time")
@@ -220,6 +231,7 @@ def build_report_data(
             "tap_start": cap.tap_start,
             "t": cap.times,
             "sensor_z": cap.sensor_z,
+            "sensor_at_tap": cap.sensor_at_tap,
             "toolhead_z": cap.toolhead_z,
             "signal": cap.signal,
         }
@@ -234,7 +246,7 @@ def build_report_data(
             "signal": _composite_median(good_caps, lambda c: c.signal),
             "relative_z": _composite_median(
                 good_caps,
-                lambda c: [None if z is None else z - c.tap.descent_z for z in c.sensor_z],
+                lambda c: [None if z is None or c.sensor_at_tap is None else z - c.sensor_at_tap for z in c.sensor_z],
             ),
         }
 
@@ -452,7 +464,10 @@ const sgn3 = x => x == null ? "—" : (x < 0 ? "−" : "+") + Math.abs(x).toFixe
 const okTaps = TAPS.filter(t => t.ok);
 const failedTaps = TAPS.filter(t => !t.ok);
 const hasLiftoff = okTaps.some(t => t.liftoff != null);
-const hasSensorZ = TAPS.some(t => t.sensor_z.some(z => z != null));
+const hasSensorZ = TAPS.some(t => t.sensor_at_tap != null);
+// the sensor's heights are offset from the toolhead's Z; line them up at the tap
+const sensorShifted = t => t.sensor_at_tap == null ? t.sensor_z.map(() => null)
+  : t.sensor_z.map(z => z == null ? null : z - t.sensor_at_tap + t.descent);
 const posName = S.position === "liftoff" ? "lift-off" : "descent";
 
 // ---------- header ----------
@@ -496,17 +511,17 @@ document.getElementById("pos-note").insertAdjacentHTML("beforeend", ` Summary fi
 if (!hasLiftoff) document.getElementById("sec-delta").hidden = true;
 
 document.getElementById("tap-legend").innerHTML =
-  (hasSensorZ ? `<span style="color:var(--descent)"><i></i>sensor Z</span>` : "") +
+  (hasSensorZ ? `<span style="color:var(--descent)"><i></i>sensor Z, lined up with the toolhead at the tap</span>` : "") +
   `<span style="color:var(--neutral-line)"><i class="dash"></i>toolhead Z</span><span style="color:var(--liftoff)"><i></i>tap signal</span>`;
 
 // ---------- table ----------
 document.getElementById("tbl").innerHTML =
-  `<thead><tr><th>Tap</th><th>Descent Z</th><th>Lift-off Z</th><th>Δ</th><th>Toolhead Z</th><th>Overshoot</th><th>Depress</th><th>Contact / fit</th><th>Slope ratio</th><th>Fit RMS</th><th>Signal peak</th><th>Status</th></tr></thead><tbody>` +
+  `<thead><tr><th>Tap</th><th>Descent Z</th><th>Lift-off Z</th><th>Δ</th><th>Toolhead Z</th><th>Sensor Z at tap</th><th>Overshoot</th><th>Depress</th><th>Contact / fit</th><th>Slope ratio</th><th>Fit RMS</th><th>Signal peak</th><th>Status</th></tr></thead><tbody>` +
   TAPS.map(t => {
     const status = !t.ok ? `<span class="bad">${esc(t.error)}</span>`
       : (t.used ? (R.ok ? "used" : "closest cluster") : "outside cluster") + (t.liftoff == null && t.liftoff_error ? ` · lift-off: ${esc(t.liftoff_error)}` : "");
     return `<tr class="${t.ok ? "" : "failed"} ${t.used ? "used" : ""}"><td>${t.n}</td><td>${f4(t.descent)}</td><td>${f4(t.liftoff)}</td><td>${sgn3(t.delta)}</td>
-      <td>${f4(t.toolhead)}</td><td>${f3(t.overshoot)}</td><td>${f3(t.depress)}</td>
+      <td>${f4(t.toolhead)}</td><td>${f4(t.sensor_at_tap)}</td><td>${f3(t.overshoot)}</td><td>${f3(t.depress)}</td>
       <td>${t.contact_samples == null ? "—" : `${t.contact_samples} / ${t.fit_samples}`}</td><td>${t.slope_ratio == null ? "—" : t.slope_ratio.toFixed(2)}</td>
       <td>${t.rms == null ? "—" : t.rms.toFixed(1) + " Hz"}</td><td>${t.signal_peak == null ? "—" : Math.round(t.signal_peak)}</td><td>${status}</td></tr>`;
   }).join("") + "</tbody>";
@@ -631,10 +646,10 @@ function render() {
   } else noChart("c-signal", "No tap triggered.");
   if (okTaps.length && hasSensorZ) {
     Plotly.react("c-height", [
-      ...okTaps.map(t => faint(t, t.sensor_z.map(z => z == null ? null : z - t.descent), D, ".3f")),
+      ...okTaps.filter(t => t.sensor_at_tap != null).map(t => faint(t, t.sensor_z.map(z => z == null ? null : z - t.sensor_at_tap), D, ".3f")),
       ...(COMP && COMP.relative_z ? [{ x: COMP.t, y: COMP.relative_z, mode: "lines", name: "median", line: { color: FG, width: 2 }, hovertemplate: "median %{y:.3f} mm<extra></extra>" }] : []),
     ], baseLayout({
-      title: title("Sensor Z relative to each tap's descent Z"), showlegend: false,
+      title: title("Sensor Z, relative to its height at each tap"), showlegend: false,
       xaxis: axis({ title: atitle("ms from trigger"), range: compX }),
       yaxis: axis({ title: atitle("mm"), range: [-0.05, 0.25], tickformat: ".2f" }),
       shapes: [hline(0, D), vline(0, N)],
@@ -654,7 +669,7 @@ function render() {
     if (t.liftoff != null) shapes.push(hline(t.liftoff, L, "dot"));
     if (t.lift_start != null) shapes.push(vline(t.lift_start, N, "dot"));
     Plotly.react(`tp-${t.n}`, [
-      { x: t.t, y: t.sensor_z, mode: "lines", name: "sensor Z", line: { color: D, width: 1.5 }, hovertemplate: "sensor %{y:.3f}<extra></extra>" },
+      { x: t.t, y: sensorShifted(t), customdata: t.sensor_z, mode: "lines", name: "sensor Z", line: { color: D, width: 1.5 }, hovertemplate: "sensor %{customdata:.3f}<extra></extra>" },
       { x: t.t, y: t.toolhead_z, mode: "lines", name: "toolhead Z", line: { color: N, width: 1.5, dash: "dash" }, hovertemplate: "toolhead %{y:.3f}<extra></extra>" },
       { x: t.t, y: t.signal, mode: "lines", name: "tap signal", yaxis: "y2", line: { color: L, width: 1.2 }, hovertemplate: "signal %{y:.0f}<extra></extra>" },
     ], baseLayout({

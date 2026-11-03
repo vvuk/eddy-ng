@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from .tap import tap_toolhead_z
+
 if TYPE_CHECKING:
     from .fmap import ProbeEddyFrequencyMap
     from .probe_eddy_ng import ProbeEddy
@@ -87,7 +89,9 @@ def write_tap_plot(eddy: ProbeEddy, tap: TapResult, tapnum: int = -1):
     else:
         s_z = np.full(len(s_t), np.nan)
     s_accval = np.asarray(eddy._last_sampler.accum_vals)
-    s_kinz = np.vectorize(lambda t: eddy._get_trapq_height(t) or -10)(s_t)
+    lift_start_time = eddy._last_sampler.memos.get("lift_start_time")
+    kinz = [tap_toolhead_z(eddy, tap, lift_start_time, t) for t in s_t.tolist()]
+    s_kinz = np.array([-10.0 if z is None else z for z in kinz])
 
     # Any values below 0.0 are suspect because they were not calibrated,
     # and so are just extrapolated from the fit. Show them differently.
@@ -172,7 +176,6 @@ def write_tap_plot(eddy: ProbeEddy, tap: TapResult, tapnum: int = -1):
 
     # The samples continue through the lift after the tap; show the end of
     # the tap move and the start of the lift
-    lift_start_time = eddy._last_sampler.memos.get("lift_start_time")
     view_end = time_len
     if lift_start_time is not None:
         lift_start_rel = lift_start_time - time_start
