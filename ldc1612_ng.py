@@ -563,6 +563,9 @@ class LDC1612_ng:
 
     def _process_batch(self, eventtime):
         samples = self._ffreader.pull_samples()
+        # Newer Kalico returns (samples, overflows)
+        if isinstance(samples, tuple):
+            samples = samples[0]
         count = 0
         err_count = 0
         last_err_kind = 0
