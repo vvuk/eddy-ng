@@ -46,6 +46,7 @@ from .endstop import ProbeEddyEndstopWrapper, ProbeEddyHomingSession
 from .scan import ProbeEddyScanningProbe
 from .autosetup import ProbeEddyZeroFinder
 from . import plots
+from . import tap_report
 from .base import EddyNgSensor
 
 
@@ -1822,6 +1823,7 @@ class ProbeEddy(EddyNgSensor):
         samples_stddev: float = gcmd.get_float("SAMPLES_STDDEV", self.params.tap_samples_stddev, above=0.0)
         use_median: bool = gcmd.get_int("USE_MEDIAN", 1 if self.params.tap_use_median else 0) == 1
         write_plot_arg: int = gcmd.get_int("PLOT", None)
+        write_report: bool = gcmd.get_int("REPORT", 1 if self.params.write_tap_report else 0) == 1
         tap_position: str = gcmd.get("POSITION", self.params.tap_position).lower()
         if tap_position not in ("descent", "liftoff"):
             raise gcmd.error("POSITION must be descent or liftoff")
@@ -1850,6 +1852,8 @@ class ProbeEddy(EddyNgSensor):
         tap = None
         # the signal peaks of taps that didn't trigger
         missed_peaks: List[float] = []
+        # every tap's samples, for the tap report
+        report_caps: List[tap_report.TapCapture] = []
 
         try:
             self._tap_plot_requested = write_tap_plot
@@ -1870,6 +1874,13 @@ class ProbeEddy(EddyNgSensor):
                     tapcfg=tapcfg,
                     bed_z=z_base,
                 )
+
+                if write_report:
+                    try:
+                        report_caps.append(tap_report.capture_tap(self, tap))
+                    except Exception as e:
+                        logging.exception("EDDYng: capturing a tap for the tap report failed")
+                        self._log_error(f"Failed to capture tap for the tap report: {e}")
 
                 if write_every_tap_plot:
                     try:
@@ -1931,6 +1942,29 @@ class ProbeEddy(EddyNgSensor):
                     plots.write_tap_plot(self, tap)
                 except Exception as e:
                     self._log_error(f"Failed to write tap plot: {e}")
+            if write_report:
+                self._write_tap_report(
+                    gcmd,
+                    report_caps,
+                    results,
+                    tap_z,
+                    tap_stddev,
+                    {
+                        "position": tap_position,
+                        "profile": self._tap_profile.name,
+                        "threshold": tap_threshold,
+                        "speed": tap_speed,
+                        "lift_speed": lift_speed,
+                        "samples": samples,
+                        "max_samples": max_samples,
+                        "samples_stddev": samples_stddev,
+                        "use_median": use_median,
+                        "drive_current": tap_drive_current,
+                        "adjust_z": gcmd.get_float("ADJUST_Z", self._tap_adjust_z),
+                        "start_z": tap_start_z + z_base,
+                        "target_z": target_z + z_base,
+                    },
+                )
 
         th = self._toolhead
 
@@ -1963,6 +1997,22 @@ class ProbeEddy(EddyNgSensor):
     # Summarize the descent and lift-off tap positions side by side, for
     # comparing the two, and say what tap_adjust_z would give the same Z=0
     # with the other tap_position
+    # Never fails the tap
+    def _write_tap_report(self, gcmd, caps, results, tap_z, tap_stddev, settings):
+        try:
+            header = {"command": gcmd.get_command() if hasattr(gcmd, "get_command") else "TAP"}
+            try:
+                pos = self._toolhead.get_position()
+                header["xy"] = [pos[0], pos[1]]
+            except Exception:
+                pass
+            path = tap_report.write_tap_report(self, caps, results, settings, tap_z, tap_stddev, header)
+            if path:
+                self._log_msg(f"Wrote tap report to {path}")
+        except Exception as e:
+            logging.exception("EDDYng: writing the tap report failed")
+            self._log_error(f"Failed to write tap report: {e}")
+
     def _log_tap_comparison(
         self,
         results: List[TapResult],

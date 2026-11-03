@@ -58,6 +58,7 @@ These can also be set per [tap profile](profiles.md#tap-profiles), except `tap_t
 
 - `write_tap_plot: False`: write a graph of the last tap in each `TAP` to `/tmp/tap.html`. Needs plotly.
 - `write_every_tap_plot: False`: with `write_tap_plot`, write a graph of every tap.
+- `write_tap_report: False`: write a report of all the taps in each `TAP` to `/tmp/tap-report.html` (see [Tap report](tap.md#tap-report)).
 - `max_errors: 0`: how many sensor errors in a row homing and tap ignore before failing.
 - `debug: False`: write detailed logs to `klippy.log` and per-tap sample files to `/tmp` (see [Debug files](advanced.md#debug-files)).
 - `allow_unsafe: False`: disable some safety checks. For development only.

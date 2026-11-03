@@ -137,6 +137,8 @@ class ProbeEddyParams:
     write_tap_plot: bool = False
     # whether to write the tap plot for every tap
     write_every_tap_plot: bool = False
+    # whether to write the tap report (all the taps of a TAP on one page)
+    write_tap_report: bool = False
     # maximum number of errors to allow in a row on the sensor
     max_errors: int = 0
     # whether to print lots of verbose debug info to the log
@@ -245,6 +247,7 @@ class ProbeEddyParams:
 
         self.write_tap_plot = config.getboolean("write_tap_plot", self.write_tap_plot)
         self.write_every_tap_plot = config.getboolean("write_every_tap_plot", self.write_every_tap_plot)
+        self.write_tap_report = config.getboolean("write_tap_report", self.write_tap_report)
 
         self.x_offset = config.getfloat("x_offset", self.x_offset)
         self.y_offset = config.getfloat("y_offset", self.y_offset)

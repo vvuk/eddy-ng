@@ -54,6 +54,7 @@ These `[probe_eddy_ng ...]` options change how the LDC1612 is configured. The `s
 |---|---|
 | `/tmp/eddy-calibration.csv`, `/tmp/eddy-calibration.html` | `CALIBRATE`, and `SETUP DEBUG=1` |
 | `/tmp/tap.html`, `/tmp/tap-<n>.html` | `TAP` with `write_tap_plot`/`PLOT=` (see [Tap graph](tap.md#tap-graph)) |
+| `/tmp/tap-report.html` | `TAP` with `write_tap_report`/`REPORT=1` (see [Tap report](tap.md#tap-report)) |
 | `/tmp/tap-samples-<n>.csv` | every tap, with `debug: true` |
 | `/tmp/eddy-probe-static.csv` | `PROBE_EDDY_NG_PROBE_STATIC SAVE=1` |
 | `/tmp/stream.csv` | `PROBE_EDDY_NG_STREAM_START` … `PROBE_EDDY_NG_STREAM_STOP` |

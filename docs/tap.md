@@ -89,6 +89,18 @@ At contact, Z flattens out while KinZ keeps going down. Here's a tap that never 
 
 ![untriggered tap graph](https://hackmd.io/_uploads/SJ21FvrDyg.png)
 
+
+## Tap report
+
+`PROBE_EDDY_NG_TAP REPORT=1` (or `write_tap_report: true` in your config) writes one page about all the taps of a `TAP` to `/tmp/tap-report.html`. It doesn't need plotly on the host; the page loads plotly.js from the internet when you open it.
+
+- The top shows the tap Z, whether enough taps agreed (and if not, by how much they missed), and the settings used.
+- **Tap positions** plots each tap's descent and lift-off Z, with mean ± 1σ bands. Filled markers are the taps that made up the tap Z; hollow ones were left out, and failed taps are marked with ✕. Beside it, the spread of each position with error bars.
+- **Lift-off − descent** shows the gap between the two positions for each tap.
+- **All taps, overlaid** lines up every tap at the moment it triggered: the tap signal against the threshold, and the sensor Z relative to each tap's descent Z, with the median across taps.
+- **Individual taps** has a small graph of each tap: sensor Z and toolhead Z, with the tap signal and threshold below.
+- **Tap data** lists every number for every tap, including the lift-off fit and why failed taps failed.
+
 ## Probing with tap
 
 On Klipper, probe commands take `METHOD=tap` to probe by touching the bed with the nozzle:

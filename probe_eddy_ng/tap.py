@@ -56,19 +56,24 @@ class TapConfig:
     trigger_freq: Optional[float] = None
 
 
+# The `samples` taps with the lowest standard deviation of probe_z, sorted
+# by probe_z, and that standard deviation. Needs at least `samples` taps.
+def tap_cluster(taps: List[TapResult], samples: int) -> Tuple[List[TapResult], float]:
+    # The lowest-stddev subset of a given size is always a run of
+    # consecutive values once they're sorted, so only those need checking.
+    taps = sorted(taps, key=lambda t: t.probe_z)
+    tap_zs = np.array([t.probe_z for t in taps])
+    start = min(range(len(taps) - samples + 1), key=lambda i: np.std(tap_zs[i : i + samples]))
+    return taps[start : start + samples], float(np.std(tap_zs[start : start + samples]))
+
+
 # Compute the average tap_z from a set of tap results, taking the cluster of
 # `samples` taps with the lowest standard deviation
 def compute_tap_z(taps: List[TapResult], samples: int, req_stddev: float, use_median: bool) -> Tuple[float, float, float]:
     if len(taps) < samples:
         return None, None, None
 
-    # The lowest-stddev subset of a given size is always a run of
-    # consecutive values once they're sorted, so only those need checking.
-    taps = sorted(taps, key=lambda t: t.probe_z)
-    tap_zs = np.array([t.probe_z for t in taps])
-    start = min(range(len(taps) - samples + 1), key=lambda i: np.std(tap_zs[i : i + samples]))
-    cluster = taps[start : start + samples]
-    std_min = float(np.std(tap_zs[start : start + samples]))
+    cluster, std_min = tap_cluster(taps, samples)
 
     if std_min > req_stddev:
         return None, std_min, None
