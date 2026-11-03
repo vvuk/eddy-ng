@@ -124,6 +124,7 @@ class ProbeEddy(EddyNgSensor):
 
         # The last tap Z value, in absolute axis terms. Used for status.
         self._last_tap_z = 0.0
+        self._last_tap_other_adjust = None
         # The last gcode offset applied after tap, either the tap
         # value, or 0.0 if HOME_Z=1
         self._last_tap_gcode_adjustment = 0.0
@@ -2058,17 +2059,24 @@ class ProbeEddy(EddyNgSensor):
             other, other_taps = "liftoff", [TapResult(probe_z=t.liftoff.z) for t in liftoffs]
         else:
             other, other_taps = "descent", [TapResult(probe_z=t.descent_z) for t in results]
+        # Remembered for the end of TAP's "Probe computed tap" message
+        self._last_tap_other_adjust = None
         other_z, _, _ = compute_tap_z(other_taps, samples, samples_stddev, use_median)
         if other_z is None:
-            self._log_msg(f"Not enough consistent {other} taps to say what tap_adjust_z would be with tap_position: {other}.")
             return
         tap_adjust_z = gcmd.get_float("ADJUST_Z", self._tap_adjust_z)
         # the same Z=0: other_z + other_adjust == tap_z + tap_adjust_z
-        other_adjust = tap_z + tap_adjust_z - other_z
-        self._log_msg(
-            f"With tap_position: {other}, tap_adjust_z{self._tap_adjust_z_target_str()} would be {other_adjust:.3f} "
-            f"(it's {tap_adjust_z:.3f} with {tap_position})."
-        )
+        self._last_tap_other_adjust = (other, tap_z + tap_adjust_z - other_z)
+
+    # "tap_adjust_z: 0.065 (would be 0.028 with liftoff)", for the end of
+    # TAP's message; what it would be with the other tap_position is left
+    # out when there weren't enough consistent taps there to say
+    def _tap_adjust_z_summary(self, tap_adjust_z: float) -> str:
+        s = f"tap_adjust_z{self._tap_adjust_z_target_str()}: {tap_adjust_z:.3f}"
+        other = getattr(self, "_last_tap_other_adjust", None)
+        if other is not None:
+            s += f" (would be {other[1]:.3f} with {other[0]})"
+        return s
 
     def cmd_TAP_next(self, gcmd: GCodeCommand, orig_drive_current: int):
         self._log_debug("\nEDDYng Tap begin")
@@ -2134,7 +2142,8 @@ class ProbeEddy(EddyNgSensor):
         self._log_msg(
             f"Probe computed tap at {computed_tap_z:.3f} (tap at z={tap_z:.3f}, "
             f"stddev {tap_stddev:.3f}) with {samples} samples, {homed_to_str}"
-            f"sensor offset {self._tap_offset:.3f} at z={self.params.home_trigger_height:.3f}"
+            f"sensor offset {self._tap_offset:.3f} at z={self.params.home_trigger_height:.3f}, "
+            f"{self._tap_adjust_z_summary(tap_adjust_z)}"
         )
 
         if do_retract:

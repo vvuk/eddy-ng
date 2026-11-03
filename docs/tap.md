@@ -65,12 +65,12 @@ Every tap reports both positions, and a summary at the end compares them:
 Tap 1: z=0.101 (descent 0.101, lift-off 0.124, lift-off - descent +0.023)
 ...
 Tap positions (descent used): descent mean 0.103 stddev 0.0047 (3 taps); lift-off mean 0.124 stddev 0.0012 (3 taps); lift-off - descent +0.021 (stddev 0.0040)
-With tap_position: liftoff, tap_adjust_z would be 0.044 (it's 0.065 with descent).
+Probe computed tap at 0.168 (tap at z=0.103, stddev 0.005) with 3 samples, ..., tap_adjust_z: 0.065 (would be 0.044 with liftoff)
 ```
 
 To use the lift-off position, set `tap_position: liftoff`, in `[probe_eddy_ng ...]` or in a [tap profile](profiles.md#tap-profiles), or pass `POSITION=liftoff` to `PROBE_EDDY_NG_TAP` for a single tap. A tap whose lift-off can't be found counts as a failed tap.
 
-The lift-off position is a different measurement, so switching changes where Z=0 ends up, usually making it higher. To keep the same Z=0, change `tap_adjust_z` to the value the last line of the summary gives. It's computed from that tap's own taps, so tap a few times and use a typical value. If you use per-material values, each one changes by the same amount. The [tap graph](#tap-graph) shows the start of the lift (dotted gray line) and the lift-off Z (dashed green line).
+The lift-off position is a different measurement, so switching changes where Z=0 ends up, usually making it higher. To keep the same Z=0, change `tap_adjust_z` to the "would be" value at the end of the last line. It's left out when there weren't enough consistent taps of the other kind to say. It's computed from that tap's own taps, so tap a few times and use a typical value. If you use per-material values, each one changes by the same amount. The [tap graph](#tap-graph) shows the start of the lift (dotted gray line) and the lift-off Z (dashed green line).
 
 ## Tap graph
 

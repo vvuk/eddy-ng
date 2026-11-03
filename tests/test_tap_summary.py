@@ -96,9 +96,12 @@ def result(descent, liftoff=None, error=None):
     return TapResult(probe_z=descent, descent_z=descent, liftoff=fit)
 
 
+# The comparison's messages, with the end of TAP's "Probe computed tap"
+# message (for the tap_adjust_z it used) appended last
 def summary(e, results, tap_position, tap_z, gcmd=None, samples=3, stddev=0.02, use_median=False):
-    e._log_tap_comparison(results, tap_position, tap_z, samples, stddev, use_median, gcmd or FakeGcmd())
-    return e._gcode.messages
+    gcmd = gcmd or FakeGcmd()
+    e._log_tap_comparison(results, tap_position, tap_z, samples, stddev, use_median, gcmd)
+    return e._gcode.messages + [e._tap_adjust_z_summary(gcmd.get_float("ADJUST_Z", e._tap_adjust_z))]
 
 
 def test_summary_suggests_liftoff_adjust():
@@ -109,7 +112,7 @@ def test_summary_suggests_liftoff_adjust():
     assert "lift-off mean 0.142" in msgs[0]
     assert "lift-off - descent +0.037" in msgs[0]
     # the same Z=0: 0.105 + 0.065 = 0.142 + 0.028
-    assert msgs[1] == "With tap_position: liftoff, tap_adjust_z would be 0.028 (it's 0.065 with descent)."
+    assert msgs[1] == "tap_adjust_z: 0.065 (would be 0.028 with liftoff)"
 
 
 def test_summary_suggests_descent_adjust():
@@ -117,16 +120,14 @@ def test_summary_suggests_descent_adjust():
     e._tap_profile.set_adjust_z("PETG", 0.030)
     results = [result(0.100, 0.140), result(0.110, 0.142), result(0.105, 0.144)]
     msgs = summary(e, results, "liftoff", tap_z=0.142)
-    assert msgs[1] == (
-        "With tap_position: descent, tap_adjust_z for PETG in tap profile 'textured' would be 0.067 (it's 0.030 with liftoff)."
-    )
+    assert msgs[1] == "tap_adjust_z for PETG in tap profile 'textured': 0.030 (would be 0.067 with descent)"
 
 
 def test_summary_uses_adjust_z_override():
     e = make_eddy()
     results = [result(0.100, 0.140), result(0.110, 0.142), result(0.105, 0.144)]
     msgs = summary(e, results, "descent", tap_z=0.105, gcmd=FakeGcmd(ADJUST_Z=0.1))
-    assert msgs[1] == "With tap_position: liftoff, tap_adjust_z would be 0.063 (it's 0.100 with descent)."
+    assert msgs[1] == "tap_adjust_z: 0.100 (would be 0.063 with liftoff)"
 
 
 def test_summary_combines_like_the_tap():
@@ -135,7 +136,7 @@ def test_summary_combines_like_the_tap():
     e = make_eddy(tap_adjust_z=0.0)
     results = [result(0.1, 0.20), result(0.1, 0.21), result(0.1, 0.30), result(0.1, 0.215)]
     msgs = summary(e, results, "descent", tap_z=0.1, use_median=True)
-    assert msgs[1] == "With tap_position: liftoff, tap_adjust_z would be -0.110 (it's 0.000 with descent)."
+    assert msgs[1] == "tap_adjust_z: 0.000 (would be -0.110 with liftoff)"
 
 
 def test_summary_without_enough_liftoffs():
@@ -143,7 +144,8 @@ def test_summary_without_enough_liftoffs():
     results = [result(0.100, 0.140), result(0.110, error="no contact found"), result(0.105)]
     msgs = summary(e, results, "descent", tap_z=0.105)
     assert "lift-off mean 0.140" in msgs[0] and "(1 taps)" in msgs[0]
-    assert msgs[1].startswith("Not enough consistent liftoff taps")
+    # not enough consistent lift-offs to say what it would be with liftoff
+    assert msgs[1] == "tap_adjust_z: 0.065"
 
     e = make_eddy()
     msgs = summary(e, [result(0.1), result(0.1), result(0.1)], "descent", tap_z=0.1)
