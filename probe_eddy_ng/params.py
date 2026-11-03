@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .compat import ConfigWrapper
 
@@ -101,6 +101,9 @@ class ProbeEddyParams:
     tap_samples: int = 3
     # The maximum number of tap samples.
     tap_max_samples: int = 5
+    # stop tapping after more than this many taps in a row fail (None: no
+    # limit, only tap_max_samples)
+    tap_max_consecutive_failures: Optional[int] = None
     # The maximum standard deviation for any 3 samples to be considered valid.
     tap_samples_stddev: float = 0.020
     # Use the median value instead of the mean
@@ -160,6 +163,7 @@ class ProbeEddyParams:
         "tap_speed": ("getfloat", dict(above=0.0)),
         "tap_samples": ("getint", dict(minval=1)),
         "tap_max_samples": ("getint", dict(minval=1)),
+        "tap_max_consecutive_failures": ("getint", dict(minval=0)),
         "tap_samples_stddev": ("getfloat", dict(above=0.0)),
         "tap_use_median": ("getboolean", dict()),
         "tap_time_position": ("getfloat", dict(minval=0.0, maxval=1.0)),
@@ -235,6 +239,7 @@ class ProbeEddyParams:
 
         self.tap_samples = config.getint("tap_samples", self.tap_samples, minval=1)
         self.tap_max_samples = config.getint("tap_max_samples", self.tap_max_samples, minval=self.tap_samples)
+        self.tap_max_consecutive_failures = config.getint("tap_max_consecutive_failures", self.tap_max_consecutive_failures, minval=0)
         self.tap_samples_stddev = config.getfloat("tap_samples_stddev", self.tap_samples_stddev, above=0.0)
         self.tap_use_median = config.getboolean("tap_use_median", self.tap_use_median)
         self.tap_trigger_safe_start_height = config.getfloat(

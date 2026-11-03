@@ -64,6 +64,7 @@ Every `PROBE_EDDY_NG_<name>` command is also available as `EDDYNG_<name>`. All o
 **`PROBE_EDDY_NG_TAP`** (`PETAP`): tap the bed at the current position to set Z (see [Tap](tap.md)). Parameters override the active tap profile's settings for this tap only:
 - `THRESHOLD=` (or `TT=`, `TAP_THRESHOLD=`): `tap_threshold`.
 - `SAMPLES=`, `MAX_SAMPLES=`, `SAMPLES_STDDEV=`, `USE_MEDIAN=`: `tap_samples`, `tap_max_samples`, `tap_samples_stddev`, `tap_use_median`.
+- `MAX_CONSECUTIVE_FAILURES=`: `tap_max_consecutive_failures`.
 - `START_Z=`, `TARGET_Z=`: `tap_start_z`, `tap_target_z`.
 - `SPEED=`: `tap_speed`.
 - `RETRACT_SPEED=`: speed to raise the toolhead.

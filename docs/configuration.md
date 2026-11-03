@@ -42,6 +42,7 @@ These can also be set per [tap profile](profiles.md#tap-profiles), except `tap_t
 - `tap_adjust_z_<material>`: `tap_adjust_z` for a material, e.g. `tap_adjust_z_petg`, used when the tap profile is loaded with that `MATERIAL=`.
 - `tap_samples: 3`: how many taps to combine.
 - `tap_max_samples: 5`: the most taps to try before giving up.
+- `tap_max_consecutive_failures`: give up after more than this many taps in a row fail (didn't trigger, sensor errors, and so on), instead of trying all `tap_max_samples`. `0` gives up at the first failed tap. Unset by default: no limit.
 - `tap_samples_stddev: 0.020`: the largest standard deviation a group of `tap_samples` taps can have to be used.
 - `tap_use_median: False`: use the median of the group instead of the mean.
 - `tap_time_position: 0.3`: where the tap is placed between the start of detection (0.0) and the moment the threshold was crossed (1.0).

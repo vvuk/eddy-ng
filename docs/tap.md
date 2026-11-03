@@ -51,6 +51,7 @@ Different filaments often need different values. [Tap profiles](profiles.md#tap-
   How strong the tap signal is depends on the printer: `tap_speed` (roughly proportionally), the sensor and how high it's mounted, and how much the toolhead flexes, so there's no threshold that suits every printer. [`PROBE_EDDY_NG_AUTO_SETUP`](calibration.md#automatic-setup-without-a-paper-test) measures one. When a tap doesn't trigger, the error says how high the signal got, e.g. `signal peaked at 210, threshold 250`; if the nozzle touched the bed, use a threshold of about half that peak.
 - **`tap_time_position`** (default 0.3): where the tap is placed between the start of detection (0.0) and the moment the threshold was crossed (1.0). Values from 0.2 to 0.5 tend to be most consistent.
 - **`tap_samples`, `tap_max_samples`, `tap_samples_stddev`**: tap takes up to `tap_max_samples` taps until any `tap_samples` of them are within `tap_samples_stddev` of each other, and uses their average (or median, with `tap_use_median: true`).
+- **`tap_max_consecutive_failures`**: with a large `tap_max_samples`, stops early when taps keep failing, e.g. when the threshold is too high, instead of tapping the bed over and over. Unset, tap tries all `tap_max_samples`.
 - **`tap_speed`** (default 3.0): faster taps can detect contact more clearly, but the toolhead keeps moving briefly after the trigger, so don't go much higher.
 - **`tap_start_z`** (default 3.0): the height each tap starts from. The tap drive current must be able to read from here down to `tap_target_z`.
 

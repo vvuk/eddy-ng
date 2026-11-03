@@ -266,3 +266,33 @@ def test_stop_on_miss():
     assert (taps[0]["tapcfg"].safe_freq, taps[0]["tapcfg"].trigger_freq) == (3.02e6, 3.03e6)
     assert "try THRESHOLD=105" in errors(e)[-1]
     assert moves[-1][2] == e.params.tap_start_z + 5.0
+
+
+def touched(z=0.0):
+    return TapResult(probe_z=z, descent_z=z, toolhead_z=z - 0.05)
+
+
+def test_max_consecutive_failures():
+    e, taps, moves = tapping_eddy([missed(200.0)] * 5)
+    with pytest.raises(CommandError, match="Tap failed"):
+        e.run_taps(FakeGcmd(MAX_CONSECUTIVE_FAILURES=1), 16)
+    # one failure is allowed, the second in a row stops
+    assert len(taps) == 2
+    assert "stopped after 2 failed taps in a row (tap_max_consecutive_failures is 1)" in errors(e)[-1]
+    assert moves[-1][2] == e.params.tap_start_z
+
+
+def test_max_consecutive_failures_counts_only_in_a_row():
+    e, taps, _ = tapping_eddy([missed(200.0), touched(), missed(200.0), touched(0.5), missed(200.0), missed(200.0), touched(), touched()])
+    with pytest.raises(CommandError, match="Tap failed"):
+        e.run_taps(FakeGcmd(SAMPLES=3, MAX_SAMPLES=8, MAX_CONSECUTIVE_FAILURES=1), 16)
+    assert len(taps) == 6
+    assert "stopped after 2 failed taps in a row" in errors(e)[-1]
+
+
+def test_max_consecutive_failures_from_config():
+    e, taps, _ = tapping_eddy([missed(200.0)] * 5)
+    e.params.tap_max_consecutive_failures = 0
+    with pytest.raises(CommandError, match="Tap failed"):
+        e.run_taps(FakeGcmd(), 16)
+    assert len(taps) == 1

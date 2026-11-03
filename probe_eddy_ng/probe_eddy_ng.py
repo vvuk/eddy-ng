@@ -1821,6 +1821,9 @@ class ProbeEddy(EddyNgSensor):
         samples: int = gcmd.get_int("SAMPLES", self.params.tap_samples, minval=1)
         max_samples: int = gcmd.get_int("MAX_SAMPLES", self.params.tap_max_samples, minval=samples)
         samples_stddev: float = gcmd.get_float("SAMPLES_STDDEV", self.params.tap_samples_stddev, above=0.0)
+        max_consecutive_failures: Optional[int] = gcmd.get_int(
+            "MAX_CONSECUTIVE_FAILURES", self.params.tap_max_consecutive_failures, minval=0
+        )
         use_median: bool = gcmd.get_int("USE_MEDIAN", 1 if self.params.tap_use_median else 0) == 1
         write_plot_arg: int = gcmd.get_int("PLOT", None)
         write_report: bool = gcmd.get_int("REPORT", 1 if self.params.write_tap_report else 0) == 1
@@ -1849,6 +1852,8 @@ class ProbeEddy(EddyNgSensor):
         tap_stddev = None
         tap_overshoot = None
         sample_err_count = 0
+        consecutive_failures = 0
+        stopped_on_failures = False
         tap = None
         # the signal peaks of taps that didn't trigger
         missed_peaks: List[float] = []
@@ -1902,6 +1907,10 @@ class ProbeEddy(EddyNgSensor):
                     sample_last_err = tap
                     if tap.missed and stop_on_miss:
                         break
+                    consecutive_failures += 1
+                    if max_consecutive_failures is not None and consecutive_failures > max_consecutive_failures:
+                        stopped_on_failures = True
+                        break
                     continue
 
                 liftoff = tap.liftoff
@@ -1912,10 +1921,15 @@ class ProbeEddy(EddyNgSensor):
                         sample_err_count += 1
                         tap.error = Exception(str(liftoff))
                         sample_last_err = tap
+                        consecutive_failures += 1
+                        if max_consecutive_failures is not None and consecutive_failures > max_consecutive_failures:
+                            stopped_on_failures = True
+                            break
                         continue
                     tap.probe_z = liftoff.z
                     tap.overshoot = liftoff.z - tap.toolhead_z
 
+                consecutive_failures = 0
                 results.append(tap)
 
                 if liftoff_ok:
@@ -1973,6 +1987,8 @@ class ProbeEddy(EddyNgSensor):
             # raise toolhead on failed tap
             th.manual_move([None, None, tap_start_z + z_base], lift_speed)
             err_msg = "Tap failed:"
+            if stopped_on_failures:
+                err_msg += f" stopped after {consecutive_failures} failed taps in a row (tap_max_consecutive_failures is {max_consecutive_failures})."
             if tap_stddev is not None:
                 err_msg += f" stddev {tap_stddev:.3f} > {samples_stddev:.3f}."
                 err_msg += " Consider adjusting tap_samples, tap_max_samples, or tap_samples_stddev."

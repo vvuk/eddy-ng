@@ -44,7 +44,7 @@ tap_adjust_z_petg: 0.040
 
 > ⚠️ **On Klipper, write tap profiles in `printer.cfg` itself, not in an `[include]`d file.** `PROBE_EDDY_NG_SET_TAP_ADJUST_Z` and `Z_OFFSET_APPLY_PROBE` save `tap_adjust_z` values through `SAVE_CONFIG`, and Klipper's `SAVE_CONFIG` fails with "conflicts with included value" if a value it's saving is also set in an included file. Until you remove the value from the included file, nothing else can be saved either, including calibrations. On Kalico, set `[danger_options] autosave_includes: True` and tap profiles can live in included files. See [Saving and include files](#saving-and-include-files).
 
-A tap profile can set `tap_threshold`, `tap_speed`, `tap_samples`, `tap_max_samples`, `tap_samples_stddev`, `tap_use_median`, `tap_time_position`, `tap_start_z`, `tap_target_z`, `tap_butter_lowcut`, `tap_butter_highcut`, `tap_butter_order`, `tap_position`, `reg_drive_current` and `tap_drive_current`. Settings it doesn't set come from `[probe_eddy_ng ...]`.
+A tap profile can set `tap_threshold`, `tap_speed`, `tap_samples`, `tap_max_samples`, `tap_max_consecutive_failures`, `tap_samples_stddev`, `tap_use_median`, `tap_time_position`, `tap_start_z`, `tap_target_z`, `tap_butter_lowcut`, `tap_butter_highcut`, `tap_butter_order`, `tap_position`, `reg_drive_current` and `tap_drive_current`. Settings it doesn't set come from `[probe_eddy_ng ...]`.
 
 ```
 PROBE_EDDY_NG_TAP_PROFILE LOAD=textured MATERIAL=PETG

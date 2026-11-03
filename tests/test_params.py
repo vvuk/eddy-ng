@@ -77,3 +77,10 @@ def test_tap_overrides():
     with pytest.raises(ConfigError, match="highcut"):
         base.with_tap_overrides({"tap_butter_highcut": 4.0}, ConfigError)
     assert not base.with_tap_overrides({"tap_butter_order": 3}, ConfigError).is_default_butter_config()
+
+
+def test_tap_max_consecutive_failures():
+    assert load().tap_max_consecutive_failures is None
+    assert load(tap_max_consecutive_failures=2).tap_max_consecutive_failures == 2
+    with pytest.raises(ConfigError, match="minimum"):
+        load(tap_max_consecutive_failures=-1)
