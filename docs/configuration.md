@@ -45,8 +45,8 @@ These can also be set per [tap profile](profiles.md#tap-profiles), except `tap_t
 - `tap_max_consecutive_failures`: give up after more than this many taps in a row fail (didn't trigger, sensor errors, and so on), instead of trying all `tap_max_samples`. `0` gives up at the first failed tap. Unset by default: no limit.
 - `tap_samples_stddev: 0.020`: the largest standard deviation a group of `tap_samples` taps can have to be used.
 - `tap_use_median: False`: use the median of the group instead of the mean.
-- `tap_time_position: 0.3`: where the tap is placed between the start of detection (0.0) and the moment the threshold was crossed (1.0).
-- `tap_position: descent`: experimental. `liftoff` places each tap where the nozzle left the bed as the toolhead lifted afterwards, instead of where the tap was detected on the way down. See [Lift-off position](tap.md#lift-off-position-experimental).
+- `tap_time_position: 0.3`: with `tap_position: descent`, where the tap is placed between the start of detection (0.0) and the moment the threshold was crossed (1.0).
+- `tap_position: liftoff`: where each tap is placed. `liftoff` uses where the nozzle left the bed as the toolhead lifted afterwards; `descent` uses where the tap was detected on the way down (the only option in older versions). See [Tap position](tap.md#tap-position).
 - `tap_trigger_safe_start_height`: a tap can only be detected once the sensor reads below this height. Defaults to half of `home_trigger_height`, and must be below it.
 - `tap_butter_lowcut: 5.0`, `tap_butter_highcut: 25.0`, `tap_butter_order: 2`: the band-pass filter used for tap detection. Order 1 to 4. Changing these needs scipy.
 

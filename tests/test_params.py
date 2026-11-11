@@ -14,7 +14,7 @@ def load(**options):
 def test_defaults():
     p = load()
     assert p.tap_threshold == 250.0
-    assert p.tap_position == "descent"
+    assert p.tap_position == "liftoff"
     assert p.tap_samples == 3 and p.tap_max_samples == 5
     assert p.y_offset == 20.0
     # half of home_trigger_height unless set
@@ -24,9 +24,9 @@ def test_defaults():
 
 
 def test_values():
-    p = load(tap_threshold=180, tap_position="liftoff", tap_use_median="true", tap_adjust_z=0.04, reg_drive_current=15)
+    p = load(tap_threshold=180, tap_position="descent", tap_use_median="true", tap_adjust_z=0.04, reg_drive_current=15)
     assert p.tap_threshold == 180.0
-    assert p.tap_position == "liftoff"
+    assert p.tap_position == "descent"
     assert p.tap_use_median is True
     assert p.tap_adjust_z == 0.04
     assert p.reg_drive_current == 15
@@ -66,10 +66,10 @@ def test_bigfoot_skips_the_rest():
 
 def test_tap_overrides():
     base = load()
-    p = base.with_tap_overrides({"tap_threshold": 100.0, "tap_position": "liftoff"}, ConfigError)
-    assert p.tap_threshold == 100.0 and p.tap_position == "liftoff"
+    p = base.with_tap_overrides({"tap_threshold": 100.0, "tap_position": "descent"}, ConfigError)
+    assert p.tap_threshold == 100.0 and p.tap_position == "descent"
     # a copy: the base is unchanged
-    assert base.tap_threshold == 250.0 and base.tap_position == "descent"
+    assert base.tap_threshold == 250.0 and base.tap_position == "liftoff"
     assert p.y_offset == 20.0
 
     with pytest.raises(ConfigError, match="tap_max_samples"):

@@ -4,9 +4,11 @@
 
 **Action needed when updating:**
 
+* Recalibrate: run `PROBE_EDDY_NG_SETUP` (or `PROBE_EDDY_NG_AUTO_SETUP`) again, for every plate. Calibrations from older versions aren't loaded, since taps changed (below).
 * Rebuild and flash the sensor firmware. eddy-ng now detects out-of-date sensor firmware at startup.
 * On Klipper, run `./install.sh` again. eddy-ng is now installed as a package in `klippy/extras/probe_eddy_ng/`.
 * The `wma` tap mode has been removed. If your config has `tap_mode: wma`, remove it, along with any `tap_threshold` tuned for it.
+* Taps now use the lift-off position by default (`tap_position: liftoff`), which usually puts Z=0 a little higher than before. Either set `tap_position: descent` to keep the old behavior, or re-tune `tap_adjust_z` (see [Tap position](tap.md#updating-from-a-version-that-used-the-descent-position)), and check Z=0 before printing.
 * `EDDYNG_BED_MESH_EXPERIMENTAL` has been removed. Use `BED_MESH_CALIBRATE METHOD=rapid_scan` on Kalico too (needs an October 2026 or newer Kalico).
 
 **New:**
@@ -23,7 +25,7 @@
 
 **Changed and fixed:**
 
-* Calibrations are saved in a new format (`calibration_version: 6`). Older calibrations still load, and are converted the next time they're saved.
+* Calibrations are saved in a new format (`calibration_version: 7`). Older calibrations aren't loaded; recalibrate after updating.
 * `debug` now defaults to off, so taps no longer write `/tmp/tap-samples-*.csv` unless it's enabled.
 * `[bed_mesh]` is no longer required.
 * `SETUP` and `CALIBRATE` no longer drop a `tap_adjust_z` saved by `SAVE_CONFIG`.

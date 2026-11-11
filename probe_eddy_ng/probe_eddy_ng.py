@@ -289,14 +289,15 @@ class ProbeEddy(EddyNgSensor):
         if not calibration_bad:
             for dc in calibrated_drive_currents:
                 fmap = ProbeEddyFrequencyMap(self)
-                if fmap.load_from_config(config, dc, version):
+                if fmap.load_from_config(config, dc):
                     plate.fmaps[dc] = fmap
         else:
             for dc in calibrated_drive_currents:
                 # read so that there are no warnings about unknown fields
                 _ = config.get(f"calibration_{dc}")
             plate_str = "" if plate.name == DEFAULT_PROFILE else f" for plate '{plate.name}'"
-            self.params._warning_msgs.append(f"EDDYng calibration{plate_str}: calibration data invalid, please recalibrate")
+            self.params._warning_msgs.append(f"EDDYng calibration{plate_str}: calibration data invalid, please recalibrate. "
+                "If this is after updating eddy-ng, also re-check tap_adjust_z: taps now use the lift-off position")
 
     # The calibration and drive currents come from the active plate, with
     # drive currents overridable by the active tap profile; tap_adjust_z

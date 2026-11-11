@@ -7,10 +7,8 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 from __future__ import annotations
 
-import base64
 import json
 import math
-import pickle
 from typing import List, Optional, Tuple, final, TYPE_CHECKING
 
 import numpy as np
@@ -26,10 +24,12 @@ if TYPE_CHECKING:
 
 @final
 class ProbeEddyFrequencyMap:
-    # Version 6 stores the calibration as JSON; version 5 (a pickle of numpy
-    # objects) can still be loaded, and is rewritten as 6 on the next save.
-    calibration_version = 6
-    loadable_calibration_versions = (5, 6)
+    # The calibration is stored as JSON. Version 7 is the same format as 6,
+    # but taps changed to the lift-off position by default, so calibrations
+    # from before that (and the tap_adjust_z tuned with them) need to be
+    # redone; older versions aren't loaded.
+    calibration_version = 7
+    loadable_calibration_versions = (7,)
     low_z_threshold = 5.0
 
     def __init__(self, eddy: ProbeEddy):
@@ -66,20 +66,13 @@ class ProbeEddyFrequencyMap:
             return None
         return npp.Polynomial(d["coef"], domain=d["domain"], window=d["window"])
 
-    def load_from_config(self, config: ConfigWrapper, drive_current: int, version: int):
+    def load_from_config(self, config: ConfigWrapper, drive_current: int):
         calibstr = config.get(f"calibration_{drive_current}", None)
         if calibstr is None:
             return False
 
-        if version == 5:
-            data = pickle.loads(base64.b64decode(calibstr))
-            if data.get("v", None) != 5:
-                self._eddy._log_info(f"Calibration for dc {drive_current} is old ({data.get('v')}), needs recalibration")
-                return False
-            ftoh, ftoh_high = data.get("ftoh"), data.get("ftoh_high")
-        else:
-            data = json.loads(calibstr)
-            ftoh, ftoh_high = self._poly_from_json(data["ftoh"]), self._poly_from_json(data.get("ftoh_high"))
+        data = json.loads(calibstr)
+        ftoh, ftoh_high = self._poly_from_json(data["ftoh"]), self._poly_from_json(data.get("ftoh_high"))
 
         dc = data.get("dc", None)
         if dc != drive_current:

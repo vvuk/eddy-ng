@@ -20,7 +20,9 @@ The old `wma` tap mode has been removed. Remove `tap_mode` from your config, and
 
 ### "calibration data invalid, please recalibrate"
 
-The saved calibration is from an eddy-ng version whose calibration format can't be loaded. Run `PROBE_EDDY_NG_SETUP` again.
+The saved calibration is from an older eddy-ng version, and can't be used with this one. Run `PROBE_EDDY_NG_SETUP` (or `PROBE_EDDY_NG_AUTO_SETUP`) again.
+
+If this happened after updating eddy-ng, taps now use the [lift-off position](tap.md#tap-position) by default, which changes where Z=0 ends up. Setup keeps your `tap_adjust_z`, so re-check it too (see [Updating from a version that used the descent position](tap.md#updating-from-a-version-that-used-the-descent-position)).
 
 ### Setup can't find homing or tap values
 

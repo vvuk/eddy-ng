@@ -12,6 +12,7 @@ from probe_eddy_ng.params import ProbeEddyParams
 from probe_eddy_ng.probe_eddy_ng import ProbeEddy
 from probe_eddy_ng.profiles import TapProfile
 from probe_eddy_ng.tap import TapConfig, TapResult, tap_filter_sos
+from probe_eddy_ng.liftoff import LiftoffFit
 
 SPS = 500.0
 
@@ -269,7 +270,7 @@ def test_stop_on_miss():
 
 
 def touched(z=0.0):
-    return TapResult(probe_z=z, descent_z=z, toolhead_z=z - 0.05)
+    return TapResult(probe_z=z, descent_z=z, toolhead_z=z - 0.05, liftoff=LiftoffFit(z=z))
 
 
 def test_max_consecutive_failures():

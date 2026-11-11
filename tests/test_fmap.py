@@ -1,7 +1,4 @@
 # The calibration: fitting heights to frequencies, and saving and loading it
-import base64
-import pickle
-
 import numpy as np
 import pytest
 
@@ -126,7 +123,7 @@ def test_save_and_load():
     assert set(saved) == {"calibration_16"}
 
     loaded = ProbeEddyFrequencyMap(FakeEddy())
-    assert loaded.load_from_config(FakeConfig(saved), 16, 6)
+    assert loaded.load_from_config(FakeConfig(saved), 16)
     freqs = eddy_freq(np.linspace(0.05, 14.5, 50))
     # floats round-trip exactly through the JSON
     assert np.array_equal(loaded.freqs_to_heights_np(freqs), fmap.freqs_to_heights_np(freqs))
@@ -134,27 +131,6 @@ def test_save_and_load():
     assert loaded.freq_range == tuple(fmap.freq_range)
     assert loaded._ftoh_rms == fmap._ftoh_rms
 
-    assert not ProbeEddyFrequencyMap(FakeEddy()).load_from_config(FakeConfig(saved), 17, 6)
+    assert not ProbeEddyFrequencyMap(FakeEddy()).load_from_config(FakeConfig(saved), 17)
     with pytest.raises(ConfigError, match="drive current mismatch"):
-        ProbeEddyFrequencyMap(FakeEddy()).load_from_config(FakeConfig({"calibration_17": saved["calibration_16"]}), 17, 6)
-
-
-def test_load_version_5():
-    # the older format: a pickle of the numpy polynomials
-    fmap, _, _ = calibrate()
-    data = {
-        "v": 5,
-        "dc": 16,
-        "ftoh": fmap._ftoh,
-        "ftoh_high": fmap._ftoh_high,
-        "h_range": fmap.height_range,
-        "f_range": fmap.freq_range,
-    }
-    config = FakeConfig({"calibration_16": base64.b64encode(pickle.dumps(data)).decode()})
-    loaded = ProbeEddyFrequencyMap(FakeEddy())
-    assert loaded.load_from_config(config, 16, 5)
-    assert loaded.freq_to_height(eddy_freq(2.0)) == fmap.freq_to_height(eddy_freq(2.0))
-
-    data["v"] = 4
-    config = FakeConfig({"calibration_16": base64.b64encode(pickle.dumps(data)).decode()})
-    assert not ProbeEddyFrequencyMap(FakeEddy()).load_from_config(config, 16, 5)
+        ProbeEddyFrequencyMap(FakeEddy()).load_from_config(FakeConfig({"calibration_17": saved["calibration_16"]}), 17)

@@ -49,28 +49,40 @@ Different filaments often need different values. [Tap profiles](profiles.md#tap-
 - **`tap_threshold`** (default 250): how far, in Hz, the filtered sensor signal must drop from its most recent peak to count as a tap. Lower values make shorter contact with the bed but risk triggering before contact. Use the [tap graph](#tap-graph) to pick the lowest value that doesn't trigger early, plus some margin. Try values with `PROBE_EDDY_NG_TAP THRESHOLD=...`. Different build plates may need different thresholds; [tap profiles](profiles.md) can hold them.
 
   How strong the tap signal is depends on the printer: `tap_speed` (roughly proportionally), the sensor and how high it's mounted, and how much the toolhead flexes, so there's no threshold that suits every printer. [`PROBE_EDDY_NG_AUTO_SETUP`](calibration.md#automatic-setup-without-a-paper-test) measures one. When a tap doesn't trigger, the error says how high the signal got, e.g. `signal peaked at 210, threshold 250`; if the nozzle touched the bed, use a threshold of about half that peak.
-- **`tap_time_position`** (default 0.3): where the tap is placed between the start of detection (0.0) and the moment the threshold was crossed (1.0). Values from 0.2 to 0.5 tend to be most consistent.
+- **`tap_time_position`** (default 0.3): only with `tap_position: descent`. Where the tap is placed between the start of detection (0.0) and the moment the threshold was crossed (1.0). Values from 0.2 to 0.5 tend to be most consistent.
 - **`tap_samples`, `tap_max_samples`, `tap_samples_stddev`**: tap takes up to `tap_max_samples` taps until any `tap_samples` of them are within `tap_samples_stddev` of each other, and uses their average (or median, with `tap_use_median: true`).
 - **`tap_max_consecutive_failures`**: with a large `tap_max_samples`, stops early when taps keep failing, e.g. when the threshold is too high, instead of tapping the bed over and over. Unset, tap tries all `tap_max_samples`.
 - **`tap_speed`** (default 3.0): faster taps can detect contact more clearly, but the toolhead keeps moving briefly after the trigger, so don't go much higher.
 - **`tap_start_z`** (default 3.0): the height each tap starts from. The tap drive current must be able to read from here down to `tap_target_z`.
 
-## Lift-off position (experimental)
+## Tap position
 
-Where the tap is detected on the way down depends on the threshold, the tap speed, and how much the printer flexes, which is what `tap_time_position` and `tap_adjust_z` make up for. eddy-ng also measures each tap a second way. As the toolhead lifts off the bed after a tap, the sensor's reading stays nearly constant while the nozzle is still pressed against the bed, then changes once it leaves. The toolhead Z at that change is where the nozzle stopped touching the bed. Klipper's own eddy probe tap uses the same idea.
+eddy-ng measures each tap two ways:
+
+- **Lift-off** (the default, `tap_position: liftoff`): as the toolhead lifts off the bed after a tap, the sensor's reading stays nearly constant while the nozzle is still pressed against the bed, then changes once it leaves. The toolhead Z at that change is where the nozzle stopped touching the bed. Klipper's own eddy probe tap uses the same idea.
+- **Descent** (`tap_position: descent`): where the tap was detected on the way down. This depends on the threshold, the tap speed, and how much the printer flexes, which is what `tap_time_position` and `tap_adjust_z` make up for. This was the only option in older versions of eddy-ng.
 
 Every tap reports both positions, and a summary at the end compares them:
 
 ```
-Tap 1: z=0.101 (descent 0.101, lift-off 0.124, lift-off - descent +0.023)
+Tap 1: z=0.124 (descent 0.101, lift-off 0.124, lift-off - descent +0.023)
 ...
-Tap positions (descent used): descent mean 0.103 stddev 0.0047 (3 taps); lift-off mean 0.124 stddev 0.0012 (3 taps); lift-off - descent +0.021 (stddev 0.0040)
-Probe computed tap at 0.168 (tap at z=0.103, stddev 0.005) with 3 samples, ..., tap_adjust_z: 0.065 (would be 0.044 with liftoff)
+Tap positions (liftoff used): descent mean 0.103 stddev 0.0047 (3 taps); lift-off mean 0.124 stddev 0.0012 (3 taps); lift-off - descent +0.021 (stddev 0.0040)
+Probe computed tap at 0.168 (tap at z=0.124, stddev 0.001) with 3 samples, ..., tap_adjust_z: 0.044 (would be 0.065 with descent)
 ```
 
-To use the lift-off position, set `tap_position: liftoff`, in `[probe_eddy_ng ...]` or in a [tap profile](profiles.md#tap-profiles), or pass `POSITION=liftoff` to `PROBE_EDDY_NG_TAP` for a single tap. A tap whose lift-off can't be found counts as a failed tap.
+A tap whose lift-off can't be found counts as a failed tap. To use the descent position instead, set `tap_position: descent`, in `[probe_eddy_ng ...]` or in a [tap profile](profiles.md#tap-profiles), or pass `POSITION=descent` to `PROBE_EDDY_NG_TAP` for a single tap.
 
-The lift-off position is a different measurement, so switching changes where Z=0 ends up, usually making it higher. To keep the same Z=0, change `tap_adjust_z` to the "would be" value at the end of the last line. It's left out when there weren't enough consistent taps of the other kind to say. It's computed from that tap's own taps, so tap a few times and use a typical value. If you use per-material values, each one changes by the same amount. The [tap graph](#tap-graph) shows the start of the lift (dotted gray line) and the lift-off Z (dashed green line).
+### Updating from a version that used the descent position
+
+The two positions are different measurements, so the switch to lift-off changes where Z=0 ends up, usually making it higher. If you tuned `tap_adjust_z` with an older version, either:
+
+- set `tap_position: descent` to keep everything as it was, or
+- tap, and change `tap_adjust_z` to the "would be" value at the end of the last line, which keeps the same Z=0 with lift-off. It's computed from that tap's own taps, so tap a few times and use a typical value. It's left out when there weren't enough consistent taps of the other kind to say. If you use per-material values, each one changes by the same amount.
+
+Either way, check Z=0 with paper (see [Check the result](#check-the-result)) before printing.
+
+The [tap graph](#tap-graph) shows the start of the lift (dotted gray line) and the lift-off Z (dashed green line).
 
 ## Tap graph
 
