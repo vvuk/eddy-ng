@@ -9,32 +9,48 @@ from pathlib import Path
 IS_MAC = os.path.isdir("/System/Library")
 
 SED_IN_PLACE_ARG = "-i ''" if IS_MAC else "-i"
-FILES_TO_COPY = {
-    "eddy-ng/sensor_ldc1612_ng.c": "src",
-    "probe_eddy_ng.py": "klippy/extras",
-    "ldc1612_ng.py": "klippy/extras"
-}
+
+# On Klipper, the python module is installed as a package directory in
+# klippy/extras, and the firmware source is added to src/
+KLIPPER_MODULE_DIR = "klippy/extras/probe_eddy_ng"
+KLIPPER_FIRMWARE_FILE = "src/sensor_ldc1612_ng.c"
+# Files that older versions installed individually into klippy/extras
+OLD_KLIPPER_FILES = [
+    "klippy/extras/probe_eddy_ng.py",
+    "klippy/extras/ldc1612_ng.py",
+    "klippy/extras/eddy_ng_bigfoot.py",
+]
+# Files and directories not to copy with --copy
+COPY_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc")
 
 
 def get_script_dir():
     return os.path.dirname(os.path.realpath(__file__))
 
 
+# The python package, installed as a Kalico plugin or a Klipper extra
+def get_module_dir():
+    return os.path.join(get_script_dir(), "probe_eddy_ng")
+
+
+def remove_path(path: str):
+    if os.path.islink(path) or os.path.isfile(path):
+        print(f"Removing {path}")
+        os.remove(path)
+    elif os.path.isdir(path):
+        print(f"Removing {path}/")
+        shutil.rmtree(path)
+
+
 def uninstall_klipper(target_dir: str):
-    for src_file, dest_dir in FILES_TO_COPY.items():
-        dest_path = os.path.join(target_dir, dest_dir)
-        dest_file = os.path.join(dest_path, os.path.basename(src_file))
-        if os.path.islink(dest_file) or os.path.isfile(dest_file):
-            print(f"Removing {dest_file}")
-            os.remove(dest_file)
-        else:
-            print(f"File {dest_file} does not exist. Skipping.")
+    for path in [KLIPPER_MODULE_DIR, KLIPPER_FIRMWARE_FILE] + OLD_KLIPPER_FILES:
+        remove_path(os.path.join(target_dir, path))
 
     print("Unpatching src/Makefile...")
     makefile_path = os.path.join(target_dir, "src/Makefile")
     os.system(f"sed {SED_IN_PLACE_ARG} 's, sensor_ldc1612_ng.c,,' '{makefile_path}'")
 
-    print("Unpatching klippy/extras/bed-mesh.py...")
+    print("Unpatching klippy/extras/bed_mesh.py...")
     bed_mesh_path = os.path.join(target_dir, "klippy/extras/bed_mesh.py")
     os.system(
         f"sed {SED_IN_PLACE_ARG} 's,\"eddy\" in probe_name #eddy-ng,probe_name.startswith(\"probe_eddy_current\"),' '{bed_mesh_path}'"
@@ -72,10 +88,10 @@ def install_kalico(target_dir: str, uninstall: bool, copy: bool):
         sys.exit(0)
 
     if copy:
-        shutil.copytree(get_script_dir(), python_module_path)
+        shutil.copytree(get_module_dir(), python_module_path, ignore=COPY_IGNORE)
         shutil.copytree(os.path.join(get_script_dir(), "eddy-ng"), firmware_module_path)
     else:
-        os.symlink(get_script_dir(), python_module_path)
+        os.symlink(get_module_dir(), python_module_path)
         os.symlink(os.path.join(get_script_dir(), "eddy-ng"), firmware_module_path)
 
     print("Installed links to firmware and plugin modules.")
@@ -89,31 +105,40 @@ def install_klipper(target_dir: str, uninstall: bool, copy: bool):
         uninstall_klipper(target_dir)
         return
 
-    print("Installing files...")
-    for src_file, dest_dir in FILES_TO_COPY.items():
-        src_path = os.path.join(get_script_dir(), src_file)
-        dest_path = os.path.join(target_dir, dest_dir)
-        dest_file = os.path.join(dest_path, os.path.basename(src_file))
+    # remove anything from a previous install, including the old per-file layout
+    for path in [KLIPPER_MODULE_DIR, KLIPPER_FIRMWARE_FILE] + OLD_KLIPPER_FILES:
+        remove_path(os.path.join(target_dir, path))
 
+    print("Installing files...")
+    for src_path, dest in (
+        (get_module_dir(), KLIPPER_MODULE_DIR),
+        (os.path.join(get_script_dir(), "eddy-ng/sensor_ldc1612_ng.c"), KLIPPER_FIRMWARE_FILE),
+    ):
+        dest_path = os.path.join(target_dir, dest)
         if copy:
-            print(f"Copying {src_file} to {dest_dir}/")
-            shutil.copyfile(src_file, dest_file)
+            print(f"Copying {src_path} to {dest}")
+            if os.path.isdir(src_path):
+                shutil.copytree(src_path, dest_path, ignore=COPY_IGNORE)
+            else:
+                shutil.copyfile(src_path, dest_path)
         else:
-            link_path = os.path.relpath(os.path.realpath(src_path), dest_path)
-            print(f"Linking {link_path} to {dest_dir}/")
-            if os.path.islink(dest_file) or os.path.exists(dest_file):
-                os.remove(dest_file)
-            os.symlink(link_path, dest_file)
+            link_path = os.path.relpath(os.path.realpath(src_path), os.path.dirname(dest_path))
+            print(f"Linking {dest} to {link_path}")
+            os.symlink(link_path, dest_path)
 
     print("Patching src/Makefile...")
     makefile_path = os.path.join(target_dir, "src/Makefile")
     os.system(f"sed {SED_IN_PLACE_ARG} 's,sensor_ldc1612.c$,sensor_ldc1612.c sensor_ldc1612_ng.c,' '{makefile_path}'")
 
-    print("Patching klippy/extras/bed-mesh.py...")
+    # Klipper only allows BED_MESH_CALIBRATE METHOD=rapid_scan with probe_eddy_current
+    print("Patching klippy/extras/bed_mesh.py...")
     bed_mesh_path = os.path.join(target_dir, "klippy/extras/bed_mesh.py")
     os.system(
         f"sed {SED_IN_PLACE_ARG} 's,probe_name.startswith(\"probe_eddy_current\"),\"eddy\" in probe_name #eddy-ng,' '{bed_mesh_path}'"
     )
+    with open(bed_mesh_path) as f:
+        if "#eddy-ng" not in f.read():
+            print("Warning: couldn't patch bed_mesh.py; BED_MESH_CALIBRATE METHOD=rapid_scan won't be available with eddy-ng")
 
 
 def main():

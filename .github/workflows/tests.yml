@@ -1,0 +1,26 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # the oldest Python eddy-ng supports, and a current one
+        python-version: ["3.8", "3.13"]
+        # printers often don't have scipy
+        scipy: ["with", "without"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Run tests
+        run: |
+          if [ "${{ matrix.scipy }}" = with ]; then
+            uv run --python ${{ matrix.python-version }} pytest
+          else
+            uv run --python ${{ matrix.python-version }} --exact --no-dev --with pytest pytest
+          fi
