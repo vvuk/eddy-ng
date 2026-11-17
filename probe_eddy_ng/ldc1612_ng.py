@@ -564,11 +564,12 @@ class LDC1612_ng:
         return " ".join(flags)
 
     def data_error_to_str(self, d: int):
+        # bits 28-31 of a sample (match SAMPLE_ERR_* in sensor_ldc1612_ng.c)
         err_bits = [
-            "Under-range",
-            "Over-range",
-            "Watchdog",
             "Amplitude",
+            "Watchdog",
+            "Over-range",
+            "Under-range",
         ]
         d = d >> 28
         if d == 0:

@@ -26,6 +26,7 @@
 **Changed and fixed:**
 
 * Generic `ldc1612` sensors use a reference divider of 1 (12MHz) again. With 2, sensors whose coil runs above 6MHz, like the Sovol Eddy, returned only over-range readings. If you set `ldc_fref_divider: 1` to work around this, you can remove it. `btt_eddy` is unchanged.
+* Sensor error messages named the wrong errors (e.g. over-range was reported as "Watchdog"). They now match what the sensor reports.
 * Calibrations are saved in a new format (`calibration_version: 7`). Older calibrations aren't loaded; recalibrate after updating.
 * `debug` now defaults to off, so taps no longer write `/tmp/tap-samples-*.csv` unless it's enabled.
 * `[bed_mesh]` is no longer required.

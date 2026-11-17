@@ -20,9 +20,10 @@ from .tap import TapConfig
 if TYPE_CHECKING:
     from .probe_eddy_ng import ProbeEddy
 
-# Bit 3 of a sample's error nibble: amplitude error. Far from the bed this is
-# usually the amplitude being too high, which is why homing ignores it too.
-SAMPLE_ERR_AMPLITUDE = 1 << 3
+# Bit 3 of a sample's error nibble: under-range (SAMPLE_ERR_UR in
+# sensor_ldc1612_ng.c). This is what the sensor reports when it's out of
+# range far from the bed.
+SAMPLE_ERR_UNDER_RANGE = 1 << 3
 
 
 @dataclass
@@ -101,7 +102,7 @@ class ProbeEddyZeroFinder:
         self._th.manual_move([None, None, z], speed)
 
     # Read the frequency with the toolhead standing still. Returns None if
-    # every sample had an amplitude error, which far from the bed means it's
+    # every sample was under-range, which far from the bed means it's
     # out of the sensor's range; raises on any other errors.
     def _read(self) -> Optional[FreqReading]:
         eddy = self.eddy
@@ -131,7 +132,7 @@ class ProbeEddyZeroFinder:
         err_bits = 0
         for r in raw[(raw >> 28) != 0]:
             err_bits |= int(r) >> 28
-        if len(valid) == 0 and err_bits == SAMPLE_ERR_AMPLITUDE:
+        if len(valid) == 0 and err_bits == SAMPLE_ERR_UNDER_RANGE:
             return None
         raise self._printer.command_error(
             f"Auto setup: sensor errors {eddy._sensor.data_error_to_str(err_bits << 28)} "
