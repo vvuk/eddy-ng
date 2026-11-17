@@ -43,7 +43,7 @@ These `[probe_eddy_ng ...]` options change how the LDC1612 is configured. The `s
 - `ldc_deglitch` (`1mhz`, `3.3mhz`, `10mhz` or `33mhz`; default `10mhz`): the input deglitch filter. Pick the lowest setting above the sensor's oscillation frequency.
 - `ldc_settle_time`: the settle time before each conversion, in seconds.
 - `ldc_offset`: a frequency offset in Hz that the chip subtracts before conversion.
-- `ldc_fref_divider`, `ldc_fin_divider`: the reference and input clock dividers.
+- `ldc_fref_divider`, `ldc_fin_divider`: the reference and input clock dividers. The reference frequency (clock / `ldc_fref_divider`) must be above the coil frequency, or every reading is over-range.
 - `sensor_type: ldc1612_internal_clk`: a generic LDC1612 running from its internal oscillator, for boards with no external clock.
 
 `LDC_NG_DUMP` shows the current register settings, and `LDC_NG_SET` (`DEGLITCH=`, `OFFSET=`, `SETTLE=` in ms, `RCOUNT=` in ms) changes them at runtime for experimenting. `LDC_NG_CALIBRATE_DRIVE_CURRENT` asks the chip for a starting drive current; run it with the sensor about 10mm above the bed.

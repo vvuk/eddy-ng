@@ -22,6 +22,7 @@ Build and flash Klipper firmware with eddy-ng for the MCU the LDC1612 is connect
 ```
 [probe_eddy_ng my_probe]
 sensor_type: ldc1612              # 12MHz external clock
+#sensor_type: sovol_eddy           # Sovol Eddy (e.g. on the SV08)
 #sensor_type: ldc1612_internal_clk  # no external clock
 i2c_mcu: ...
 i2c_bus: ...

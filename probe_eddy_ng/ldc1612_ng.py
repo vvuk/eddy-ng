@@ -53,6 +53,8 @@ PRODUCT_BTT_EDDY = 1
 PRODUCT_CARTOGRAPHER = 2
 PRODUCT_MELLOW_FLY = 3
 PRODUCT_LDC1612_INTERNAL_CLK = 4
+# Python-side only: the firmware treats it like a generic ldc1612
+PRODUCT_SOVOL_EDDY = 5
 
 # should match sensor_ldc1612_ng.c
 HOME_MODE_HOME = 1
@@ -299,6 +301,7 @@ class LDC1612_ng:
             "cartographer": PRODUCT_CARTOGRAPHER,
             "mellow_fly": PRODUCT_MELLOW_FLY,
             "ldc1612_internal_clk": PRODUCT_LDC1612_INTERNAL_CLK,
+            "sovol_eddy": PRODUCT_SOVOL_EDDY,
         }
         self._device_product = config.getchoice("sensor_type", device_choices)
 
@@ -327,11 +330,14 @@ class LDC1612_ng:
             self._ldc_fref_divider = 1
             self.default_drive_current = 15
             self.drive_current_range = (14, 20)
-        else:  # Generic/BTT Eddy using external 12MHz clock source
+        else:  # Generic/BTT/Sovol Eddy using external 12MHz clock source
             self._ldc_freq_clk = 12_000_000
             self.settle_time = 0.005
             self._ldc_fin_divider = 1
-            self._ldc_fref_divider = 2
+            # f_REF must stay above the coil frequency or readings saturate
+            # (over-range). The BTT Eddy's coil is slow enough for 6MHz; other
+            # coils (e.g. the Sovol Eddy's, ~8.5MHz) need the full 12MHz.
+            self._ldc_fref_divider = 2 if self._device_product == PRODUCT_BTT_EDDY else 1
             self.default_drive_current = 15
             self.drive_current_range = (14, 20)
 
@@ -370,6 +376,7 @@ class LDC1612_ng:
         # params ending in "_pin" are magic and are a %s on this side, but %c on
         # the native side. There doesn't seem to be a way to pass "no pin". So we
         # need two separate config commands.
+        mcu_product = PRODUCT_UNKNOWN if self._device_product == PRODUCT_SOVOL_EDDY else self._device_product
         if config.get("intb_pin", None) is not None:
             ppins = config.get_printer().lookup_object("pins")
             pin_params = ppins.lookup_pin(config.get("intb_pin"))
@@ -377,10 +384,10 @@ class LDC1612_ng:
                 raise config.error("ldc1612 intb_pin must be on same mcu")
             mcu.add_config_cmd(
                 "config_ldc1612_ng_with_intb oid=%d i2c_oid=%d product=%i intb_pin=%s"
-                % (oid, self._i2c.get_oid(), self._device_product, pin_params["pin"])
+                % (oid, self._i2c.get_oid(), mcu_product, pin_params["pin"])
             )
         else:
-            mcu.add_config_cmd("config_ldc1612_ng oid=%d i2c_oid=%d product=%i" % (oid, self._i2c.get_oid(), self._device_product))
+            mcu.add_config_cmd("config_ldc1612_ng oid=%d i2c_oid=%d product=%i" % (oid, self._i2c.get_oid(), mcu_product))
 
         # Make sure the sensor is stopped on restart
         mcu.add_config_cmd(

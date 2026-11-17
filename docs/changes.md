@@ -21,10 +21,11 @@
 * Z homing works with Klipper v0.13.0-665 and newer, which home Z through the probe.
 * Experimental [nozzle alignment](nozzle-alignment.md) for toolchangers with an upward-facing sensor.
 * All commands are also available as `EDDYNG_<name>`, and take `SENSOR=` to choose a sensor.
-* New sensor options: `ldc_offset`, `ldc_settle_time`, `ldc_fref_divider`, `ldc_fin_divider`, and `sensor_type: ldc1612_internal_clk`. New commands: `LDC_NG_DUMP`, `LDC_NG_SET`, `LDC_NG_RESET`, `PROBE_EDDY_NG_STREAM_START`/`_STOP`.
+* New sensor options: `ldc_offset`, `ldc_settle_time`, `ldc_fref_divider`, `ldc_fin_divider`, and `sensor_type: ldc1612_internal_clk` and `sovol_eddy`. New commands: `LDC_NG_DUMP`, `LDC_NG_SET`, `LDC_NG_RESET`, `PROBE_EDDY_NG_STREAM_START`/`_STOP`.
 
 **Changed and fixed:**
 
+* Generic `ldc1612` sensors use a reference divider of 1 (12MHz) again. With 2, sensors whose coil runs above 6MHz, like the Sovol Eddy, returned only over-range readings. If you set `ldc_fref_divider: 1` to work around this, you can remove it. `btt_eddy` is unchanged.
 * Calibrations are saved in a new format (`calibration_version: 7`). Older calibrations aren't loaded; recalibrate after updating.
 * `debug` now defaults to off, so taps no longer write `/tmp/tap-samples-*.csv` unless it's enabled.
 * `[bed_mesh]` is no longer required.

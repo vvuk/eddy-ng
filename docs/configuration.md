@@ -6,7 +6,7 @@ These options go in the `[probe_eddy_ng <name>]` section. Defaults are shown; op
 
 ## Sensor
 
-- `sensor_type`: `btt_eddy`, `cartographer`, `mellow_fly`, `ldc1612` (a generic LDC1612 with a 12MHz external clock) or `ldc1612_internal_clk` (a generic LDC1612 using its internal oscillator). Sets the clock settings, the default drive current and the drive currents `SETUP` tries.
+- `sensor_type`: `btt_eddy`, `sovol_eddy`, `cartographer`, `mellow_fly`, `ldc1612` (a generic LDC1612 with a 12MHz external clock) or `ldc1612_internal_clk` (a generic LDC1612 using its internal oscillator). Sets the clock settings, the default drive current and the drive currents `SETUP` tries.
 - `i2c_mcu`, `i2c_bus`: where the sensor is connected. The other standard Klipper I2C options also work.
 - `i2c_address: 42`: the sensor's I2C address.
 - `i2c_speed: 400000`
